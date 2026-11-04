@@ -813,7 +813,13 @@ async fn github_callback_page(
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (
+                        header::CONTENT_SECURITY_POLICY,
+                        "default-src 'none'; style-src 'unsafe-inline'",
+                    ),
+                ],
                 Html(
                     r#"<html><body style="font:14px sans-serif;padding:40px">
                         <p>Missing authorization code from GitHub.</p>
@@ -834,7 +840,13 @@ async fn github_callback_page(
     {
         return (
             StatusCode::BAD_REQUEST,
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'",
+                ),
+            ],
             Html(
                 r#"<html><body style="font:14px sans-serif;padding:40px">
                     <p>Invalid authorization code.</p>
@@ -915,7 +927,15 @@ async fn github_callback_page(
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // The page exchanges the code with an inline script; the global
+            // `script-src 'self'` would block it.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+            ),
+        ],
         Html(html),
     )
 }
