@@ -627,17 +627,14 @@ fn build_manifest(public_url: &str) -> serde_json::Value {
             "checks": "write",
             "contents": "write",
             "issues": "read",
-            "metadata": "read",
-            "emails": "read",
-            "reactions": "read"
+            "metadata": "read"
         },
+        // `installation`/`installation_repositories` are delivered to every app
+        // and cannot be subscribed to. `reaction` is not a webhook event.
         "default_events": [
             "pull_request",
             "issue_comment",
-            "reaction",
-            "pull_request_review_thread",
-            "installation",
-            "installation_repositories"
+            "pull_request_review_thread"
         ]
     })
 }
