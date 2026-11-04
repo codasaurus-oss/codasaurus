@@ -695,7 +695,14 @@ async fn github_manifest_page(
 
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // The page auto-submits inline; the global `script-src 'self'` would block it.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action https://github.com",
+            ),
+        ],
         Html(html),
     ))
 }
