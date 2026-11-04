@@ -86,7 +86,7 @@ fn main() -> Result<()> {
                 _ => "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into(),
             };
 
-            let bot_config = std::env::var("GITHUB_APP_ID").ok().and_then(|_| {
+            let bot_config = if crate::util::env_set("GITHUB_APP_ID") {
                 match github_jwt::require_private_key_from_env() {
                     Ok(key) => Some(bot::BotConfig {
                         app_id: std::env::var("GITHUB_APP_ID").unwrap(),
@@ -101,7 +101,9 @@ fn main() -> Result<()> {
                         None
                     }
                 }
-            });
+            } else {
+                None
+            };
 
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(serve::serve(host, port, &database_url, bot_config))?;
