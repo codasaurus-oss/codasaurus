@@ -626,7 +626,7 @@ fn build_manifest(public_url: &str) -> serde_json::Value {
             "pull_requests": "write",
             "checks": "write",
             "contents": "write",
-            "issues": "read",
+            "issues": "write",
             "metadata": "read"
         },
         // `installation`/`installation_repositories` are delivered to every app

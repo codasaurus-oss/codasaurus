@@ -14,12 +14,19 @@ Codasaurus reviews PRs as a **GitHub App**. Prefer the dashboard [onboarding wiz
 | ------------- | ------------------------------------------ | ------------------------------------------------- |
 | Pull requests | Read & Write                               | Reviews, comments, labels, requested reviewers    |
 | Contents      | Read & Write (Write for `@codasaurus fix`) | Diffs, file fetch, optional branch writes         |
-| Issues        | Read & Write                               | Linked-issue context, assessment                  |
+| Issues        | Read & Write                               | PR/issue comments, labels, linked-issue context   |
 | Checks        | Read & Write                               | Optional Check Runs                               |
-| Reactions     | Read                                       | 👎 / confused on finding comments → learn dismiss |
 | Metadata      | Read                                       | Required baseline                                 |
 
-**Subscribe to events:** `Pull request` · `Issue comment` · `Reaction` · `Installation` · `Installation repositories`
+**Subscribe to events:** `Pull request` · `Issue comment` · `Pull request review thread`
+
+`Installation` and `Installation repositories` are delivered to every GitHub App
+automatically and cannot be subscribed to (or set in a manifest).
+
+There is **no `reaction` webhook event**. GitHub never pushes one, so the
+👎-to-dismiss path cannot be event-driven; the handler is dormant until a poller
+reads reactions through the API. Resolving a review thread still works, and that
+path is subscribed above.
 
 Webhook URL: `https://<your-host>/webhook` (trailing slash is also accepted).
 Generate a secret: `openssl rand -hex 32`.
