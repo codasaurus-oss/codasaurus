@@ -158,14 +158,14 @@ async fn setup_status(
         .ok()
         .flatten()
         .is_some()
-        || std::env::var("GITHUB_APP_ID").is_ok();
+        || crate::util::env_set("GITHUB_APP_ID");
 
     let llm = get_config(&state.pool, "llm_provider")
         .await
         .ok()
         .flatten()
         .is_some()
-        || std::env::var("OPENROUTER_API_KEY").is_ok();
+        || crate::util::env_set("OPENROUTER_API_KEY");
 
     let admin: bool = crate::db::db_scalar!(
         &state.pool,
@@ -341,9 +341,9 @@ async fn get_llm_config(
         .ok()
         .flatten()
         .or_else(|| {
-            if std::env::var("OPENROUTER_API_KEY").is_ok() {
+            if crate::util::env_set("OPENROUTER_API_KEY") {
                 Some("openrouter".into())
-            } else if std::env::var("CODASAURUS_BASE_URL").is_ok() {
+            } else if crate::util::env_set("CODASAURUS_BASE_URL") {
                 Some("custom".into())
             } else {
                 None

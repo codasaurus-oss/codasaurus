@@ -295,7 +295,7 @@ pub async fn apply_db_to_env(pool: &DbPool) {
         .map(|e| (e.key.as_str(), e.value.as_str()))
         .collect();
     for (db_key, env_key) in ENV_MIRROR_KEYS {
-        if std::env::var(env_key).is_ok() {
+        if crate::util::env_set(env_key) {
             continue;
         }
         if let Some(v) = map.get(db_key) {

@@ -38,7 +38,7 @@ async fn install_url(State(state): State<AppState>) -> Result<Json<serde_json::V
         })));
     }
 
-    if std::env::var("GITHUB_APP_ID").is_ok() {
+    if crate::util::env_set("GITHUB_APP_ID") {
         return Ok(Json(json!({
             "url": null,
             "error": "GitHub App slug is unknown, so no direct install link exists. Open https://github.com/settings/apps, pick your app, and install it from there — or set GITHUB_APP_SLUG to the app slug."
@@ -70,7 +70,7 @@ async fn manage_url(State(state): State<AppState>) -> Result<Json<serde_json::Va
         return Ok(Json(json!({ "url": url })));
     }
 
-    if std::env::var("GITHUB_APP_ID").is_ok() {
+    if crate::util::env_set("GITHUB_APP_ID") {
         return Ok(Json(json!({
             "url": null,
             "error": "GitHub App slug is unknown, so no direct install link exists. Open https://github.com/settings/apps, pick your app, and install it from there — or set GITHUB_APP_SLUG to the app slug."

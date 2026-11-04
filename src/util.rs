@@ -22,9 +22,27 @@ pub fn env_flag(name: &str) -> bool {
     std::env::var(name).ok().is_some_and(|v| flag_truthy(&v))
 }
 
+/// True when an env var holds an actual value. Compose files commonly inject
+/// `${VAR:-}` placeholders, so presence alone is not enough to treat it as set.
+pub fn env_set(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| !v.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_set_ignores_empty_values() {
+        std::env::set_var("CODASAURUS_TEST_ENV_SET", "");
+        assert!(!env_set("CODASAURUS_TEST_ENV_SET"));
+        std::env::set_var("CODASAURUS_TEST_ENV_SET", "  ");
+        assert!(!env_set("CODASAURUS_TEST_ENV_SET"));
+        std::env::set_var("CODASAURUS_TEST_ENV_SET", "value");
+        assert!(env_set("CODASAURUS_TEST_ENV_SET"));
+        std::env::remove_var("CODASAURUS_TEST_ENV_SET");
+        assert!(!env_set("CODASAURUS_TEST_ENV_SET"));
+    }
 
     #[test]
     fn flag_truthy_accepts_common_forms() {
