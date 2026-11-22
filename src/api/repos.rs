@@ -42,7 +42,9 @@ pub fn router() -> Router<AppState> {
 #[utoipa::path(get, path = "/api/repos", tag = "repos", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn list_repos(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_role(&state.pool, &headers, super::rbac::MinRole::Viewer).await?;
     let repos = db::repos::list_repos(&state.pool).await?;
     Ok(Json(json!(repos)))
 }
@@ -216,8 +218,10 @@ async fn sync_repos(
 #[utoipa::path(get, path = "/api/repos/{id}", tag = "repos", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_repo(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_repo_read(&state, &headers, id).await?;
     let repo = db::repos::get_repo(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Repo {id} not found")))?;
