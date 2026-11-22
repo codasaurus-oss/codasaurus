@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Major bumps need code changes; handle them deliberately rather than as
+    # a permanent queue of red PRs. Security updates are unaffected.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       cargo-patch:
         update-types: ["patch"]
