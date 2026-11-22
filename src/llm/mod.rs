@@ -1163,6 +1163,7 @@ fn system_message_content(system_prompt: &str, model: &str, base_url: &str) -> s
 }
 
 /// One attempt at a plain-text chat completion against a specific endpoint.
+#[allow(clippy::too_many_arguments)]
 async fn chat_completion_text_once(
     client: &reqwest::Client,
     base_url: &str,

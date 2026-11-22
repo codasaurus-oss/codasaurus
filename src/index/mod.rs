@@ -160,6 +160,8 @@ pub async fn callers_markdown(
 }
 
 /// Incremental: re-index one changed file.
+// Flat parameters keep the (few) call sites obvious; a struct would only move them.
+#[allow(clippy::too_many_arguments)]
 pub async fn reindex_file(
     pool: &crate::db::DbPool,
     client: &reqwest::Client,

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 const TTL_SECS: u64 = 300;
 
-static CACHE: LazyLock<RwLock<HashMap<String, (Vec<Value>, Instant)>>> =
+type CachedTools = (Vec<Value>, Instant);
+
+static CACHE: LazyLock<RwLock<HashMap<String, CachedTools>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub async fn get_or_fetch_tools(server_id: &str, base_url: &str, api_key: &str) -> Vec<Value> {
