@@ -966,6 +966,11 @@ async fn github_callback_page(
     )
 }
 
+fn github_conversion_error(status: reqwest::StatusCode, upstream_body: &str) -> ApiError {
+    tracing::error!("GitHub manifest conversion failed (HTTP {status}): {upstream_body}");
+    ApiError::bad_request(format!("GitHub manifest conversion failed (HTTP {status})"))
+}
+
 /// POST /api/setup/github/callback
 async fn github_callback(
     State(state): State<AppState>,
@@ -992,9 +997,7 @@ async fn github_callback(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
-        return Err(ApiError::bad_request(format!(
-            "GitHub manifest conversion failed (HTTP {status}): {text}"
-        )));
+        return Err(github_conversion_error(status, &text));
     }
 
     let data: serde_json::Value = resp
@@ -1113,4 +1116,24 @@ async fn setup_admin(
     })?;
 
     Ok(Json(json!({ "status": "ok" })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_conversion_error_body_omits_upstream_text() {
+        let err =
+            github_conversion_error(reqwest::StatusCode::BAD_REQUEST, "upstream-secret-token");
+        let text = format!("{err:?}");
+        assert!(
+            !text.contains("upstream-secret-token"),
+            "error leaked upstream text: {text}"
+        );
+        assert!(
+            text.contains("GitHub manifest conversion failed"),
+            "unexpected error: {text}"
+        );
+    }
 }
