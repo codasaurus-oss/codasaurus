@@ -1,6 +1,6 @@
 [package]
 name = "codasaurus"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.90"
 description = "Self-hosted GitHub App PR review agent — Tier-1 detectors, BYOK LLM, walkthroughs, and slash commands."
