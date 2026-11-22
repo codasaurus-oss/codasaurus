@@ -89,7 +89,7 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                     Ok(None) => {
                         idle_ticks = idle_ticks.saturating_add(1);
                         // ~every 60s of idle (2s poll × 30) — only worker 0 runs cleanup
-                        if worker_id == 0 && idle_ticks % 30 == 0 {
+                        if worker_id == 0 && idle_ticks.is_multiple_of(30) {
                             crate::bot::maintenance::run_periodic_cleanup(&pool).await;
                         }
                         tokio::select! {
