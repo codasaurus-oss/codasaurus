@@ -848,7 +848,7 @@ Be direct. No padding."#
     );
     crate::metrics::record_llm_request(user_prompt.len() + system_prompt.len(), 220, false);
 
-    let raw = chat_completion_text(client, config, system_prompt, &user_prompt, 220).await?;
+    let raw = chat_completion_text(client, config, system_prompt, &user_prompt, 600).await?;
     Ok(truncate_chars(raw.trim(), 600))
 }
 
@@ -891,7 +891,7 @@ Cover: what changed and why, notable files/modules, and what to test or watch fo
 Do not invent behavior not supported by the title, description, or file list."#
     );
     crate::metrics::record_llm_request(user_prompt.len() + system_prompt.len(), 768, false);
-    chat_completion_text(client, config, system_prompt, &user_prompt, 768).await
+    chat_completion_text(client, config, system_prompt, &user_prompt, 1500).await
 }
 
 /// Draft test cases for one file's new/changed functions (test-generation command).
@@ -1233,12 +1233,36 @@ async fn chat_completion_text_once(
 
     let resp = resp.inspect_err(|_| crate::metrics::record_llm_error())?;
 
-    resp["choices"][0]["message"]["content"]
+    let choice = &resp["choices"][0];
+    let text = choice["message"]["content"]
         .as_str()
-        .map(|s| s.trim().to_string())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .context("LLM response missing content")
-        .inspect_err(|_| crate::metrics::record_llm_error())
+        .inspect_err(|_| crate::metrics::record_llm_error())?;
+
+    let mut out = text.to_string();
+    if choice["finish_reason"].as_str() == Some("length") {
+        // Stop at the last complete sentence so a capped reply never ends mid-word.
+        out = truncate_to_sentence(&out).to_string();
+        out.push_str("\n\n_(reply reached the model token limit; raise the model budget or use a non-reasoning model)_");
+    }
+    Ok(out)
+}
+
+/// Longest prefix of `text` that ends on a sentence boundary.
+fn truncate_to_sentence(text: &str) -> &str {
+    let mut cut = text.len();
+    for (i, c) in text.char_indices().rev() {
+        if matches!(c, '.' | '!' | '?') {
+            let rest = &text[i + c.len_utf8()..];
+            if rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace) {
+                cut = i + c.len_utf8();
+                break;
+            }
+        }
+    }
+    &text[..cut]
 }
 
 /// Plain-text chat completion against `config`'s primary endpoint, retrying
@@ -1475,5 +1499,17 @@ mod tests {
         let s = ctx.to_string();
         assert!(s.contains("<<<UNTRUSTED_PR_TITLE>>>"));
         assert!(s.contains("<<<UNTRUSTED_PR_DESCRIPTION>>>"));
+    }
+
+    #[test]
+    fn truncate_to_sentence_stops_at_boundary() {
+        assert_eq!(truncate_to_sentence("One. Two"), "One.");
+        assert_eq!(truncate_to_sentence("Done!"), "Done!");
+        assert_eq!(truncate_to_sentence("No terminator"), "No terminator");
+        // Dots inside a version or identifier are not sentence boundaries.
+        assert_eq!(
+            truncate_to_sentence("Bumped v0.1.0 and"),
+            "Bumped v0.1.0 and"
+        );
     }
 }

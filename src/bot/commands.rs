@@ -411,8 +411,7 @@ async fn spawn_describe(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) 
                     crate::bot::markdown::commands_details()
                 ),
                 Err(e) => format!(
-                    "### Codasaurus describe\n\n**{title}**\n\n{}\n\n> LLM unavailable: `{e}`\n\n---\n{}",
-                    body.chars().take(500).collect::<String>(),
+                    "### Codasaurus describe\n\n> LLM unavailable: `{e}`\n\n---\n{}",
                     crate::bot::markdown::commands_details()
                 ),
             }
@@ -722,8 +721,8 @@ async fn spawn_summarize(ctx: WebhookContext, pr_number: i64, timeout_secs: u64)
                     crate::bot::markdown::commands_details()
                 ),
                 Err(e) => format!(
-                    "### Codasaurus summarize\n\n**{title}**\n\n{}\n\n> LLM unavailable: `{e}`",
-                    body.chars().take(400).collect::<String>()
+                    "### Codasaurus summarize\n\n> LLM unavailable: `{e}`\n\n---\n{}",
+                    crate::bot::markdown::commands_details()
                 ),
             }
         } else {
