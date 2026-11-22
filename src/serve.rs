@@ -264,10 +264,12 @@ fn build_router(pool: crate::db::DbPool, bot_config: Option<bot::BotConfig>) -> 
 }
 
 async fn security_headers_middleware(req: Request, next: Next) -> Response {
+    // Swagger UI ships inline bootstrap code; give it its own policy elsewhere.
+    let is_docs = req.uri().path().starts_with("/api/docs");
     let mut res = next.run(req).await;
     let headers = res.headers_mut();
     // Handlers may set a narrower CSP of their own (e.g. the manifest page).
-    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+    if !is_docs && !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(

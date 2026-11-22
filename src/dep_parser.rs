@@ -201,4 +201,22 @@ require (
         assert!(deps.contains(&"github.com/sirupsen/logrus".to_string()));
         assert!(!deps.contains(&"github.com/example/project".to_string()));
     }
+
+    #[test]
+    fn parses_a_dependency_added_after_a_comment() {
+        let manifest = r#"
+[dependencies]
+serde_json = "1"
+
+# OpenAPI
+utoipa = "6"
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
+"#;
+        let deps = extract_cargo_deps(manifest);
+        assert!(deps.iter().any(|d| d == "utoipa"), "deps: {deps:?}");
+        assert!(
+            deps.iter().any(|d| d == "utoipa-swagger-ui"),
+            "deps: {deps:?}"
+        );
+    }
 }

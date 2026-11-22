@@ -156,7 +156,8 @@ pub struct SetupStatus {
 }
 
 /// GET /api/setup/status — check which setup steps have been completed.
-async fn setup_status(
+#[utoipa::path(get, path = "/api/setup/status", tag = "setup", responses((status = 200, description = "OK")))]
+pub(crate) async fn setup_status(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<SetupStatus>, ApiError> {
@@ -515,7 +516,8 @@ pub struct PublicUrlBody {
 }
 
 /// GET /api/setup/public-url — effective public URL + where it came from.
-async fn get_public_url(
+#[utoipa::path(get, path = "/api/setup/public-url", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_public_url(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {

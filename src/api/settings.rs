@@ -156,7 +156,8 @@ fn mask_if_sensitive(key: &str, value: String) -> String {
 }
 
 /// GET /api/settings
-async fn get_settings(
+#[utoipa::path(get, path = "/api/settings", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_settings(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {

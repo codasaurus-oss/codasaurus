@@ -69,7 +69,8 @@ async fn remove_custom_server_id(pool: &db::DbPool, id: &str) -> Result<(), ApiE
 }
 
 /// GET /api/mcp/servers
-async fn list_servers(
+#[utoipa::path(get, path = "/api/mcp/servers", tag = "mcp", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn list_servers(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {

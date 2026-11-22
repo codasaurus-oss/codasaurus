@@ -39,7 +39,10 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/repos
-async fn list_repos(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+#[utoipa::path(get, path = "/api/repos", tag = "repos", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn list_repos(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let repos = db::repos::list_repos(&state.pool).await?;
     Ok(Json(json!(repos)))
 }
@@ -210,7 +213,8 @@ async fn sync_repos(
 }
 
 /// GET /api/repos/:id
-async fn get_repo(
+#[utoipa::path(get, path = "/api/repos/{id}", tag = "repos", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_repo(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {

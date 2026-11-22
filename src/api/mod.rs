@@ -9,6 +9,7 @@ pub mod errors;
 pub mod github;
 pub mod learning;
 pub mod mcp;
+pub mod openapi;
 pub mod rate_limit;
 pub mod rbac;
 pub mod repos;
@@ -34,6 +35,7 @@ pub fn public_router() -> Router<AppState> {
     Router::new()
         .nest("/api/setup", setup::router())
         .nest("/api/auth", auth::router())
+        .merge(openapi::router())
 }
 
 /// Authenticated dashboard routes.
