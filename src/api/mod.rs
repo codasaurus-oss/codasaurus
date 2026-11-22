@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod bootstrap;
 pub mod errors;
 pub mod github;
 pub mod learning;

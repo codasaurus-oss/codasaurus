@@ -1,8 +1,10 @@
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::net::SocketAddr;
+use std::time::Duration;
 
 use crate::bot;
 use crate::db;
@@ -183,13 +185,9 @@ pub(crate) async fn setup_status(
         .is_some()
         || crate::util::env_set("OPENROUTER_API_KEY");
 
-    let admin: bool = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM users WHERE role IN ('owner', 'admin')"
-    )
-    .map(|count| count > 0)
-    .unwrap_or(false);
+    let admin = db::users::owner_exists(&state.pool)
+        .await
+        .unwrap_or(false);
 
     let complete = database && llm && github && admin;
 
@@ -1061,6 +1059,7 @@ async fn github_callback(
 /// POST /api/setup/admin
 async fn setup_admin(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(body): Json<AdminBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -1070,6 +1069,24 @@ async fn setup_admin(
         .map_err(|e| ApiError::internal(e.to_string()))?;
     if owner_exists {
         super::rbac::require_owner(&state, &headers).await?;
+    } else {
+        let key = format!(
+            "bootstrap:{}",
+            super::rate_limit::client_ip(peer.ip(), &headers, super::rate_limit::trusted_proxies())
+        );
+        super::rate_limit::check(&state.redis, &key, 5, Duration::from_secs(900))
+            .await
+            .map_err(|retry| {
+                ApiError::too_many_requests_after(
+                    "Too many bootstrap attempts. Please try again later.",
+                    retry.as_secs().max(1),
+                )
+            })?;
+        let secret = headers
+            .get(super::bootstrap::BOOTSTRAP_SECRET_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        super::bootstrap::consume(&state.redis, secret).await?;
     }
 
     if !body.email.contains('@') {
@@ -1084,7 +1101,7 @@ async fn setup_admin(
         db::users::create_user(&state.pool, &body.email, &body.password, "owner").await
     } else {
         // Day-zero onboarding account = instance bootstrap / superuser.
-        db::users::create_bootstrap_owner(&state.pool, &body.email, &body.password).await
+        db::users::create_first_owner(&state.pool, &body.email, &body.password).await
     };
     result.map_err(|e| {
         if let sqlx::Error::Database(ref db_err) = e {

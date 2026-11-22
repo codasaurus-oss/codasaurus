@@ -1,5 +1,6 @@
 //! Redis-backed state: the limiter counter must be visible across connections.
 
+use codasaurus::api::bootstrap::{arm, consume};
 use codasaurus::api::rate_limit::check;
 use codasaurus::redis::StateStore;
 use std::time::Duration;
@@ -59,4 +60,25 @@ async fn oidc_state_is_single_use() {
         Some("verifier-1".to_string())
     );
     assert_eq!(codasaurus::oidc::take_pending(&b, &state).await, None);
+}
+
+#[tokio::test]
+async fn two_concurrent_first_owner_requests_consume_one_bootstrap_secret() {
+    let store = StateStore::connect(&redis_url())
+        .await
+        .expect("connect redis state store");
+    let secret = format!("secret-{}", uuid::Uuid::new_v4());
+    arm(&store, &secret, Duration::from_secs(60))
+        .await
+        .expect("arm bootstrap secret");
+
+    let (first, second) = tokio::join!(consume(&store, &secret), consume(&store, &secret));
+
+    assert_eq!(
+        u8::from(first.is_ok()) + u8::from(second.is_ok()),
+        1,
+        "exactly one consumer should win: first_ok={} second_ok={}",
+        first.is_ok(),
+        second.is_ok()
+    );
 }

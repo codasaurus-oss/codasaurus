@@ -129,6 +129,17 @@ pub async fn serve(
     let redis = StateStore::connect(&redis_url).await?;
     tracing::info!("Redis connected for shared rate limiting");
 
+    if !db::users::owner_exists(&pool).await? {
+        let secret = std::env::var("CODASAURUS_BOOTSTRAP_SECRET").unwrap_or_default();
+        if secret.len() < 16 {
+            anyhow::bail!(
+                "CODASAURUS_BOOTSTRAP_SECRET must be set to at least 16 characters \
+                 when no owner exists — set it before starting to enable first-owner creation"
+            );
+        }
+        api::bootstrap::arm(&redis, &secret, Duration::from_secs(900)).await?;
+    }
+
     let app = build_router(pool.clone(), redis, bot_config);
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
