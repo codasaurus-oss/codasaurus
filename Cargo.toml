@@ -59,7 +59,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 argon2 = "0.5"
 
 # JWT generation (for GitHub App auth)
-jsonwebtoken = { version = "10", features = ["use_pem"] }
+jsonwebtoken = { version = "10", features = ["use_pem", "rust_crypto"] }
 
 # Crypto
 subtle = "2.6"
