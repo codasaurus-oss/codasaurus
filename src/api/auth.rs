@@ -293,12 +293,17 @@ async fn oidc_status() -> Json<serde_json::Value> {
     Json(json!({ "enabled": crate::oidc::OidcConfig::enabled() }))
 }
 
+fn oidc_login_error(err: impl std::fmt::Display) -> ApiError {
+    tracing::error!(error = %err, "failed to start OIDC sign-in");
+    ApiError::bad_request("Unable to start sign-in")
+}
+
 async fn oidc_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let cfg = crate::oidc::OidcConfig::from_env()
         .ok_or_else(|| ApiError::bad_request("OIDC is not configured"))?;
     let (url, _state) = crate::oidc::authorization_url(&cfg, &state.redis)
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        .map_err(oidc_login_error)?;
     Ok(axum::response::Redirect::temporary(&url))
 }
 
@@ -477,11 +482,33 @@ async fn accept_invite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
 
     #[test]
     fn set_cookie_includes_httponly() {
         let c = set_cookie("abc");
         assert!(c.contains("HttpOnly"));
         assert!(c.contains("SameSite=Lax"));
+    }
+
+    #[tokio::test]
+    async fn oidc_login_redis_error_body_omits_detail() {
+        let err = oidc_login_error(anyhow::anyhow!("SENTINEL_OIDC_REDIS_DETAIL"));
+        let body = String::from_utf8(
+            err.into_response()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            !body.contains("SENTINEL_OIDC_REDIS_DETAIL"),
+            "response leaked Redis detail: {body}"
+        );
+        assert_eq!(body, r#"{"error":"Unable to start sign-in"}"#);
     }
 }
