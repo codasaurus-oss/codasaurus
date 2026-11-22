@@ -129,7 +129,12 @@ pub fn default_cheap_model(primary: &str) -> String {
     if p.contains("gpt-4") || p.contains("o1") || p.contains("o3") {
         return "openai/gpt-4o-mini".into();
     }
-    if p.contains(":free") || p.contains("qwen") || p.contains("haiku") || p.contains("mini") {
+    if p.ends_with("/free")
+        || p.contains(":free")
+        || p.contains("qwen")
+        || p.contains("haiku")
+        || p.contains("mini")
+    {
         return primary.to_string();
     }
     "openai/gpt-4o-mini".into()
