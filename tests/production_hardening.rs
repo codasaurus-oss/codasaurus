@@ -546,7 +546,9 @@ async fn viewer_repo_and_review_reads_go_through_policy() {
     assert_eq!(read.unwrap().1, repo.id);
 
     let empty = axum::http::HeaderMap::new();
-    let err = require_repo_read(&state, &empty, repo.id).await.unwrap_err();
+    let err = require_repo_read(&state, &empty, repo.id)
+        .await
+        .unwrap_err();
     assert!(matches!(err, api::errors::ApiError::Unauthorized(_)));
     let err = require_review_read(&state, &empty, review.id)
         .await

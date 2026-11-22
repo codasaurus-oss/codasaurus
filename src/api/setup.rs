@@ -185,9 +185,7 @@ pub(crate) async fn setup_status(
         .is_some()
         || crate::util::env_set("OPENROUTER_API_KEY");
 
-    let admin = db::users::owner_exists(&state.pool)
-        .await
-        .unwrap_or(false);
+    let admin = db::users::owner_exists(&state.pool).await.unwrap_or(false);
 
     let complete = database && llm && github && admin;
 
