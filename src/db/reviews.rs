@@ -80,6 +80,29 @@ pub async fn delete_findings_for_review(pool: &DbPool, review_id: i64) -> Result
     Ok(())
 }
 
+async fn delete_findings_on(
+    conn: &mut sqlx::PgConnection,
+    review_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM findings WHERE review_id = $1")
+        .bind(review_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+pub async fn replace_findings(
+    pool: &DbPool,
+    review_id: i64,
+    findings: &[FindingCreate],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.as_pg().begin().await?;
+    delete_findings_on(&mut tx, review_id).await?;
+    insert_findings_on(&mut tx, findings).await?;
+    // An uncommitted transaction rolls back on drop, preserving prior findings on error.
+    tx.commit().await
+}
+
 pub async fn update_review(
     pool: &DbPool,
     id: i64,
@@ -191,6 +214,14 @@ pub async fn create_findings_batch(
     pool: &DbPool,
     findings: &[FindingCreate],
 ) -> Result<(), sqlx::Error> {
+    let mut conn = pool.as_pg().acquire().await?;
+    insert_findings_on(&mut conn, findings).await
+}
+
+async fn insert_findings_on(
+    conn: &mut sqlx::PgConnection,
+    findings: &[FindingCreate],
+) -> Result<(), sqlx::Error> {
     if findings.is_empty() {
         return Ok(());
     }
@@ -258,7 +289,7 @@ pub async fn create_findings_batch(
     .bind(&code_snippets)
     .bind(&contexts)
     .bind(&categories)
-    .execute(pool.as_pg())
+    .execute(&mut *conn)
     .await?;
 
     Ok(())

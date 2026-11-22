@@ -53,10 +53,6 @@ pub(crate) async fn save_review_to_db(
         Ok(r) => r,
         Err(_) => return,
     };
-    // Upsert reuses the same review id — drop stale findings first.
-    if let Err(e) = crate::db::reviews::delete_findings_for_review(pool, review.id).await {
-        eprintln!("Warning: failed to clear prior findings: {e}");
-    }
     let batch: Vec<crate::db::models::FindingCreate> = findings
         .findings
         .iter()
@@ -90,7 +86,7 @@ pub(crate) async fn save_review_to_db(
             judge_rationale: f.judge_rationale.clone(),
         })
         .collect();
-    if let Err(e) = crate::db::reviews::create_findings_batch(pool, &batch).await {
+    if let Err(e) = crate::db::reviews::replace_findings(pool, review.id, &batch).await {
         // Not fatal to the review that is being posted, but it costs the *next*
         // one its still-open/newly-fixed delta, so it needs to reach the operator's
         // log rather than stdout.
