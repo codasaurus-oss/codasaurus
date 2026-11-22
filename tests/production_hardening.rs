@@ -6,10 +6,12 @@
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
 use axum::http::{Request, StatusCode};
+use axum::response::IntoResponse;
 use codasaurus::api::rbac::{require_repo_read, require_review_read};
 use codasaurus::api::{self, AppState};
 use codasaurus::db;
 use codasaurus::retry::{github_request, RetryConfig};
+use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 async fn test_pool() -> db::DbPool {
@@ -576,4 +578,24 @@ async fn viewer_repo_and_review_reads_go_through_policy() {
         .await
         .unwrap();
     assert_eq!(review_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn sqlx_error_body_omits_database_detail() {
+    let err: api::errors::ApiError = sqlx::Error::Protocol("secret_column detail".into()).into();
+    let body = String::from_utf8(
+        err.into_response()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !body.contains("secret_column detail"),
+        "response leaked database detail: {body}"
+    );
+    assert_eq!(body, r#"{"error":"Internal server error"}"#);
 }

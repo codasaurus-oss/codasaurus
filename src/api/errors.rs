@@ -42,7 +42,8 @@ impl IntoResponse for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
-        ApiError::Internal(err.to_string())
+        tracing::error!("database error: {err}");
+        ApiError::Internal("Internal server error".into())
     }
 }
 
