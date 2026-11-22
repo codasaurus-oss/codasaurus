@@ -415,3 +415,71 @@ async fn first_owner_insert_fails_when_owner_already_exists_in_transaction() {
     assert_eq!(count, 0);
     drop(tx);
 }
+
+#[tokio::test]
+async fn failed_finding_insert_rolls_back_deleted_findings() {
+    let pool = test_pool().await;
+    let full_name = format!("owner/repo-{}", uuid::Uuid::new_v4().simple());
+    let repo = db::repos::create_repo(
+        &pool,
+        &db::models::RepoCreate {
+            github_id: None,
+            full_name,
+            owner: "owner".into(),
+            name: "repo".into(),
+            default_branch: None,
+            installation_id: 1,
+            private: false,
+        },
+    )
+    .await
+    .unwrap();
+    let review = db::reviews::create_review(
+        &pool,
+        &db::models::ReviewCreate {
+            repo_id: repo.id,
+            pr_number: 1,
+            pr_title: None,
+            pr_author: None,
+            pr_base_branch: None,
+            pr_head_branch: None,
+            pr_head_sha: Some("abc123".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let finding = |severity: &str, fingerprint: &str| db::models::FindingCreate {
+        review_id: review.id,
+        fingerprint: Some(fingerprint.into()),
+        file_path: "src/main.rs".into(),
+        line_start: None,
+        line_end: None,
+        column_start: None,
+        column_end: None,
+        severity: severity.into(),
+        detector: "test".into(),
+        rule_id: None,
+        message: "msg".into(),
+        suggested_fix: None,
+        code_snippet: None,
+        context: None,
+        category: None,
+        confidence: None,
+        judge_rationale: None,
+    };
+
+    db::reviews::create_findings_batch(&pool, &[finding("info", "keep")])
+        .await
+        .unwrap();
+
+    let result = db::reviews::replace_findings(&pool, review.id, &[finding("bogus", "bad")]).await;
+    assert!(result.is_err());
+
+    let remaining = db::reviews::get_findings_for_review(&pool, review.id)
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].severity, "info");
+    assert_eq!(remaining[0].fingerprint.as_deref(), Some("keep"));
+}
