@@ -54,4 +54,23 @@ impl StateStore {
             .query_async::<Option<String>>(&mut conn)
             .await
     }
+
+    /// Set `key` only if absent, with a TTL in seconds. Returns true if set.
+    pub async fn set_nx_ex(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Duration,
+    ) -> Result<bool, ::redis::RedisError> {
+        let mut conn = self.conn.clone();
+        ::redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl.as_secs().max(1))
+            .query_async::<Option<String>>(&mut conn)
+            .await
+            .map(|reply| reply.is_some())
+    }
 }

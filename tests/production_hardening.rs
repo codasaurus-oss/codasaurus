@@ -389,3 +389,29 @@ async fn admin_role_migrates_to_owner_rank() {
     assert_eq!(codasaurus::api::rbac::role_rank("admin"), 3);
     assert_eq!(codasaurus::api::rbac::normalize_role("admin"), "owner");
 }
+
+#[tokio::test]
+async fn first_owner_insert_fails_when_owner_already_exists_in_transaction() {
+    let pool = test_pool().await;
+    let mut tx = pool.as_pg().begin().await.unwrap();
+    // Other integration tests commit owners into the shared DB; neutralize them
+    // in this transaction (rolled back below) to isolate the first-owner path.
+    sqlx::query("UPDATE users SET role = 'viewer' WHERE role IN ('owner', 'admin')")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let first = db::users::create_first_owner_tx(&mut tx, "seed@example.com", "hash-1").await;
+    assert!(first.is_ok());
+
+    let second = db::users::create_first_owner_tx(&mut tx, "second@example.com", "hash-2").await;
+    assert!(second.is_err());
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = 'second@example.com'")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    drop(tx);
+}
