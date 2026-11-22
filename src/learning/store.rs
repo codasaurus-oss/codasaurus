@@ -289,7 +289,7 @@ impl LearningStore {
             created_at: chrono::DateTime<chrono::Utc>,
             repo_full_name: Option<String>,
             status: String,
-            source_count: i64,
+            source_count: i32,
             match_count: i64,
             last_matched_at: Option<chrono::DateTime<chrono::Utc>>,
         }
@@ -313,7 +313,7 @@ impl LearningStore {
                 created_at: r.created_at,
                 repo_full_name: r.repo_full_name,
                 status: r.status,
-                source_count: r.source_count,
+                source_count: r.source_count as i64,
                 match_count: r.match_count,
                 last_matched_at: r.last_matched_at,
             })
