@@ -416,15 +416,12 @@ pub async fn review_pr_with_options(
         head_sha
     };
     if !low_signal_only {
+        // Always fetch the full head file: a parsed manifest from the diff is a
+        // patch slice, so detectors would miss dependencies added outside the
+        // hunk and report them as phantom imports.
         let manifest_paths: Vec<String> = changed_paths
             .iter()
             .filter(|p| crate::bot::dep_delta::is_manifest_path(p))
-            .filter(|path| {
-                head_manifests
-                    .get(*path)
-                    .map(|c| c.len() < 80)
-                    .unwrap_or(true)
-            })
             .cloned()
             .collect();
         for (path, content) in crate::bot::github_files::fetch_repo_files_parallel(
