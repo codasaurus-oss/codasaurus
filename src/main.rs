@@ -80,7 +80,7 @@ fn main() -> Result<()> {
                     anyhow::bail!(
                         "DATABASE_URL is required on Render. Set it to a Neon Free \
                          (or other always-free) Postgres URI — not Render free Postgres \
-                         (that plan expires). See docs/run-for-free.md."
+                         (that plan expires). See https://codasaurus-oss.github.io/docs/run-for-free.html."
                     );
                 }
                 _ => "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into(),
