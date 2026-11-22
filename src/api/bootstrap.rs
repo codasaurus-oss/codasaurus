@@ -29,7 +29,9 @@ pub async fn arm(store: &StateStore, secret: &str, ttl: Duration) -> anyhow::Res
 pub async fn consume(store: &StateStore, secret: &str) -> Result<(), ApiError> {
     match store.getdel(&secret_key(secret)).await {
         Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(ApiError::unauthorized("Invalid or expired bootstrap secret")),
+        Ok(None) => Err(ApiError::unauthorized(
+            "Invalid or expired bootstrap secret",
+        )),
         Err(err) => {
             tracing::error!(error = %err, "bootstrap secret lookup failed");
             Err(ApiError::internal("bootstrap secret lookup failed"))

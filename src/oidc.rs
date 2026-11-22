@@ -115,10 +115,7 @@ pub async fn store_pending(store: &StateStore, state: &str, verifier: &str) -> R
     Ok(())
 }
 
-pub async fn authorization_url(
-    cfg: &OidcConfig,
-    store: &StateStore,
-) -> Result<(String, String)> {
+pub async fn authorization_url(cfg: &OidcConfig, store: &StateStore) -> Result<(String, String)> {
     cfg.require_client_secret()?;
     let disc = discover(cfg).await?;
     let state = Uuid::new_v4().to_string();

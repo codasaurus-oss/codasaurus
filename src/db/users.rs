@@ -112,9 +112,10 @@ pub async fn create_first_owner_tx(
         .execute(&mut *conn)
         .await?;
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role IN ('owner', 'admin')")
-        .fetch_one(&mut *conn)
-        .await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role IN ('owner', 'admin')")
+            .fetch_one(&mut *conn)
+            .await?;
     if count > 0 {
         return Err(sqlx::Error::Protocol("an owner already exists".into()));
     }
