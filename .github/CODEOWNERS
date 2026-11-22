@@ -1,0 +1,10 @@
+# Default owner for everything in this repository.
+* @lohitkolluri
+
+# Release and CI configuration affects everyone; keep the owner explicit.
+/.github/workflows/ @lohitkolluri
+/Cargo.toml @lohitkolluri
+/Cargo.lock @lohitkolluri
+/Dockerfile @lohitkolluri
+/docker-compose.yml @lohitkolluri
+/SECURITY.md @lohitkolluri

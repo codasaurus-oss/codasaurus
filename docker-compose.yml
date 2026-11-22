@@ -18,6 +18,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        DASHBOARD_REF: ${DASHBOARD_REF:-main}
     ports:
       - "3000:3000"
     environment:

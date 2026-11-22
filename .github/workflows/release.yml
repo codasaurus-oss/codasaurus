@@ -36,16 +36,22 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-          cache: npm
-          cache-dependency-path: svelte-dashboard/package-lock.json
 
       - name: Install cross-compiler (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build dashboard
-        working-directory: svelte-dashboard
-        run: npm ci && npm run build
+        env:
+          DASHBOARD_REF: ${{ vars.DASHBOARD_REF || 'main' }}
+        run: |
+          git clone --depth 1 --branch "$DASHBOARD_REF" \
+            https://github.com/codasaurus-oss/codasaurus-frontend.git /tmp/codasaurus-frontend
+          cd /tmp/codasaurus-frontend
+          npm ci
+          npm run build
+          mkdir -p "$GITHUB_WORKSPACE/svelte-dashboard"
+          cp -r dist "$GITHUB_WORKSPACE/svelte-dashboard/dist"
 
       - name: Build release binary
         env:
@@ -57,7 +63,8 @@ jobs:
           staging="${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} "$staging/"
-          cp README.md LICENSE CHANGELOG.md "$staging/" 2>/dev/null || true
+          cp README.md LICENSE "$staging/"
+          cp -r svelte-dashboard "$staging/"
           echo "$staging"
 
       - name: Package archive
@@ -92,44 +99,10 @@ jobs:
           pattern: release-archive-*
           merge-multiple: true
 
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          tag="${{ github.ref_name }}"
-          ver="${tag#v}"
-          {
-            echo 'notes<<EOF'
-            if [ -f CHANGELOG.md ] && grep -q "## \[${ver}\]" CHANGELOG.md; then
-              # Excerpt the matching CHANGELOG section (until next ## or EOF).
-              awk -v ver="$ver" '
-                $0 ~ "^## \\[" ver "\\]" {grab=1; next}
-                grab && /^## / {exit}
-                grab {print}
-              ' CHANGELOG.md
-            else
-              prev_tag=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || echo "")
-              if [ -n "$prev_tag" ]; then
-                git log "$prev_tag".."$tag" --oneline --no-decorate
-              else
-                echo "Initial release ${tag}."
-                echo ""
-                echo "See CHANGELOG.md for details."
-              fi
-            fi
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: ${{ env.BINARY_NAME }}-*.tar.gz*
-          body: |
-            ## Codasaurus ${{ github.ref_name }}
-
-            ${{ steps.release_notes.outputs.notes }}
-
-            ---
-            **Install:** extract the tarball and run `./codasaurus serve`. Needs PostgreSQL (`DATABASE_URL`).
-            **Docs:** [README](https://github.com/lohitkolluri/codasaurus#readme) · [Changelog](https://github.com/lohitkolluri/codasaurus/blob/main/CHANGELOG.md)
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" ${BINARY_NAME}-*.tar.gz* --clobber
 
   # publish-crates:
   #   name: Publish to crates.io

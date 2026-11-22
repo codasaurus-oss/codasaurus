@@ -14,8 +14,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lohitkolluri/codasaurus/releases/tag/v0.1.0"><img src="https://img.shields.io/badge/release-v0.1.0-111827" alt="v0.1.0"></a>
-  <a href="https://github.com/lohitkolluri/codasaurus/actions/workflows/ci.yml"><img src="https://github.com/lohitkolluri/codasaurus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/codasaurus-oss/codasaurus/releases"><img src="https://img.shields.io/badge/release-v0.1.0-111827" alt="v0.1.0"></a>
+  <a href="https://github.com/codasaurus-oss/codasaurus/actions/workflows/ci.yml"><img src="https://github.com/codasaurus-oss/codasaurus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.90+-dea584?logo=rust&logoColor=white" alt="Rust"></a>
   <a href="docs/database.md"><img src="https://img.shields.io/badge/db-PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL"></a>
   <a href="docs/run-for-free.md"><img src="https://img.shields.io/badge/host-run%20for%20%240-2ea44f" alt="Run for free"></a>
@@ -26,7 +26,7 @@
   <a href="docs/setup-onboarding.md"><img src="https://img.shields.io/badge/docs-onboarding-0ea5e9" alt="Onboarding"></a>
   <a href="docs/commands.md"><img src="https://img.shields.io/badge/docs-codasaurus%20commands-8b5cf6" alt="Commands"></a>
   <a href="docs/configuration.md"><img src="https://img.shields.io/badge/docs-config-64748b" alt="Config"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-Keep%20a%20Changelog-orange" alt="Changelog"></a>
+  <a href="https://github.com/codasaurus-oss/codasaurus/releases"><img src="https://img.shields.io/badge/changelog-releases-orange" alt="Changelog"></a>
 </p>
 
 ---
@@ -44,7 +44,7 @@ Agents ship volume. Models invent packages, paste last year's APIs, and leave se
 | Secrets and vulns        | Pattern + OSV                 |
 | IaC footguns             | Open CIDR, privileged pods    |
 | Agent-shaped PRs         | Tier-1 first, LLM nits capped |
-| Blast radius / dep delta | Walkthrough + `@impact`       |
+| Blast radius / dep delta | Walkthrough + `impact`       |
 
 Fail-closed offline mode. Finding provenance. Learning from dismissals. Air-gap honest.
 
@@ -53,15 +53,15 @@ Fail-closed offline mode. Finding provenance. Learning from dismissals. Air-gap 
 ## Quick start
 
 ```bash
-git clone https://github.com/lohitkolluri/codasaurus.git
+git clone https://github.com/codasaurus-oss/codasaurus.git
 cd codasaurus
 cp .env.example .env   # optional
 docker compose up
 ```
 
-Open [http://localhost:3000](http://localhost:3000), finish the [onboarding wizard](docs/setup-onboarding.md) (~5 min), install the GitHub App.
+Open [http://localhost:3000](http://localhost:3000), finish the [onboarding wizard](https://codasaurus-oss.github.io/setup-onboarding/) (~5 min), install the GitHub App.
 
-Want **$0 forever** (no trials)? [Run on always-free infra](docs/run-for-free.md): Render free web + Aiven Free Postgres (or Neon). LLM optional / off.
+Want **$0 forever** (no trials)? [Run on always-free infra](https://codasaurus-oss.github.io/run-for-free/): Render free web + Aiven Free Postgres (or Neon). LLM optional / off.
 
 ```bash
 # From source (Postgres must be reachable)
@@ -70,7 +70,7 @@ export DATABASE_URL="postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus"
 ./target/release/codasaurus serve --port 3000
 ```
 
-Prebuilt Linux binary: [GitHub Releases](https://github.com/lohitkolluri/codasaurus/releases) (`codasaurus-v*-x86_64-unknown-linux-gnu.tar.gz`).
+Prebuilt Linux binary: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases) (`codasaurus-v*-x86_64-unknown-linux-gnu.tar.gz`).
 
 ```text
 codasaurus serve | health | version | reset-password
@@ -82,16 +82,16 @@ codasaurus serve | health | version | reset-password
 
 | Guide                                                   | Topic                              |
 | ------------------------------------------------------- | ---------------------------------- |
-| [Onboarding](docs/setup-onboarding.md)                  | First-run wizard                   |
-| [GitHub App](docs/setup-github-app.md)                  | Permissions, manifest, manual keys |
-| [Run for free](docs/run-for-free.md)                    | Always-free host + Postgres        |
-| [Database](docs/database.md)                            | PostgreSQL, pool, schema           |
-| [Configuration](docs/configuration.md)                  | Env vars, TOML, offline, OIDC      |
-| [`.codasaurus.toml` schema](docs/codasaurus-toml.md)    | In-repo config reference           |
-| [Commands](docs/commands.md)                            | `codasaurus` on PRs               |
-| [Backup and restore](docs/operations-backup-restore.md) | Postgres backup, HA, health        |
+| [Onboarding](https://codasaurus-oss.github.io/setup-onboarding/)                  | First-run wizard                   |
+| [GitHub App](https://codasaurus-oss.github.io/setup-github-app/)                  | Permissions, manifest, manual keys |
+| [Run for free](https://codasaurus-oss.github.io/run-for-free/)                    | Always-free host + Postgres        |
+| [Database](https://codasaurus-oss.github.io/database/)                            | PostgreSQL, pool, schema           |
+| [Configuration](https://codasaurus-oss.github.io/configuration/)                  | Env vars, TOML, offline, OIDC      |
+| [`.codasaurus.toml` schema](https://codasaurus-oss.github.io/codasaurus-toml/)    | In-repo config reference           |
+| [Commands](https://codasaurus-oss.github.io/commands/)                            | `codasaurus` on PRs               |
+| [Backup and restore](https://codasaurus-oss.github.io/operations-backup-restore/) | Postgres backup, HA, health        |
 
-Full index: [docs/README.md](docs/README.md).
+Full index: [documentation site](https://codasaurus-oss.github.io/).
 
 ---
 
@@ -104,9 +104,17 @@ codasaurus ask …       codasaurus fix [fp]     codasaurus ignore <fp>
 codasaurus digest      codasaurus help
 ```
 
-Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding comment to dismiss. Full table in [docs/commands.md](docs/commands.md).
+Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding comment to dismiss. Full table in [commands](https://codasaurus-oss.github.io/commands/).
 
 ---
+
+## Repository layout
+
+| Repository | Contents |
+| --- | --- |
+| [codasaurus](https://github.com/codasaurus-oss/codasaurus) | Review engine, HTTP API, webhook handler, deployment |
+| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Svelte dashboard; built `dist/` is served by the backend |
+| [docs](https://github.com/codasaurus-oss/docs) | Documentation site (Astro Starlight), published at <https://codasaurus-oss.github.io/> |
 
 ## vs the field
 
@@ -129,7 +137,7 @@ export CODASAURUS_BASE_URL="http://localhost:11434/v1"
 export CODASAURUS_MODEL="qwen2.5-coder:7b"
 ```
 
-Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](docs/configuration.md).
+Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
 
 **Multi-provider / fallback:** `CODASAURUS_BASE_URL` accepts any OpenAI-compatible `/v1` endpoint, including a self-hosted [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) proxy — point Codasaurus at LiteLLM and it handles routing across OpenAI/Anthropic/Azure/Bedrock/etc. For a lighter setup with no extra service, set `CODASAURUS_FALLBACK_BASE_URL` (+ optional `CODASAURUS_FALLBACK_API_KEY` / `CODASAURUS_FALLBACK_MODEL`) to a second provider — Codasaurus automatically retries there if the primary endpoint fails.
 
@@ -161,7 +169,7 @@ CODASAURUS_SKIP_FRONTEND_BUILD=1 cargo test
 cargo build --release
 ```
 
-Security reports: [SECURITY.md](SECURITY.md). Release history: [CHANGELOG.md](CHANGELOG.md).
+Security reports: [SECURITY.md](SECURITY.md). Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
 
 ---
 

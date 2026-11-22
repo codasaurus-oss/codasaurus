@@ -12,7 +12,7 @@ Be respectful and constructive. Harassment, spam, or bad-faith contributions wil
 
 | Kind | How |
 | ---- | --- |
-| Bug report | [GitHub Issues](https://github.com/lohitkolluri/codasaurus/issues) with steps to reproduce, version (`codasaurus version`), and environment |
+| Bug report | [GitHub Issues](https://github.com/codasaurus-oss/codasaurus/issues) with steps to reproduce, version (`codasaurus version`), and environment |
 | Docs fix | PR against `main` (Settings paths, env vars, and schema versions drift easily—please keep them accurate) |
 | Feature | Open an issue first for anything larger than a small UX or API tweak |
 | Fix / patch | Focused PR with tests or a clear manual test plan |
@@ -31,7 +31,7 @@ Be respectful and constructive. Harassment, spam, or bad-faith contributions wil
 ### Clone and run (API + dashboard from the binary)
 
 ```bash
-git clone https://github.com/lohitkolluri/codasaurus.git
+git clone https://github.com/codasaurus-oss/codasaurus.git
 cd codasaurus
 cp .env.example .env          # optional; Compose defaults work locally
 docker compose up -d postgres
@@ -41,15 +41,18 @@ cargo run -- serve --port 3000
 
 Open [http://localhost:3000](http://localhost:3000) and complete the onboarding wizard if this is a fresh database.
 
-### Dashboard hot reload
+### Dashboard
+
+The dashboard lives in [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend). Clone it next to this repository and run:
 
 ```bash
-cd svelte-dashboard
+git clone https://github.com/codasaurus-oss/codasaurus-frontend.git
+cd codasaurus-frontend
 npm ci
-npm run dev
+CODASAURUS_API=http://127.0.0.1:3000 npm run dev
 ```
 
-Point the SPA at your local API as needed for your setup. Production builds are embedded by the Rust binary when you build without `CODASAURUS_SKIP_FRONTEND_BUILD`.
+The Docker image builds that repository and serves the output; a plain `cargo build` produces an API-only binary.
 
 ### Useful commands
 
@@ -58,11 +61,8 @@ Point the SPA at your local API as needed for your setup. Production builds are 
 cargo fmt --check
 cargo clippy -- -D warnings
 
-# Tests (skip rebuilding the SPA every run)
+# Tests
 CODASAURUS_SKIP_FRONTEND_BUILD=1 cargo test
-
-# Dashboard production build
-cd svelte-dashboard && npm ci && npm run build
 
 # Release binary
 cargo build --release --locked
@@ -82,7 +82,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests (with Postgres), `cargo 
 ### PR shape
 
 - **Small and focused.** One concern per PR when possible.
-- **Match existing style.** Prefer the patterns already in `src/` and `svelte-dashboard/`; avoid drive-by refactors.
+- **Match existing style.** Prefer the patterns already in `src/`; avoid drive-by refactors.
 - **Describe the why.** Summary + test plan in the PR body (what you ran, what to click in the dashboard).
 - **No secrets.** Never commit `.env`, private keys, API tokens, or research dumps.
 
@@ -99,16 +99,15 @@ Optional body for non-obvious context. [Conventional Commits](https://www.conven
 
 ### Changelog
 
-User-visible changes should get a bullet under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Maintainers move that section into a versioned release when tagging.
+Releases and changelog entries are generated from Conventional Commit messages by release-please, so write the commit subject accordingly and do not edit a changelog by hand.
 
 ## Project layout (orientation)
 
-| Path | Role |
+| Repository | Role |
 | ---- | ---- |
-| `src/` | Rust binary: webhooks, queue, detectors, LLM, API |
-| `svelte-dashboard/` | Svelte 5 SPA (Vite) |
-| `docs/` | Operator and onboarding guides |
-| `.github/workflows/` | CI and tagged releases |
+| `codasaurus` (this repo) | Rust binary: webhooks, queue, detectors, LLM, API, deployment |
+| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Svelte 5 dashboard |
+| [docs](https://github.com/codasaurus-oss/docs) | Documentation site |
 
 ## License
 
