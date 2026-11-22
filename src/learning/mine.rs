@@ -167,7 +167,9 @@ pub async fn mine_pr_comment_feedback(
     for body in all {
         let lower = body.to_ascii_lowercase();
         // Skip our own command traffic.
-        if lower.contains("@codasaurus") && (lower.contains("help") || lower.contains("review")) {
+        if (lower.contains("codasaurus") || lower.contains("@codasaurus"))
+            && (lower.contains("help") || lower.contains("review"))
+        {
             continue;
         }
 

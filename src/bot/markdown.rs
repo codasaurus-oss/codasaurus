@@ -67,7 +67,7 @@ pub fn commands_details() -> String {
     "<details>\n<summary>Commands</summary>\n\n\
      Type as plain text (GitHub Apps are not @-mentionable):\n\n\
      `review` · `describe` · `summarize` · `improve` · `security` · `ask …` · `ignore <fp>` · `help`\n\n\
-     <sub>Full list: <code>@codasaurus help</code></sub>\n\n\
+     <sub>Full list: <code>codasaurus help</code></sub>\n\n\
      </details>\n"
         .into()
 }
@@ -95,10 +95,10 @@ pub fn inline_finding_comment(f: &Finding) -> String {
         body,
         "\n<details>\n<summary>Dismiss / fix commands</summary>\n\n\
          <code>fingerprint: {fp}</code>\n\n\
-         `@codasaurus ignore {fp}` · 👎 to dismiss\
+         `codasaurus ignore {fp}` · 👎 to dismiss\
          {}{}\n\n</details>\n",
         if f.codemod.as_ref().is_some_and(|c| !c.is_empty()) {
-            format!(" · `@codasaurus fix {fp}`")
+            format!(" · `codasaurus fix {fp}`")
         } else {
             String::new()
         },
@@ -1032,7 +1032,7 @@ pub fn help_body() -> String {
         "### {brand} Codasaurus commands\n\n\
          GitHub Apps **cannot be @-mentioned** like a user. Type the text literally:\n\n\
          ```text\n\
-         @codasaurus ask why is this flaky?\n\
+         codasaurus ask why is this flaky?\n\
          codasaurus review\n\
          ```\n\n\
          | Command | What it does |\n\
@@ -1063,7 +1063,7 @@ pub fn help_body() -> String {
 /// Render the team-rules wiki from approved learned rules.
 pub fn wiki_body(rules: &[crate::learning::LearnedRule]) -> String {
     if rules.is_empty() {
-        return "## Team rules\n\n_No approved rules yet. Dismiss false positives on PRs to mine candidates, then `@codasaurus approve-rule <id>`._"
+        return "## Team rules\n\n_No approved rules yet. Dismiss false positives on PRs to mine candidates, then `codasaurus approve-rule <id>`._"
             .into();
     }
     let mut md = String::from(
@@ -1166,7 +1166,7 @@ fn truncate_utf8_owned(s: &mut String, max_bytes: usize) {
         idx -= 1;
     }
     s.truncate(idx);
-    s.push_str("\n\n---\n_…truncated — re-run `@codasaurus review` for the full comment._");
+    s.push_str("\n\n---\n_…truncated — re-run `codasaurus review` for the full comment._");
 }
 
 #[cfg(test)]
@@ -1242,13 +1242,13 @@ mod tests {
         assert!(body.contains("<details>"));
         assert!(body.contains("Why it matters"));
         assert!(body.contains("**Do this:**"));
-        assert!(body.contains("@codasaurus ignore"));
+        assert!(body.contains("codasaurus ignore"));
     }
 
     #[test]
     fn help_lists_impact() {
         assert!(help_body().contains("review"));
-        assert!(commands_details().contains("@codasaurus help"));
+        assert!(commands_details().contains("codasaurus help"));
     }
 
     #[test]

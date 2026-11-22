@@ -10,7 +10,7 @@
 
 <p align="center">
   Tier-1 detectors first · optional BYOK LLM · zero seat tax · run for $0<br>
-  <code>@codasaurus</code> on any PR · Svelte dashboard · PostgreSQL only
+  <code>codasaurus</code> on any PR · Svelte dashboard · PostgreSQL only
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="docs/setup-onboarding.md"><img src="https://img.shields.io/badge/docs-onboarding-0ea5e9" alt="Onboarding"></a>
-  <a href="docs/commands.md"><img src="https://img.shields.io/badge/docs-@codasaurus%20commands-8b5cf6" alt="Commands"></a>
+  <a href="docs/commands.md"><img src="https://img.shields.io/badge/docs-codasaurus%20commands-8b5cf6" alt="Commands"></a>
   <a href="docs/configuration.md"><img src="https://img.shields.io/badge/docs-config-64748b" alt="Config"></a>
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-Keep%20a%20Changelog-orange" alt="Changelog"></a>
 </p>
@@ -88,7 +88,7 @@ codasaurus serve | health | version | reset-password
 | [Database](docs/database.md)                            | PostgreSQL, pool, schema           |
 | [Configuration](docs/configuration.md)                  | Env vars, TOML, offline, OIDC      |
 | [`.codasaurus.toml` schema](docs/codasaurus-toml.md)    | In-repo config reference           |
-| [Commands](docs/commands.md)                            | `@codasaurus` on PRs               |
+| [Commands](docs/commands.md)                            | `codasaurus` on PRs               |
 | [Backup and restore](docs/operations-backup-restore.md) | Postgres backup, HA, health        |
 
 Full index: [docs/README.md](docs/README.md).
@@ -98,10 +98,10 @@ Full index: [docs/README.md](docs/README.md).
 ## On a PR
 
 ```text
-@codasaurus review      @codasaurus describe     @codasaurus improve
-@codasaurus security    @codasaurus impact       @codasaurus similar
-@codasaurus ask …       @codasaurus fix [fp]     @codasaurus ignore <fp>
-@codasaurus digest      @codasaurus help
+codasaurus review      codasaurus describe     codasaurus improve
+codasaurus security    codasaurus impact       codasaurus similar
+codasaurus ask …       codasaurus fix [fp]     codasaurus ignore <fp>
+codasaurus digest      codasaurus help
 ```
 
 Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding comment to dismiss. Full table in [docs/commands.md](docs/commands.md).

@@ -1,11 +1,11 @@
 # Commands
 
 <p>
-  <img src="https://img.shields.io/badge/@codasaurus-commands-8b5cf6" alt="Commands">
+  <img src="https://img.shields.io/badge/codasaurus-commands-8b5cf6" alt="Commands">
   <a href="README.md"><img src="https://img.shields.io/badge/docs-index-111827" alt="Docs index"></a>
 </p>
 
-Type **`@codasaurus`** (or your App’s slug) as plain text on a pull request comment. GitHub Apps are **not** @-mentionable like users — they will not appear in the autocomplete picker. You can also start a comment with `codasaurus ask …` (no `@`).
+Start a pull request comment with **`codasaurus`**, then the command — for example `codasaurus review` or `codasaurus ask why is this key global?`. GitHub Apps cannot be @-mentioned, so the bare word is the trigger; the older `@codasaurus` form still works on existing comments. Your App's manifest slug (for example `codasaurus-72b3`) also works.
 
 Commands are case-insensitive; extra words after the verb become arguments for `ask` / `ignore` / `fix`. LLM commands (`ask`, `improve`, …) need an API key under **Settings → LLM**.
 
@@ -49,12 +49,12 @@ On `opened` / `synchronize` (when enabled), Codasaurus runs describe+review with
 ## Examples
 
 ```text
-@codasaurus review
-@codasaurus describe
-@codasaurus ask why is the cache keyed only on user id?
-@codasaurus ignore a1b2c3d4
-@codasaurus fix a1b2c3d4
-@codasaurus digest
-@codasaurus impact
-@codasaurus retry
+codasaurus review
+codasaurus describe
+codasaurus ask why is the cache keyed only on user id?
+codasaurus ignore a1b2c3d4
+codasaurus fix a1b2c3d4
+codasaurus digest
+codasaurus impact
+codasaurus retry
 ```
