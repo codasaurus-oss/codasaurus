@@ -7,7 +7,7 @@ COPY svelte-dashboard/ ./
 RUN npm run build
 
 # ── Stage 2: Build Rust binary ──────────────────────────────────
-FROM rust:1.88-slim-bookworm AS backend
+FROM rust:1.90-slim-bookworm AS backend
 RUN apt-get update \
     && apt-get install -y --no-install-recommends pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*

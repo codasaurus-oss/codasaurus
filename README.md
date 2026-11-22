@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://github.com/lohitkolluri/codasaurus/releases/tag/v0.1.0"><img src="https://img.shields.io/badge/release-v0.1.0-111827" alt="v0.1.0"></a>
   <a href="https://github.com/lohitkolluri/codasaurus/actions/workflows/ci.yml"><img src="https://github.com/lohitkolluri/codasaurus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.88+-dea584?logo=rust&logoColor=white" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.90+-dea584?logo=rust&logoColor=white" alt="Rust"></a>
   <a href="docs/database.md"><img src="https://img.shields.io/badge/db-PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL"></a>
   <a href="docs/run-for-free.md"><img src="https://img.shields.io/badge/host-run%20for%20%240-2ea44f" alt="Run for free"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License"></a>
