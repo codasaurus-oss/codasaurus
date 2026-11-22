@@ -601,3 +601,58 @@ async fn sqlx_error_body_omits_database_detail() {
     );
     assert_eq!(body, r#"{"error":"Internal server error"}"#);
 }
+
+#[tokio::test]
+async fn unauthenticated_review_read_does_not_reveal_existence() {
+    let pool = test_pool().await;
+    let repo = db::repos::create_repo(
+        &pool,
+        &db::models::RepoCreate {
+            github_id: None,
+            full_name: format!("owner/repo-{}", uuid::Uuid::new_v4().simple()),
+            owner: "owner".into(),
+            name: "repo".into(),
+            default_branch: None,
+            installation_id: 1,
+            private: false,
+        },
+    )
+    .await
+    .unwrap();
+    let review = db::reviews::create_review(
+        &pool,
+        &db::models::ReviewCreate {
+            repo_id: repo.id,
+            pr_number: 1,
+            pr_title: None,
+            pr_author: None,
+            pr_base_branch: None,
+            pr_head_branch: None,
+            pr_head_sha: Some("abc123".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let redis = codasaurus::redis::StateStore::connect(&redis_url())
+        .await
+        .expect("connect redis test pool");
+    let state = AppState { pool, redis };
+    let empty = axum::http::HeaderMap::new();
+
+    let missing = require_review_read(&state, &empty, i64::MAX)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(missing, api::errors::ApiError::Unauthorized(_)),
+        "missing review leaked existence: {missing:?}"
+    );
+
+    let existing = require_review_read(&state, &empty, review.id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(existing, api::errors::ApiError::Unauthorized(_)),
+        "existing review leaked existence: {existing:?}"
+    );
+}
