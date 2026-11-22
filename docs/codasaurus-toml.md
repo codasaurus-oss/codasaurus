@@ -99,7 +99,7 @@ require_approvals = 1
 block_on_blockers = true
 
 [learning]
-# Dismissals mine candidate rules; approve them with @codasaurus approve-rule <id>.
+# Dismissals mine candidate rules; approve them with codasaurus approve-rule <id>.
 auto_approve_rules = false
 # Distinct PRs, within the same repo, that must dismiss a detector before its
 # rule auto-promotes. Floored at 1: a 0 would promote every first dismissal.

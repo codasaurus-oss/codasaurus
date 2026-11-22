@@ -157,7 +157,7 @@ review_strictness = "balanced"
 
 Full field reference: [codasaurus-toml.md](codasaurus-toml.md).
 
-Per-repo overlays and policy packs are edited in the dashboard (`config_json`, forbidden paths, severity caps, auto-labels, Check Runs, `@codasaurus fix`).
+Per-repo overlays and policy packs are edited in the dashboard (`config_json`, forbidden paths, severity caps, auto-labels, Check Runs, `codasaurus fix`).
 
 ## Offline / air-gap hardening
 
@@ -205,7 +205,7 @@ Proposals follow PR title best practices: conventional `type(scope): description
 The Dashboard **Review analytics** panel rolls up the last 7 days from Postgres (`reviews`, `findings`, `dismissed_findings`). Open the dashboard after a Render wake — no external notification channel required. On a PR you can also ask:
 
 ```text
-@codasaurus digest
+codasaurus digest
 ```
 
 ## Auth & sessions

@@ -13,7 +13,7 @@ Codasaurus reviews PRs as a **GitHub App**. Prefer the dashboard [onboarding wiz
 | Permission    | Access                                     | Why                                               |
 | ------------- | ------------------------------------------ | ------------------------------------------------- |
 | Pull requests | Read & Write                               | Reviews, comments, labels, requested reviewers    |
-| Contents      | Read & Write (Write for `@codasaurus fix`) | Diffs, file fetch, optional branch writes         |
+| Contents      | Read & Write (Write for `codasaurus fix`) | Diffs, file fetch, optional branch writes         |
 | Issues        | Read & Write                               | PR/issue comments, labels, linked-issue context   |
 | Checks        | Read & Write                               | Optional Check Runs                               |
 | Metadata      | Read                                       | Required baseline                                 |
@@ -102,5 +102,5 @@ In the dashboard, **Settings → Connections → GitHub App → Test connection*
 | 401 on webhook          | `GITHUB_WEBHOOK_SECRET` matches the App setting              |
 | No reviews              | App installed on that repo; events include Pull request      |
 | Manifest callback error | `PUBLIC_URL` / TLS / reverse-proxy Host headers              |
-| `@codasaurus fix` fails | Contents **Write** permission + `allow_auto_fix` in settings |
+| `codasaurus fix` fails | Contents **Write** permission + `allow_auto_fix` in settings |
 | Install button opens a generic installations list with no prompt | App slug unknown (manual/env setup never stored it). Find the slug in **GitHub → Settings → Applications → your app** (the URL is `github.com/apps/<slug>`), then set `GITHUB_APP_SLUG=<slug>` and restart — or re-save credentials so Codasaurus resolves it from `GET /app`. |

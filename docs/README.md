@@ -17,13 +17,13 @@ Guides for running Codasaurus yourself. Pick a lane:
 |   <img src="https://img.shields.io/badge/4-data-4169E1" alt="4">   | [Database](database.md)                            | Pool, schema, multi-replica             |
 |   <img src="https://img.shields.io/badge/5-ops-64748b" alt="5">    | [Configuration](configuration.md)                  | Env, TOML, offline mode, OIDC           |
 | <img src="https://img.shields.io/badge/5b-config-64748b" alt="5b"> | [`.codasaurus.toml` schema](codasaurus-toml.md)    | In-repo TOML reference                  |
-|   <img src="https://img.shields.io/badge/6-prs-8b5cf6" alt="6">    | [Commands](commands.md)                            | `@codasaurus` on pull requests          |
+|   <img src="https://img.shields.io/badge/6-prs-8b5cf6" alt="6">    | [Commands](commands.md)                            | `codasaurus` on pull requests          |
 |   <img src="https://img.shields.io/badge/7-ops-f59e0b" alt="7">    | [Backup and restore](operations-backup-restore.md) | `pg_dump`, HA, health                   |
 
 ### Fast paths
 
 ```text
-compose up  →  onboarding  →  GitHub App  →  @codasaurus review
+compose up  →  onboarding  →  GitHub App  →  codasaurus review
 ```
 
 ```text

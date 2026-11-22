@@ -39,7 +39,12 @@ pub fn fingerprint_from_comment_body(body: &str) -> Option<String> {
         }
     }
     // Fallback: `@codasaurus ignore <fp>` in the footer
-    for prefix in ["@codasaurus ignore ", "@codasaurus-bot ignore "] {
+    for prefix in [
+        "codasaurus ignore ",
+        "@codasaurus ignore ",
+        "codasaurus-bot ignore ",
+        "@codasaurus-bot ignore ",
+    ] {
         if let Some(idx) = body.to_ascii_lowercase().find(&prefix.to_ascii_lowercase()) {
             let rest = &body[idx + prefix.len()..];
             let fp = rest.split_whitespace().next().unwrap_or("").trim();
