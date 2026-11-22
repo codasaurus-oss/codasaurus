@@ -47,7 +47,7 @@ tower-http = { version = "0.6", features = ["compression-gzip", "fs", "limit", "
 tower = { version = "0.5", features = ["timeout", "util"] }
 
 # Database (Postgres + TLS for Render / Neon / Supabase / etc.)
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "chrono"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "chrono"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
