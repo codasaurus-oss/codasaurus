@@ -53,18 +53,18 @@ fn dead_docs_links_resolve() {
     }
 
     let ci = read(".github/workflows/ci.yml");
-    let clippy_step = ci
-        .lines()
-        .find(|line| line.contains("cargo clippy"))
-        .unwrap_or_else(|| panic!("no cargo clippy step in ci.yml"));
     assert!(
-        clippy_step.contains("--all-targets"),
-        "clippy step must use --all-targets: {clippy_step}"
+        ci.contains("cargo clippy --locked --all-targets -- -D warnings"),
+        "ci.yml must run `cargo clippy --locked --all-targets -- -D warnings`"
     );
 
     let cargo_toml = read("Cargo.toml");
     assert!(
         cargo_toml.contains("[lints.rust]"),
         "Cargo.toml must declare [lints.rust]"
+    );
+    assert!(
+        cargo_toml.contains("warnings = \"deny\""),
+        "Cargo.toml must set warnings = \"deny\" under [lints.rust]"
     );
 }
