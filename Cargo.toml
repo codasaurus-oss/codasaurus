@@ -80,6 +80,8 @@ tree-sitter-javascript = "0.25.0"
 tree-sitter-typescript = "0.23.2"
 
 [dev-dependencies]
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

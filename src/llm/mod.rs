@@ -678,6 +678,11 @@ suggestion (concrete fix ≤40 words), confidence, and rationale citing symbols/
             "max_tokens": config.max_tokens,
             "temperature": config.temperature
         });
+        // Same reasoning-budget guard as the text path: free routers can pick
+        // reasoning models that never reach the JSON answer.
+        if base_url.contains("openrouter.ai") {
+            body["reasoning"] = json!({"max_tokens": 256});
+        }
         if !tool_specs.is_empty() {
             let obj = body.as_object_mut().expect("body is an object");
             obj.insert("tools".to_string(), json!(tool_specs));
@@ -848,7 +853,7 @@ Be direct. No padding."#
     );
     crate::metrics::record_llm_request(user_prompt.len() + system_prompt.len(), 220, false);
 
-    let raw = chat_completion_text(client, config, system_prompt, &user_prompt, 600).await?;
+    let raw = chat_completion_text(client, config, system_prompt, &user_prompt, 1500).await?;
     Ok(truncate_chars(raw.trim(), 600))
 }
 
@@ -1173,13 +1178,14 @@ async fn chat_completion_text_once(
     system_prompt: &str,
     user_prompt: &str,
     max_tokens: u32,
+    reasoning_max_tokens: u32,
 ) -> Result<String> {
     let pool = crate::bot::CONFIG_POOL.get();
     let prompt_chars = system_prompt.len() + user_prompt.len();
     let started = std::time::Instant::now();
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": [
             {
@@ -1191,6 +1197,13 @@ async fn chat_completion_text_once(
         "max_tokens": max_tokens,
         "temperature": 0.2
     });
+    // OpenRouter's free router can pick reasoning models that spend the whole
+    // completion budget thinking and return almost no content. Cap the
+    // reasoning tokens where the provider supports it; other endpoints ignore
+    // the field, so only send it to OpenRouter.
+    if base_url.contains("openrouter.ai") {
+        body["reasoning"] = json!({"max_tokens": reasoning_max_tokens});
+    }
 
     let resp = retry_async(
         &RetryConfig::api_default(),
@@ -1291,8 +1304,30 @@ async fn chat_completion_text(
         system_prompt,
         user_prompt,
         max_tokens,
+        256,
     )
     .await;
+
+    // Free routers sometimes pick a reasoning model that spends the entire
+    // budget thinking and returns no content. Retry once with room to answer.
+    let primary = match primary {
+        Err(e) if e.to_string().contains("missing content") => {
+            tracing::warn!(error = %e, "empty LLM content; retrying with a larger budget");
+            chat_completion_text_once(
+                client,
+                &config.base_url,
+                &config.api_key,
+                model,
+                "chat_text_retry",
+                system_prompt,
+                user_prompt,
+                max_tokens.saturating_mul(3).max(1500),
+                64,
+            )
+            .await
+        }
+        other => other,
+    };
 
     match (primary, &config.fallback) {
         (Ok(text), _) => Ok(text),
@@ -1307,6 +1342,7 @@ async fn chat_completion_text(
                 system_prompt,
                 user_prompt,
                 max_tokens,
+                256,
             )
             .await
         }
