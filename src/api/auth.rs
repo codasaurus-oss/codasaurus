@@ -194,7 +194,8 @@ pub async fn auth_middleware(
 // ---------------------------------------------------------------------------
 
 /// POST /api/auth/login
-async fn login(
+#[utoipa::path(post, path = "/api/auth/login", tag = "auth", responses((status = 200, description = "OK")))]
+pub(crate) async fn login(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
@@ -234,7 +235,11 @@ async fn login(
 }
 
 /// GET /api/auth/me
-async fn me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Json<MeResponse> {
+#[utoipa::path(get, path = "/api/auth/me", tag = "auth", responses((status = 200, description = "OK")))]
+pub(crate) async fn me(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<MeResponse> {
     if let Some(token) = extract_token(&headers) {
         if let Ok(Some(email)) = db::sessions::get_session(&state.pool, &token).await {
             let row: Option<(String, String, bool)> = {
@@ -270,7 +275,8 @@ async fn me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Js
 }
 
 /// POST /api/auth/logout
-async fn logout(
+#[utoipa::path(post, path = "/api/auth/logout", tag = "auth", responses((status = 200, description = "OK")))]
+pub(crate) async fn logout(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {

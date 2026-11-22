@@ -31,7 +31,10 @@ async fn resolve_app_slug(state: &AppState) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-async fn install_url(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+#[utoipa::path(get, path = "/api/github/install-url", tag = "github", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn install_url(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     if let Some(slug) = ensure_slug(&state).await {
         return Ok(Json(json!({
             "url": format!("https://github.com/apps/{}/installations/new", slug)
@@ -51,7 +54,10 @@ async fn install_url(State(state): State<AppState>) -> Result<Json<serde_json::V
     })))
 }
 
-async fn manage_url(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+#[utoipa::path(get, path = "/api/github/manage-url", tag = "github", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn manage_url(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     if let Some(slug) = ensure_slug(&state).await {
         let install_id: Option<i64> = crate::db::db_scalar_optional!(
             &state.pool,

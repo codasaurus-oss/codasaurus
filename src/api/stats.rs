@@ -29,7 +29,10 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/stats
-async fn stats(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+#[utoipa::path(get, path = "/api/stats", tag = "stats", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn stats(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     if let Ok(guard) = STATS_CACHE.lock() {
         if let Some(ref cached) = guard.1 {
             if guard.0.elapsed() < STATS_CACHE_TTL {

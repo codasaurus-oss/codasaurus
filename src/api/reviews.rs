@@ -55,7 +55,8 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/reviews
-async fn list_reviews(
+#[utoipa::path(get, path = "/api/reviews", tag = "reviews", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn list_reviews(
     State(state): State<AppState>,
     Query(params): Query<ListReviewsParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -147,7 +148,8 @@ async fn count_reviews(
 }
 
 /// GET /api/reviews/:id
-async fn get_review(
+#[utoipa::path(get, path = "/api/reviews/{id}", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_review(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -209,7 +211,8 @@ async fn get_review(
 }
 
 /// GET /api/reviews/:id/findings
-async fn get_review_findings(
+#[utoipa::path(get, path = "/api/reviews/{id}/findings", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_review_findings(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -236,7 +239,8 @@ async fn get_review_findings(
 }
 
 /// GET /api/reviews/:id/sarif — SARIF 2.1.0 export for external tooling (e.g. GitHub code scanning).
-async fn get_review_sarif(
+#[utoipa::path(get, path = "/api/reviews/{id}/sarif", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_review_sarif(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<axum::response::Response, ApiError> {

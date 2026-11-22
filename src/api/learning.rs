@@ -18,7 +18,8 @@ pub fn router() -> Router<AppState> {
         .route("/rules/{id}/archive", post(archive_rule))
 }
 
-async fn list_rules(
+#[utoipa::path(get, path = "/api/learning/rules", tag = "learning", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn list_rules(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {

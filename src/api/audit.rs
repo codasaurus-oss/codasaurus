@@ -35,7 +35,8 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/audit
-async fn list_audit(
+#[utoipa::path(get, path = "/api/audit", tag = "audit", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn list_audit(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<ListAuditParams>,

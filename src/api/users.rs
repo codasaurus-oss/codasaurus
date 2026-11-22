@@ -54,7 +54,8 @@ pub struct ChangePasswordBody {
 }
 
 /// GET /api/users
-async fn list_users(
+#[utoipa::path(get, path = "/api/users", tag = "users", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
