@@ -11,7 +11,7 @@ Security fixes are applied to the latest release line. Older tags are not genera
 | 0.1.x   | :white_check_mark: |
 | < 0.1   | :x:                |
 
-Always prefer the newest [GitHub Release](https://github.com/lohitkolluri/codasaurus/releases).
+Always prefer the newest [GitHub Release](https://github.com/codasaurus-oss/codasaurus/releases).
 
 ## Reporting a vulnerability
 
@@ -21,7 +21,7 @@ Always prefer the newest [GitHub Release](https://github.com/lohitkolluri/codasa
 
 If enabled for this repository, use GitHub’s private reporting flow:
 
-**[Report a vulnerability](https://github.com/lohitkolluri/codasaurus/security/advisories/new)**
+**[Report a vulnerability](https://github.com/codasaurus-oss/codasaurus/security/advisories/new)**
 
 This keeps the report confidential, attaches it to a draft Security Advisory, and lets us coordinate disclosure without exposing details publicly.
 
@@ -33,7 +33,7 @@ This keeps the report confidential, attaches it to a draft Security Advisory, an
 
 If private reporting is unavailable or unsuitable for your case, email:
 
-**lohitkolluri@gmail.com**
+**iam@thelohit.in**
 
 Subject prefix (recommended): `[SECURITY] Codasaurus`
 
@@ -87,7 +87,7 @@ We may:
 
 - Ask for a clearer reproducer or a CVE-style write-up  
 - Invite you as a temporary collaborator on a private advisory  
-- Credit you in the advisory / [CHANGELOG](CHANGELOG.md) `Security` section (unless you opt out)  
+- Credit you in the security advisory and release notes (unless you opt out)  
 - Decline reports that are out of scope, duplicates, or not security issues—we will say why  
 
 We will **not** pursue legal action against researchers who:
@@ -116,7 +116,7 @@ Self-hosting means you own the threat model. At minimum:
 - Restrict dashboard exposure (VPN, SSO, IP allowlists) for internet-facing instances  
 - Prefer OIDC over shared passwords when available  
 - Run the published non-root container / Compose defaults; do not run the binary as root  
-- Review [docs/configuration.md](docs/configuration.md) and [docs/operations-backup-restore.md](docs/operations-backup-restore.md)
+- Review [configuration](https://codasaurus-oss.github.io/configuration/) and [backup and restore](https://codasaurus-oss.github.io/operations-backup-restore/)
 
 ## Preference for safe reporting
 

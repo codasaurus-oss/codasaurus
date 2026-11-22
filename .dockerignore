@@ -6,7 +6,6 @@
 # Build artifacts
 target/
 node_modules/
-svelte-dashboard/dist/
 *.rs.bk
 
 # Docker

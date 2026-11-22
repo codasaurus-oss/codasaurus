@@ -1,9 +1,12 @@
-# ── Stage 1: Build Svelte SPA ──────────────────────────────────
+# ── Stage 1: Build the SPA from codasaurus-frontend ─────────────
 FROM node:20-alpine AS frontend
+ARG DASHBOARD_REF=main
+RUN apk add --no-cache git
+WORKDIR /app
+RUN git clone --depth 1 --branch "${DASHBOARD_REF}" \
+      https://github.com/codasaurus-oss/codasaurus-frontend.git svelte-dashboard
 WORKDIR /app/svelte-dashboard
-COPY svelte-dashboard/package*.json ./
 RUN npm ci --ignore-scripts
-COPY svelte-dashboard/ ./
 RUN npm run build
 
 # ── Stage 2: Build Rust binary ──────────────────────────────────
