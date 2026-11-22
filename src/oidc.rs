@@ -15,9 +15,10 @@ use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
+
+use crate::redis::StateStore;
 
 #[derive(Clone, Debug)]
 pub struct OidcConfig {
@@ -93,15 +94,6 @@ struct IdClaims {
     email_verified: Option<bool>,
 }
 
-/// Short-lived CSRF state + PKCE verifier store: state -> (created_at, code_verifier).
-static PENDING: LazyLock<Mutex<HashMap<String, (Instant, String)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn prune_pending(map: &mut HashMap<String, (Instant, String)>) {
-    let cutoff = Instant::now() - Duration::from_secs(600);
-    map.retain(|_, (t, _)| *t > cutoff);
-}
-
 fn generate_pkce() -> (String, String) {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -111,15 +103,27 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-pub async fn authorization_url(cfg: &OidcConfig) -> Result<(String, String)> {
+pub async fn store_pending(store: &StateStore, state: &str, verifier: &str) -> Result<()> {
+    store
+        .set_ex(
+            &format!("oidc:state:{state}"),
+            verifier,
+            Duration::from_secs(600),
+        )
+        .await
+        .context("store pending OIDC state")?;
+    Ok(())
+}
+
+pub async fn authorization_url(
+    cfg: &OidcConfig,
+    store: &StateStore,
+) -> Result<(String, String)> {
     cfg.require_client_secret()?;
     let disc = discover(cfg).await?;
     let state = Uuid::new_v4().to_string();
     let (verifier, challenge) = generate_pkce();
-    if let Ok(mut m) = PENDING.lock() {
-        prune_pending(&mut m);
-        m.insert(state.clone(), (Instant::now(), verifier));
-    }
+    store_pending(store, &state, &verifier).await?;
     let url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
         disc.authorization_endpoint,
@@ -133,12 +137,12 @@ pub async fn authorization_url(cfg: &OidcConfig) -> Result<(String, String)> {
 }
 
 /// Take pending OIDC state and return the associated PKCE `code_verifier`.
-pub fn take_pending(state: &str) -> Option<String> {
-    if let Ok(mut m) = PENDING.lock() {
-        prune_pending(&mut m);
-        return m.remove(state).map(|(_, verifier)| verifier);
-    }
-    None
+pub async fn take_pending(store: &StateStore, state: &str) -> Option<String> {
+    store
+        .getdel(&format!("oidc:state:{state}"))
+        .await
+        .ok()
+        .flatten()
 }
 
 pub async fn exchange_code(cfg: &OidcConfig, code: &str, code_verifier: &str) -> Result<String> {

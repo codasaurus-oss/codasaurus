@@ -293,10 +293,10 @@ async fn oidc_status() -> Json<serde_json::Value> {
     Json(json!({ "enabled": crate::oidc::OidcConfig::enabled() }))
 }
 
-async fn oidc_login() -> Result<impl IntoResponse, ApiError> {
+async fn oidc_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let cfg = crate::oidc::OidcConfig::from_env()
         .ok_or_else(|| ApiError::bad_request("OIDC is not configured"))?;
-    let (url, _state) = crate::oidc::authorization_url(&cfg)
+    let (url, _state) = crate::oidc::authorization_url(&cfg, &state.redis)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(axum::response::Redirect::temporary(&url))
@@ -322,7 +322,8 @@ async fn oidc_callback(
     let state_param = params
         .state
         .ok_or_else(|| ApiError::bad_request("missing state"))?;
-    let code_verifier = crate::oidc::take_pending(&state_param)
+    let code_verifier = crate::oidc::take_pending(&state.redis, &state_param)
+        .await
         .ok_or_else(|| ApiError::bad_request("invalid or expired OIDC state"))?;
     let cfg = crate::oidc::OidcConfig::from_env()
         .ok_or_else(|| ApiError::bad_request("OIDC is not configured"))?;
