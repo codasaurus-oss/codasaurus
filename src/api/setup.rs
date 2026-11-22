@@ -86,6 +86,21 @@ pub struct GithubCallbackQuery {
     pub code: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ManifestPageQuery {
+    pub org: Option<String>,
+}
+
+/// GitHub org login: alphanumeric or hyphens, no leading/trailing hyphen, <= 39 chars.
+fn valid_org_login(org: &str) -> bool {
+    let org = org.trim();
+    !org.is_empty()
+        && org.len() <= 39
+        && !org.starts_with('-')
+        && !org.ends_with('-')
+        && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 #[derive(Serialize)]
 pub struct GithubCallbackResponse {
     pub status: String,
@@ -645,12 +660,22 @@ fn build_manifest(public_url: &str) -> serde_json::Value {
 async fn github_manifest_page(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(params): Query<ManifestPageQuery>,
 ) -> Result<impl axum::response::IntoResponse, ApiError> {
     use axum::http::{header, StatusCode};
     use axum::response::Html;
 
     let public_url = resolve_public_url(&state, &headers).await;
     let manifest = build_manifest(&public_url);
+
+    // A private app can only be installed on the account that owns it, so an
+    // org install needs the org-scoped creation endpoint.
+    let action_url = match params.org.as_deref().map(str::trim) {
+        Some(org) if valid_org_login(org) => {
+            format!("https://github.com/organizations/{org}/settings/apps/new")
+        }
+        _ => "https://github.com/settings/apps/new".to_string(),
+    };
 
     let manifest_json = serde_json::to_string(&manifest)
         .map_err(|e| ApiError::internal(format!("Failed to serialize manifest: {e}")))?;
@@ -679,7 +704,7 @@ async fn github_manifest_page(
   <div class="card">
     <p style="font-size:14px;margin:0 0 8px">Redirecting to GitHub to create your app…</p>
     <div class="spinner"></div>
-    <form id="f" method="post" action="https://github.com/settings/apps/new">
+    <form id="f" method="post" action="{action_url}">
       <input type="hidden" name="manifest" value='{}'>
     </form>
   </div>
@@ -687,7 +712,8 @@ async fn github_manifest_page(
 </body>
 </html>"#,
         // Escape single quotes for the HTML attribute
-        manifest_json.replace('\'', "&#39;")
+        manifest_json.replace('\'', "&#39;"),
+        action_url = action_url
     );
 
     Ok((

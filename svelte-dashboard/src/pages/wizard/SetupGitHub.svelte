@@ -17,6 +17,9 @@
   let savingUrl = $state(false);
   let urlMsg = $state("");
 
+  // Optional org owner for the new GitHub App
+  let org = $state("");
+
   // Manual credentials form (for users who already have an app)
   let showManual = $state(false);
   let appId = $state("");
@@ -114,7 +117,11 @@
   });
 
   function openManifest() {
-    window.open("/api/setup/github/manifest-page", "_blank", "noopener,noreferrer");
+    const owner = org.trim();
+    const target = owner
+      ? `/api/setup/github/manifest-page?org=${encodeURIComponent(owner)}`
+      : "/api/setup/github/manifest-page";
+    window.open(target, "_blank", "noopener,noreferrer");
   }
 </script>
 
@@ -173,6 +180,17 @@
           </p>
         </div>
       {/if}
+    </div>
+
+    <div class="form-group" style="margin-bottom:12px">
+      <label for="wizard-org"
+        >Organization <span style="opacity:0.6">(optional — blank creates it under your personal account)</span></label
+      >
+      <input id="wizard-org" type="text" bind:value={org} placeholder="my-org" autocomplete="off" />
+      <p class="wizard-hint">
+        A private app can only be installed on the account that owns it. To use org repos,
+        create it under that org — you need admin rights there.
+      </p>
     </div>
 
     <button class="primary" onclick={openManifest} style="width:100%;margin-bottom:12px;padding:12px">
