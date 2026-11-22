@@ -222,7 +222,7 @@ struct InstallationInfo {
 
 #[derive(Deserialize)]
 pub(crate) struct WebhookPayload {
-    #[serde(rename = "action")]
+    #[serde(rename = "action", default)]
     action: String,
     #[serde(rename = "pull_request")]
     pull_request: Option<serde_json::Value>,
@@ -500,6 +500,12 @@ pub(crate) async fn handle_webhook(
         .get("x-github-event")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    // GitHub sends `ping` on app setup and webhook changes. It has no `action`
+    // and needs no processing; acknowledge it instead of failing the delivery.
+    if event == "ping" {
+        return Ok(Json(serde_json::json!({"status": "ok", "event": "ping"})));
+    }
+
     let payload: WebhookPayload =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -1157,5 +1163,13 @@ mod author_acl_tests {
         assert!(!thread_resolver_can_dismiss(&thread_payload(
             "NONE", "eve", "alice", "bob"
         )));
+    }
+
+    #[test]
+    fn ping_payload_without_action_parses() {
+        let payload: WebhookPayload =
+            serde_json::from_str(r#"{"zen":"Keep it simple.","hook_id":1}"#)
+                .expect("ping payload must parse");
+        assert!(payload.action.is_empty());
     }
 }

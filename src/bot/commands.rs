@@ -162,6 +162,10 @@ fn extract_ask_question(body: &str) -> Option<String> {
 
 fn extract_ignore_fingerprint(body: &str) -> Option<String> {
     for prefix in [
+        "codasaurus ignore ",
+        "codasaurus-bot ignore ",
+        "codasaurus dismiss ",
+        "codasaurus-bot dismiss ",
         "@codasaurus ignore ",
         "@codasaurus-bot ignore ",
         "@codasaurus dismiss ",
@@ -1330,7 +1334,7 @@ async fn spawn_ignore_comment(ctx: WebhookContext, pr_number: i64, fingerprint: 
                     )
                     .await?;
                 format!(
-                    "### Codasaurus dismiss\n\nFinding `{fp}` will be filtered on future reviews.\n\n<sub>`@codasaurus help`</sub>"
+                    "### Codasaurus dismiss\n\nFinding `{fp}` will be filtered on future reviews.\n\n<sub>`codasaurus help`</sub>"
                 )
             } else {
                 format!(
@@ -1338,7 +1342,7 @@ async fn spawn_ignore_comment(ctx: WebhookContext, pr_number: i64, fingerprint: 
                 )
             }
         } else {
-            "### Codasaurus dismiss\n\nReply with `@codasaurus ignore <fingerprint>` (see each finding comment).\n"
+            "### Codasaurus dismiss\n\nReply with `codasaurus ignore <fingerprint>` (see each finding comment).\n"
                 .to_string()
         };
 
@@ -1398,7 +1402,7 @@ async fn spawn_digest(ctx: WebhookContext, pr_number: i64) {
                  | Dismissals | {dismissals} |\n\
                  | Pass rate (all time) | {pass} |\n\n\
                  Open the dashboard **Review analytics** panel for detector breakdowns.\n\n\
-                 <sub>`@codasaurus help`</sub>"
+                 <sub>`codasaurus help`</sub>"
             )
         } else {
             "### Codasaurus digest\n\n> Database unavailable.".into()
