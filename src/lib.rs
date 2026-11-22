@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod oidc;
 pub mod parser;
+pub mod redis;
 pub mod registry;
 pub mod retry;
 pub mod serve;

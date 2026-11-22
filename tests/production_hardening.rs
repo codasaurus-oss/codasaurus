@@ -4,6 +4,7 @@
 //! (defaults to `postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus`).
 
 use axum::body::Body;
+use axum::extract::connect_info::MockConnectInfo;
 use axum::http::{Request, StatusCode};
 use codasaurus::api::{self, AppState};
 use codasaurus::db;
@@ -23,14 +24,23 @@ fn unique_email(prefix: &str) -> String {
     format!("{prefix}-{}@example.com", uuid::Uuid::new_v4().simple())
 }
 
-fn app(pool: db::DbPool) -> axum::Router {
-    api::build_router(AppState { pool })
+fn redis_url() -> String {
+    std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into())
+}
+
+async fn app(pool: db::DbPool) -> axum::Router {
+    let redis = codasaurus::redis::StateStore::connect(&redis_url())
+        .await
+        .expect("connect redis test pool");
+    api::build_router(AppState { pool, redis }).layer(MockConnectInfo(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ))
 }
 
 #[tokio::test]
 async fn unauthenticated_settings_returns_401() {
     let pool = test_pool().await;
-    let app = app(pool);
+    let app = app(pool).await;
 
     let resp = app
         .oneshot(
@@ -48,7 +58,7 @@ async fn unauthenticated_settings_returns_401() {
 #[tokio::test]
 async fn unauthenticated_reviews_returns_401() {
     let pool = test_pool().await;
-    let app = app(pool);
+    let app = app(pool).await;
 
     let resp = app
         .oneshot(
@@ -66,7 +76,7 @@ async fn unauthenticated_reviews_returns_401() {
 #[tokio::test]
 async fn unauthenticated_repos_returns_401() {
     let pool = test_pool().await;
-    let app = app(pool);
+    let app = app(pool).await;
 
     let resp = app
         .oneshot(
@@ -84,7 +94,7 @@ async fn unauthenticated_repos_returns_401() {
 #[tokio::test]
 async fn setup_status_is_public() {
     let pool = test_pool().await;
-    let app = app(pool);
+    let app = app(pool).await;
 
     let resp = app
         .oneshot(
@@ -107,7 +117,7 @@ async fn setup_admin_freeze_after_first_admin() {
         .await
         .unwrap();
 
-    let app = app(pool);
+    let app = app(pool).await;
 
     let resp = app
         .oneshot(
@@ -151,7 +161,7 @@ async fn authenticated_settings_ok() {
         .unwrap();
     let token = db::sessions::create_session(&pool, &email).await.unwrap();
 
-    let app = app(pool);
+    let app = app(pool).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -248,7 +258,7 @@ async fn viewer_cannot_write_settings() {
         .await
         .unwrap();
     let token = db::sessions::create_session(&pool, &email).await.unwrap();
-    let app = app(pool);
+    let app = app(pool).await;
 
     let resp = app
         .oneshot(
@@ -273,7 +283,7 @@ async fn maintainer_cannot_invite_but_can_list_repos() {
         .await
         .unwrap();
     let token = db::sessions::create_session(&pool, &email).await.unwrap();
-    let app = app(pool.clone());
+    let app = app(pool.clone()).await;
 
     let invite = app
         .clone()
@@ -326,7 +336,7 @@ async fn invite_accept_creates_session() {
         .unwrap();
     let guest_email = pending.email.clone().unwrap();
 
-    let app = app(pool);
+    let app = app(pool).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -358,7 +368,7 @@ async fn cannot_remove_last_owner() {
         .await
         .unwrap();
     let token = db::sessions::create_session(&pool, &email).await.unwrap();
-    let app = app(pool);
+    let app = app(pool).await;
 
     let resp = app
         .oneshot(

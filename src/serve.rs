@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     error_handling::HandleErrorLayer,
-    extract::Request,
+    extract::{ConnectInfo, Request},
     http::{header, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -24,6 +24,7 @@ use tower_http::{
 use crate::api::{self, AppState};
 use crate::bot;
 use crate::db;
+use crate::redis::StateStore;
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -124,15 +125,22 @@ pub async fn serve(
         }
     }
 
-    let app = build_router(pool.clone(), bot_config);
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let redis = StateStore::connect(&redis_url).await?;
+    tracing::info!("Redis connected for shared rate limiting");
+
+    let app = build_router(pool.clone(), redis, bot_config);
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     println!("  Codasaurus server listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     // Drain the pool so Postgres sees clean disconnects on deploy/restart.
     pool.close().await;
@@ -140,8 +148,15 @@ pub async fn serve(
     Ok(())
 }
 
-fn build_router(pool: crate::db::DbPool, bot_config: Option<bot::BotConfig>) -> Router {
-    let state = AppState { pool: pool.clone() };
+pub fn build_router(
+    pool: crate::db::DbPool,
+    redis: StateStore,
+    bot_config: Option<bot::BotConfig>,
+) -> Router {
+    let state = AppState {
+        pool: pool.clone(),
+        redis: redis.clone(),
+    };
     let api = api::build_router(state);
 
     bot::set_config_pool(pool.clone());
@@ -174,11 +189,18 @@ fn build_router(pool: crate::db::DbPool, bot_config: Option<bot::BotConfig>) -> 
     // GitHub sends POST to /webhook/ (with trailing slash). Register both variants
     // to avoid any Axum trailing-slash normalization issues.
     let webhook_handler = post(
-        |headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
-            if let Err(err) = api::rate_limit::check_webhook_rate_limit(&headers) {
-                return err.into_response();
+        move |ConnectInfo(peer): ConnectInfo<SocketAddr>,
+              headers: axum::http::HeaderMap,
+              body: axum::body::Bytes| {
+            let redis = redis.clone();
+            async move {
+                if let Err(err) =
+                    api::rate_limit::check_webhook_rate_limit(&redis, peer.ip(), &headers).await
+                {
+                    return err.into_response();
+                }
+                bot::handle_webhook(headers, body).await.into_response()
             }
-            bot::handle_webhook(headers, body).await.into_response()
         },
     );
 

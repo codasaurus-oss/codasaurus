@@ -16,6 +16,13 @@ services:
       retries: 5
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+
   codasaurus:
     build:
       context: .
@@ -26,6 +33,8 @@ services:
       - "3000:3000"
     environment:
       - DATABASE_URL=postgres://codasaurus:${POSTGRES_PASSWORD:-codasaurus}@postgres:5432/codasaurus
+      - REDIS_URL=redis://redis:6379
+      - CODASAURUS_TRUSTED_PROXIES=${CODASAURUS_TRUSTED_PROXIES:-127.0.0.0/8,::1/128}
       - CODASAURUS_DATA_DIR=/data
       - PORT=3000
       - GITHUB_APP_ID=${GITHUB_APP_ID:-}
@@ -59,6 +68,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD", "codasaurus", "health", "--ready"]
       interval: 30s
