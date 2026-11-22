@@ -6,7 +6,7 @@ item links to an issue once work starts.
 ## Now
 
 - Green CI on `main`, protected branch, release automation
-- Docs site published from [docs site](https://codasaurus-oss.github.io/docs/)
+- Docs site published at [docs site](https://codasaurus-oss.github.io/docs/)
 - First tagged release after the automation lands
 
 ## Next
