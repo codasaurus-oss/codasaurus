@@ -58,8 +58,10 @@ pub fn router() -> Router<AppState> {
 #[utoipa::path(get, path = "/api/reviews", tag = "reviews", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn list_reviews(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<ListReviewsParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_role(&state.pool, &headers, super::rbac::MinRole::Viewer).await?;
     let limit = params.limit.unwrap_or(20).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
     let repo_id = params.repo_id;
@@ -151,8 +153,10 @@ async fn count_reviews(
 #[utoipa::path(get, path = "/api/reviews/{id}", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_review(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_review_read(&state, &headers, id).await?;
     let review = db::reviews::get_review(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
@@ -214,12 +218,10 @@ pub(crate) async fn get_review(
 #[utoipa::path(get, path = "/api/reviews/{id}/findings", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_review_findings(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Verify the review exists first
-    let _review = db::reviews::get_review(&state.pool, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
+    super::rbac::require_review_read(&state, &headers, id).await?;
 
     let findings = db::reviews::get_findings_for_review(&state.pool, id).await?;
 
@@ -242,8 +244,10 @@ pub(crate) async fn get_review_findings(
 #[utoipa::path(get, path = "/api/reviews/{id}/sarif", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_review_sarif(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<axum::response::Response, ApiError> {
+    let (_user, repo_id) = super::rbac::require_review_read(&state, &headers, id).await?;
     let review = db::reviews::get_review(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
@@ -254,7 +258,7 @@ pub(crate) async fn get_review_sarif(
         &state.pool,
         String,
         "SELECT full_name FROM repos WHERE id = ?",
-        review.repo_id
+        repo_id
     )
     .ok()
     .flatten()

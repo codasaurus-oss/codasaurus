@@ -6,6 +6,7 @@
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
 use axum::http::{Request, StatusCode};
+use codasaurus::api::rbac::{require_repo_read, require_review_read};
 use codasaurus::api::{self, AppState};
 use codasaurus::db;
 use codasaurus::retry::{github_request, RetryConfig};
@@ -482,4 +483,97 @@ async fn failed_finding_insert_rolls_back_deleted_findings() {
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].severity, "info");
     assert_eq!(remaining[0].fingerprint.as_deref(), Some("keep"));
+}
+
+#[tokio::test]
+async fn viewer_repo_and_review_reads_go_through_policy() {
+    let pool = test_pool().await;
+    let email = unique_email("viewerread");
+    db::users::create_user(&pool, &email, "password123", "viewer")
+        .await
+        .unwrap();
+    let token = db::sessions::create_session(&pool, &email).await.unwrap();
+
+    let full_name = format!("owner/repo-{}", uuid::Uuid::new_v4().simple());
+    let repo = db::repos::create_repo(
+        &pool,
+        &db::models::RepoCreate {
+            github_id: None,
+            full_name,
+            owner: "owner".into(),
+            name: "repo".into(),
+            default_branch: None,
+            installation_id: 1,
+            private: false,
+        },
+    )
+    .await
+    .unwrap();
+    let review = db::reviews::create_review(
+        &pool,
+        &db::models::ReviewCreate {
+            repo_id: repo.id,
+            pr_number: 1,
+            pr_title: None,
+            pr_author: None,
+            pr_base_branch: None,
+            pr_head_branch: None,
+            pr_head_sha: Some("abc123".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let redis = codasaurus::redis::StateStore::connect(&redis_url())
+        .await
+        .expect("connect redis test pool");
+    let state = AppState {
+        pool: pool.clone(),
+        redis,
+    };
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        axum::http::HeaderValue::from_str(&format!("codasaurus_session={token}")).unwrap(),
+    );
+
+    assert!(require_repo_read(&state, &headers, repo.id).await.is_ok());
+    let read = require_review_read(&state, &headers, review.id).await;
+    assert!(read.is_ok());
+    assert_eq!(read.unwrap().1, repo.id);
+
+    let empty = axum::http::HeaderMap::new();
+    let err = require_repo_read(&state, &empty, repo.id).await.unwrap_err();
+    assert!(matches!(err, api::errors::ApiError::Unauthorized(_)));
+    let err = require_review_read(&state, &empty, review.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, api::errors::ApiError::Unauthorized(_)));
+
+    let app = app(pool).await;
+    let repo_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/repos/{}", repo.id))
+                .header("cookie", format!("codasaurus_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repo_resp.status(), StatusCode::OK);
+
+    let review_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/reviews/{}", review.id))
+                .header("cookie", format!("codasaurus_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(review_resp.status(), StatusCode::OK);
 }

@@ -91,3 +91,30 @@ pub async fn require_maintainer(
 ) -> Result<UserView, ApiError> {
     require_role(&state.pool, headers, MinRole::Maintainer).await
 }
+
+/// Require a Viewer session and confirm the repo exists.
+pub async fn require_repo_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    repo_id: i64,
+) -> Result<UserView, ApiError> {
+    let user = require_role(&state.pool, headers, MinRole::Viewer).await?;
+    let repo = db::repos::get_repo(&state.pool, repo_id).await?;
+    if repo.is_none() {
+        return Err(ApiError::not_found(format!("Repo {repo_id} not found")));
+    }
+    Ok(user)
+}
+
+/// Resolve a review to its repo and apply the repo read policy.
+pub async fn require_review_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    review_id: i64,
+) -> Result<(UserView, i64), ApiError> {
+    let review = db::reviews::get_review(&state.pool, review_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Review {review_id} not found")))?;
+    let user = require_repo_read(state, headers, review.repo_id).await?;
+    Ok((user, review.repo_id))
+}
