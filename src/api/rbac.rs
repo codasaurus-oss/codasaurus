@@ -112,6 +112,7 @@ pub async fn require_review_read(
     headers: &HeaderMap,
     review_id: i64,
 ) -> Result<(UserView, i64), ApiError> {
+    require_role(&state.pool, headers, MinRole::Viewer).await?;
     let review = db::reviews::get_review(&state.pool, review_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Review {review_id} not found")))?;
