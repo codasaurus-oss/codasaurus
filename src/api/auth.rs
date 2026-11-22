@@ -143,7 +143,7 @@ fn clear_cookie() -> String {
     cookie
 }
 
-pub(crate) use super::rate_limit::client_ip;
+pub(crate) use super::rate_limit::client_ip_from_headers as client_ip;
 
 fn check_auth_rate_limit(headers: &axum::http::HeaderMap, email: &str) -> Result<(), ApiError> {
     let key = format!("{}/{}", client_ip(headers), email.trim().to_lowercase());

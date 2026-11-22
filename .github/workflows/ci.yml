@@ -51,9 +51,14 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     env:
       DATABASE_URL: postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus
       CODASAURUS_TEST_DATABASE_URL: postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus
+      REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2

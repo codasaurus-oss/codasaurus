@@ -23,11 +23,13 @@ use axum::middleware;
 use axum::Router;
 
 use crate::db::DbPool;
+use crate::redis::StateStore;
 
 /// Shared application state available to every handler via `State<AppState>`.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: DbPool,
+    pub redis: StateStore,
 }
 
 /// Public routes (setup wizard + auth). No session required.
