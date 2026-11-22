@@ -69,7 +69,10 @@ jobs:
         # Pulled in via jsonwebtoken for GitHub App JWT minting. Exploit needs a
         # remote timing oracle against RSA private-key ops; signing here is
         # local/low-volume. Revisit when upstream ships a fix or we migrate crypto.
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        # RUSTSEC-2026-0459 (SQLite WAL memory disclosure): libsqlite3-sys is
+        # only locked as an optional sqlx sqlite dependency. The binary is built
+        # with the postgres feature, so no SQLite code is linked.
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
       - name: Run tests
         run: cargo test --locked
 

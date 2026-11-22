@@ -23,7 +23,7 @@ Be respectful and constructive. Harassment, spam, or bad-faith contributions wil
 
 | Tool | Version |
 | ---- | ------- |
-| Rust | **1.88+** (pinned in [`rust-toolchain.toml`](rust-toolchain.toml)) |
+| Rust | **1.90+** (pinned in [`rust-toolchain.toml`](rust-toolchain.toml)) |
 | Node.js | **20+** (dashboard) |
 | PostgreSQL | **16+** (local or Docker) |
 | Docker / Compose | Optional, recommended for Postgres |

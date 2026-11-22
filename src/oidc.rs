@@ -216,8 +216,8 @@ async fn email_from_verified_jwt(cfg: &OidcConfig, token: &str, jwks_uri: &str) 
 
     let alg = jsonwebtoken::Algorithm::RS256;
     let mut validation = Validation::new(alg);
-    validation.set_issuer(&[cfg.issuer.clone()]);
-    validation.set_audience(&[cfg.client_id.clone()]);
+    validation.set_issuer(std::slice::from_ref(&cfg.issuer));
+    validation.set_audience(std::slice::from_ref(&cfg.client_id));
     // Some IdPs put aud as array — jsonwebtoken handles via set_audience
     validation.validate_aud = true;
 
