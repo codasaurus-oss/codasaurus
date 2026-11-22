@@ -8,6 +8,7 @@ use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 use ipnet::IpNet;
+use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -74,9 +75,15 @@ pub(crate) fn client_ip_from_headers(headers: &HeaderMap) -> String {
 /// peer is an allowlisted proxy, otherwise the socket peer wins.
 pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> String {
     if trusted.iter().any(|net| net.contains(&peer)) {
-        let forwarded = client_ip_from_headers(headers);
-        if forwarded != "unknown" {
-            return forwarded;
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            for hop in xff.split(',').rev() {
+                let hop = hop.trim();
+                if let Ok(ip) = hop.parse::<IpAddr>() {
+                    if !trusted.iter().any(|net| net.contains(&ip)) {
+                        return hop.to_string();
+                    }
+                }
+            }
         }
     }
     peer.to_string()
@@ -103,6 +110,13 @@ fn too_many(retry_after: Duration, msg: &str) -> ApiError {
     ApiError::too_many_requests_after(msg, retry_after.as_secs().max(1))
 }
 
+/// Redis key namespaced by a hash of the session token so the raw value never
+/// appears in key listings or SLOWLOG.
+fn session_rate_key(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    format!("rl:s:{}", hex::encode(digest))
+}
+
 /// Axum middleware for authenticated REST/dashboard routes. Keyed by session
 /// cookie when present (so one user's tabs share a budget), else client IP.
 pub async fn api_rate_limit_middleware(
@@ -112,7 +126,7 @@ pub async fn api_rate_limit_middleware(
     next: Next,
 ) -> Result<Response, ApiError> {
     let key = match super::auth::extract_token(req.headers()) {
-        Some(token) => format!("rl:s:{token}"),
+        Some(token) => session_rate_key(&token),
         None => format!(
             "rl:ip:{}",
             client_ip(peer.ip(), req.headers(), trusted_proxies())
@@ -166,5 +180,39 @@ mod tests {
         let peer = "127.0.0.1".parse().unwrap();
         let trusted = ["127.0.0.0/8".parse().unwrap()];
         assert_eq!(client_ip(peer, &headers, &trusted), "10.0.0.5");
+    }
+
+    #[test]
+    fn client_ip_uses_rightmost_untrusted_hop() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "10.0.0.5, 127.0.0.2, 203.0.113.9".parse().unwrap(),
+        );
+        let peer = "127.0.0.1".parse().unwrap();
+        let trusted = ["127.0.0.0/8".parse().unwrap()];
+        assert_eq!(client_ip(peer, &headers, &trusted), "203.0.113.9");
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_peer_when_all_xff_hops_trusted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "127.0.0.2, 127.0.0.3".parse().unwrap());
+        let peer = "127.0.0.1".parse().unwrap();
+        let trusted = ["127.0.0.0/8".parse().unwrap()];
+        assert_eq!(client_ip(peer, &headers, &trusted), "127.0.0.1");
+    }
+
+    #[test]
+    fn session_rate_key_hash_contains_no_raw_token() {
+        let token = "SESSION_TOKEN_SENTINEL_9f3a2b";
+        let key = session_rate_key(token);
+        assert!(!key.contains(token), "key leaked raw token: {key}");
+        assert_eq!(key, session_rate_key(token), "key must be stable");
+        assert_ne!(
+            key,
+            session_rate_key("DIFFERENT_TOKEN_SENTINEL"),
+            "different tokens must map to different keys"
+        );
     }
 }
