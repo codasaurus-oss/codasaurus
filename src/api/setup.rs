@@ -1057,6 +1057,52 @@ async fn github_callback(
     }))
 }
 
+fn validate_admin_body(body: &AdminBody) -> Result<(), ApiError> {
+    if !body.email.contains('@') {
+        return Err(ApiError::bad_request("Invalid email address"));
+    }
+    if let Err(msg) = db::users::validate_password_policy(&body.password, &body.email) {
+        return Err(ApiError::bad_request(msg));
+    }
+    Ok(())
+}
+
+fn setup_db_error(err: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(ref db_err) = err {
+        if db_err.message().contains("UNIQUE") {
+            return ApiError::bad_request("A user with that email already exists");
+        }
+    }
+    tracing::error!(error = %err, "database error during setup");
+    ApiError::internal("Internal server error")
+}
+
+async fn first_owner_gate(
+    redis: &crate::redis::StateStore,
+    peer: SocketAddr,
+    headers: &axum::http::HeaderMap,
+    body: &AdminBody,
+) -> Result<(), ApiError> {
+    let key = format!(
+        "bootstrap:{}",
+        super::rate_limit::client_ip(peer.ip(), headers, super::rate_limit::trusted_proxies())
+    );
+    super::rate_limit::check(redis, &key, 5, Duration::from_secs(900))
+        .await
+        .map_err(|retry| {
+            ApiError::too_many_requests_after(
+                "Too many bootstrap attempts. Please try again later.",
+                retry.as_secs().max(1),
+            )
+        })?;
+    let secret = headers
+        .get(super::bootstrap::BOOTSTRAP_SECRET_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    validate_admin_body(body)?;
+    super::bootstrap::consume(redis, secret).await
+}
+
 /// POST /api/setup/admin
 async fn setup_admin(
     State(state): State<AppState>,
@@ -1067,34 +1113,12 @@ async fn setup_admin(
     // Only allow first owner without auth; subsequent creates require owner.
     let owner_exists = db::users::owner_exists(&state.pool)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(setup_db_error)?;
     if owner_exists {
         super::rbac::require_owner(&state, &headers).await?;
+        validate_admin_body(&body)?;
     } else {
-        let key = format!(
-            "bootstrap:{}",
-            super::rate_limit::client_ip(peer.ip(), &headers, super::rate_limit::trusted_proxies())
-        );
-        super::rate_limit::check(&state.redis, &key, 5, Duration::from_secs(900))
-            .await
-            .map_err(|retry| {
-                ApiError::too_many_requests_after(
-                    "Too many bootstrap attempts. Please try again later.",
-                    retry.as_secs().max(1),
-                )
-            })?;
-        let secret = headers
-            .get(super::bootstrap::BOOTSTRAP_SECRET_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        super::bootstrap::consume(&state.redis, secret).await?;
-    }
-
-    if !body.email.contains('@') {
-        return Err(ApiError::bad_request("Invalid email address"));
-    }
-    if let Err(msg) = db::users::validate_password_policy(&body.password, &body.email) {
-        return Err(ApiError::bad_request(msg));
+        first_owner_gate(&state.redis, peer, &headers, &body).await?;
     }
 
     let result = if owner_exists {
@@ -1104,14 +1128,7 @@ async fn setup_admin(
         // Day-zero onboarding account = instance bootstrap / superuser.
         db::users::create_first_owner(&state.pool, &body.email, &body.password).await
     };
-    result.map_err(|e| {
-        if let sqlx::Error::Database(ref db_err) = e {
-            if db_err.message().contains("UNIQUE") {
-                return ApiError::bad_request("A user with that email already exists");
-            }
-        }
-        ApiError::internal(e.to_string())
-    })?;
+    result.map_err(setup_db_error)?;
 
     Ok(Json(json!({ "status": "ok" })))
 }
@@ -1119,6 +1136,72 @@ async fn setup_admin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::bootstrap;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn invalid_first_owner_body_does_not_burn_bootstrap_secret() {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis = crate::redis::StateStore::connect(&redis_url)
+            .await
+            .expect("connect redis");
+        let secret = format!("bootstrap-test-{}", uuid::Uuid::new_v4());
+        bootstrap::arm(&redis, &secret, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let id = uuid::Uuid::new_v4();
+        let octets = id.as_bytes();
+        let peer: SocketAddr = format!("10.{}.{}.{}:0", octets[0], octets[1], octets[2])
+            .parse()
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            bootstrap::BOOTSTRAP_SECRET_HEADER,
+            axum::http::HeaderValue::from_str(&secret).unwrap(),
+        );
+
+        let bad = AdminBody {
+            email: "not-an-email".into(),
+            password: "password123".into(),
+        };
+        let err = first_owner_gate(&redis, peer, &headers, &bad)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ApiError::BadRequest(_)),
+            "unexpected: {err:?}"
+        );
+
+        let good = AdminBody {
+            email: format!("owner-{}@example.com", uuid::Uuid::new_v4()),
+            password: "password123".into(),
+        };
+        first_owner_gate(&redis, peer, &headers, &good)
+            .await
+            .expect("a rejected body must not consume the one-time bootstrap secret");
+    }
+
+    #[tokio::test]
+    async fn setup_db_error_body_omits_internal_detail() {
+        let err = setup_db_error(sqlx::Error::Protocol("SENTINEL_DB_DETAIL".into()));
+        let body = String::from_utf8(
+            err.into_response()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            !body.contains("SENTINEL_DB_DETAIL"),
+            "response leaked DB detail: {body}"
+        );
+        assert_eq!(body, r#"{"error":"Internal server error"}"#);
+    }
 
     #[test]
     fn github_conversion_error_body_omits_upstream_text() {
