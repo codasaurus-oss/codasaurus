@@ -162,8 +162,14 @@ pub(crate) async fn get_settings(
     super::rbac::require_maintainer(&state, &headers).await?;
     let entries = db::config::get_all_config(&state.pool).await?;
 
-    // Never expose connection strings to the dashboard.
-    const HIDDEN_KEYS: &[&str] = &["database_url"];
+    // Never expose connection strings or retired keys (still present on upgraded
+    // installs) that the dashboard can no longer write.
+    const HIDDEN_KEYS: &[&str] = &[
+        "database_url",
+        "llm_base_url",
+        "allow_local_llm",
+        "openrouter_api_key",
+    ];
 
     let mut map = serde_json::Map::new();
     for entry in entries {
