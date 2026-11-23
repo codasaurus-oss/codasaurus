@@ -394,6 +394,14 @@ async fn resolve_bot_config(
     })
 }
 
+/// A usable credential: non-empty and not a masked dashboard placeholder.
+fn has_llm_credential(db_key: Option<&str>, env_key: Option<&str>) -> bool {
+    [db_key, env_key].into_iter().flatten().any(|v| {
+        let v = v.trim();
+        !v.is_empty() && !v.contains('•') && !v.contains('*')
+    })
+}
+
 async fn health_handler() -> impl IntoResponse {
     health_response(false).await
 }
@@ -424,7 +432,7 @@ async fn health_response(require_db: bool) -> impl IntoResponse {
 
     let mut offline = crate::bot::offline::offline_mode_from_env_and_db(None);
     let mut llm_disabled = false;
-    let mut has_llm_endpoint = false;
+    let mut db_llm_key = None;
     if let Some(pool) = crate::bot::CONFIG_POOL.get() {
         let db_off = crate::db::config::get_config(pool, "offline_mode")
             .await
@@ -434,12 +442,14 @@ async fn health_response(require_db: bool) -> impl IntoResponse {
         if let Ok(Some(p)) = crate::db::config::get_config(pool, "llm_provider").await {
             llm_disabled = p.eq_ignore_ascii_case("disabled");
         }
-        if let Ok(Some(key)) = crate::db::config::get_config(pool, "llm_api_key").await {
-            if !key.trim().is_empty() {
-                has_llm_endpoint = true;
-            }
-        }
+        db_llm_key = crate::db::config::get_config(pool, "llm_api_key")
+            .await
+            .ok()
+            .flatten();
     }
+    // Compose injects the gateway key as env only, so a DB row is not guaranteed.
+    let env_llm_key = std::env::var("CODASAURUS_API_KEY").ok();
+    let has_llm_endpoint = has_llm_credential(db_llm_key.as_deref(), env_llm_key.as_deref());
     let profile =
         crate::bot::offline::resolve_egress_profile(offline, llm_disabled, has_llm_endpoint);
     let llm_allowed = !llm_disabled && has_llm_endpoint && !offline;
@@ -567,5 +577,19 @@ async fn sync_env_to_db(pool: &db::DbPool) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_gateway_key_counts_as_llm_endpoint() {
+        assert!(has_llm_credential(None, Some("sk-env-key")));
+        assert!(has_llm_credential(Some("sk-db-key"), None));
+        assert!(!has_llm_credential(None, None));
+        assert!(!has_llm_credential(Some(""), Some("   ")));
+        assert!(!has_llm_credential(None, Some("••••••••")));
     }
 }
