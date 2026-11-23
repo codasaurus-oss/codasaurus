@@ -129,32 +129,41 @@ async fn block_reason(pool: Option<&crate::db::DbPool>) -> Option<LlmBlock> {
     llm_disabled(value("llm_provider")).then_some(LlmBlock::Disabled)
 }
 
-/// The compose sidecar is deployment-controlled, not user-supplied: its private
-/// network address is expected, so only it skips the DNS-resolved SSRF gate.
-fn is_gateway_host(base_url: &str) -> bool {
+/// Lowercased host of a parsed URL; `None` when it does not parse or has no host.
+fn parsed_host(base_url: &str) -> Option<String> {
     url::Url::parse(base_url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .as_deref()
-        == Some("litellm")
 }
 
-/// Reject private/metadata LLM endpoints at request time (DNS-resolved).
-async fn assert_base_url_safe(base_url: &str) -> Result<()> {
-    if is_gateway_host(base_url) {
-        return Ok(());
-    }
-    let host = base_url.to_ascii_lowercase();
-    let allow_loopback =
-        host.contains("localhost") || host.contains("127.0.0.1") || host.contains("[::1]");
-    crate::ssrf::validate_llm_base_url_resolved(base_url, allow_loopback)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
+/// The compose sidecar is deployment-controlled, not user-supplied: its private
+/// network address is expected, so only it skips the DNS-resolved SSRF gate.
+fn is_gateway_host(base_url: &str) -> bool {
+    parsed_host(base_url).as_deref() == Some("litellm")
+}
+
+/// Loopback is allowed for local endpoints. Match the parsed host only: a URL
+/// whose path or query mentions `localhost` must not qualify.
+fn is_loopback_base_url(base_url: &str) -> bool {
+    parsed_host(base_url).is_some_and(|host| {
+        host == "localhost"
+            || host == "127.0.0.1"
+            || host == "[::1]"
+            || host.ends_with(".localhost")
+    })
 }
 
 /// Single SSRF gate for every LLM transport entry (chat and embeddings).
 pub(crate) async fn assert_endpoint_safe(config: &LlmConfig) -> Result<()> {
-    assert_base_url_safe(&config.base_url).await
+    if is_gateway_host(&config.base_url) {
+        return Ok(());
+    }
+    crate::ssrf::validate_llm_base_url_resolved(
+        &config.base_url,
+        is_loopback_base_url(&config.base_url),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Public wrapper so non-review LLM calls (embeddings) get the same SSRF gate.
@@ -355,6 +364,16 @@ mod tests {
         assert!(is_gateway_host("http://litellm:4000/v1"));
         assert!(!is_gateway_host("http://litellm.example.com:4000/v1"));
         assert!(!is_gateway_host("http://evil-litellm:4000/v1"));
+    }
+
+    #[test]
+    fn loopback_detection_uses_parsed_host() {
+        assert!(is_loopback_base_url("http://localhost:4000/v1"));
+        assert!(is_loopback_base_url("http://127.0.0.1:4000/v1"));
+        assert!(is_loopback_base_url("http://[::1]:4000/v1"));
+        assert!(is_loopback_base_url("http://api.localhost:4000/v1"));
+        assert!(!is_loopback_base_url("http://evil.example/?next=localhost"));
+        assert!(!is_loopback_base_url("http://localhost.evil.example/v1"));
     }
 
     #[test]

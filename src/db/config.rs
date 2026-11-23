@@ -248,7 +248,6 @@ pub const ENV_MIRROR_KEYS: &[(&str, &str)] = &[
     ("llm_daily_budget_usd", "CODASAURUS_LLM_DAILY_BUDGET_USD"),
     ("offline_mode", "CODASAURUS_OFFLINE"),
     // LLM — so `@codasaurus ask` and workers see dashboard keys without restart.
-    ("llm_provider", "CODASAURUS_LLM_PROVIDER"),
     ("llm_api_key", "CODASAURUS_API_KEY"),
     ("llm_model", "CODASAURUS_MODEL"),
     ("llm_model_cheap", "CODASAURUS_MODEL_CHEAP"),
