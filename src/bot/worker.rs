@@ -187,7 +187,7 @@ async fn process_queued_review(
     }
 
     drop(_guard);
-    prune_pr_lock(repo, pr_number).await;
+    prune_pr_lock(repo, pr_number, lock).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,7 +253,7 @@ pub(crate) async fn run_webhook_review_inline(
         }
     }
     drop(_guard);
-    prune_pr_lock(&repo_for_claim, pr_number).await;
+    prune_pr_lock(&repo_for_claim, pr_number, lock).await;
 }
 
 pub(crate) async fn release_claim_best_effort(repo: &str, pr_number: i64, head_sha: &str) {

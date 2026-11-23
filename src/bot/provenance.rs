@@ -22,7 +22,7 @@ fn evidence_url(f: &Finding) -> Option<String> {
     match f.detector.as_str() {
         "hallucinated-imports" | "phantom-deps" => {
             let pkg = f.message.split('`').nth(1)?;
-            let enc = urlencoding_lite(pkg);
+            let enc = crate::util::url_encode(pkg);
             let lower = f.file.to_lowercase();
             let url = if lower.ends_with(".rs") || lower.contains("cargo.toml") {
                 format!("https://crates.io/search?q={enc}")
@@ -48,15 +48,6 @@ fn evidence_url(f: &Finding) -> Option<String> {
         "iac" => Some("https://www.cisecurity.org/benchmark/kubernetes".into()),
         _ => None,
     }
-}
-
-fn urlencoding_lite(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            _ => format!("%{:02X}", c as u8),
-        })
-        .collect()
 }
 
 /// True when `candidate` matches a known PR path with path-component boundaries

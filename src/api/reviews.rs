@@ -17,10 +17,6 @@ pub struct ListReviewsParams {
     pub status: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    #[serde(alias = "page")]
-    pub _page: Option<i64>,
-    #[serde(alias = "per_page")]
-    pub _per_page: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -213,7 +209,6 @@ pub(crate) async fn get_review_findings(
 
     let findings = db::reviews::get_findings_for_review(&state.pool, id).await?;
 
-    // Group findings by file_path
     let mut grouped: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
         std::collections::BTreeMap::new();
     for f in findings {

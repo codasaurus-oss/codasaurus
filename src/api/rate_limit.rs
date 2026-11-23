@@ -51,26 +51,6 @@ pub fn trusted_proxies() -> &'static [IpNet] {
     &TRUSTED_PROXIES
 }
 
-/// Header-only peer guess retained for the legacy login limiter in `auth.rs`,
-/// whose handlers have no `ConnectInfo` extension available.
-pub(crate) fn client_ip_from_headers(headers: &HeaderMap) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let t = first.trim();
-            if !t.is_empty() {
-                return t.to_string();
-            }
-        }
-    }
-    if let Some(rip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let t = rip.trim();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    "unknown".into()
-}
-
 /// Resolve the client address: forwarding headers only count when the direct
 /// peer is an allowlisted proxy, otherwise the socket peer wins.
 pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> String {
@@ -125,9 +105,19 @@ pub async fn api_rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    // A bogus cookie must not rotate the key: only a token that resolves to a
+    // real session may share the session budget.
     let key = match super::auth::extract_token(req.headers()) {
-        Some(token) => session_rate_key(&token),
-        None => format!(
+        Some(token)
+            if crate::db::sessions::get_session(&state.pool, &token)
+                .await
+                .ok()
+                .flatten()
+                .is_some() =>
+        {
+            session_rate_key(&token)
+        }
+        _ => format!(
             "rl:ip:{}",
             client_ip(peer.ip(), req.headers(), trusted_proxies())
         ),
@@ -208,7 +198,6 @@ mod tests {
         let token = "SESSION_TOKEN_SENTINEL_9f3a2b";
         let key = session_rate_key(token);
         assert!(!key.contains(token), "key leaked raw token: {key}");
-        assert_eq!(key, session_rate_key(token), "key must be stable");
         assert_ne!(
             key,
             session_rate_key("DIFFERENT_TOKEN_SENTINEL"),

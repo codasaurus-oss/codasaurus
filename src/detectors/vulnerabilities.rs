@@ -83,15 +83,14 @@ pub fn detect(parsed_files: &[ParsedFile], reachability_enabled: bool) -> Vec<Fi
                     }
                 }
                 Err(e) => {
+                    tracing::warn!(error = %e, package, "OSV lookup failed");
                     findings.push(Finding {
                         detector: "vulnerabilities".to_string(),
                         severity: "info",
                         file: file.path.clone(),
                         line: import.line,
                         column: import.column,
-                        message: format!(
-                            "Could not check vulnerabilities for `{package}` — OSV API error: {e}"
-                        ),
+                        message: format!("Could not check vulnerabilities for `{package}` — OSV API unavailable"),
                         suggestion: Some(format!(
                             "Run `cargo audit` or `npm audit` manually to check `{package}` for known vulnerabilities."
                         )),

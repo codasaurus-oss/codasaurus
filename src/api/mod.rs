@@ -26,6 +26,27 @@ use axum::Router;
 use crate::db::DbPool;
 use crate::redis::StateStore;
 
+/// Resolve App ID and private key from DB settings, falling back to the environment.
+pub(crate) async fn github_app_credentials(pool: &DbPool) -> Option<(String, String)> {
+    let app_id = crate::db::config::get_config(pool, "github_app_id")
+        .await
+        .ok()
+        .flatten()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("GITHUB_APP_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })?;
+    let private_key = crate::db::config::get_config(pool, "github_private_key")
+        .await
+        .ok()
+        .flatten()
+        .filter(|k| !k.trim().is_empty())
+        .or_else(crate::github_jwt::resolve_private_key_from_env)?;
+    Some((app_id, private_key))
+}
+
 /// Shared application state available to every handler via `State<AppState>`.
 #[derive(Clone)]
 pub struct AppState {

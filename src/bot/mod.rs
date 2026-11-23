@@ -55,11 +55,12 @@ pub(crate) async fn pr_lock(repo: &str, pr_number: i64) -> Arc<Mutex<()>> {
 }
 
 /// Drop idle PR lock entries so the map does not grow forever on long-lived serve.
-pub(crate) async fn prune_pr_lock(repo: &str, pr_number: i64) {
+/// The caller's `Arc` must be passed in so it is released before counting holders.
+pub(crate) async fn prune_pr_lock(repo: &str, pr_number: i64, held: Arc<Mutex<()>>) {
+    drop(held);
     let key = format!("{repo}:{pr_number}");
     let mut map = PR_LOCKS.lock().await;
     if let Some(lock) = map.get(&key) {
-        // Only this map entry holds the Arc (no active holders).
         if Arc::strong_count(lock) == 1 {
             map.remove(&key);
         }
@@ -175,7 +176,7 @@ pub(crate) async fn repo_or_global_flag(
         .await
         .ok()
         .flatten()
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"));
+        .is_some_and(|v| crate::util::flag_truthy(&v));
     if let Ok(Some(repo)) = crate::db::repos::get_repo_by_full_name(pool, repo_full_name).await {
         if let Some(cfg) = repo.config_json.as_deref() {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(cfg) {

@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-const USER_AGENT: &str = concat!("codasaurus/", env!("CARGO_PKG_VERSION"));
+use crate::bot::USER_AGENT;
 const MAX_PATHS: usize = 5;
 const MAX_COMMITS_PER_PATH: usize = 4;
 const MAX_RELATED: usize = 3;

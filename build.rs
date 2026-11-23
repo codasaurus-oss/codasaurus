@@ -28,9 +28,7 @@ fn main() {
             .current_dir(svelte_dir)
             .status()
             .expect("npm install failed");
-        if !status.success() {
-            panic!("npm install failed");
-        }
+        assert!(status.success(), "npm install failed");
     }
 
     println!("cargo:info=Building Svelte SPA...");
@@ -39,16 +37,12 @@ fn main() {
         .current_dir(svelte_dir)
         .status()
         .expect("npm run build failed");
-    if !status.success() {
-        panic!("Svelte build failed");
-    }
+    assert!(status.success(), "Svelte build failed");
 
     println!("cargo:rerun-if-changed=svelte-dashboard/src/");
     println!("cargo:rerun-if-changed=svelte-dashboard/package.json");
     println!("cargo:rerun-if-changed=svelte-dashboard/package-lock.json");
 
     let dist = svelte_dir.join("dist");
-    if !dist.exists() {
-        panic!("Svelte build did not produce dist/ output");
-    }
+    assert!(dist.exists(), "Svelte build did not produce dist/ output");
 }

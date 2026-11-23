@@ -33,7 +33,6 @@ pub(crate) async fn stats(
         }
     }
 
-    // Core stats are computed by the DB layer
     let mut core: serde_json::Value = db::reviews::get_stats(&state.pool).await?;
 
     // Recent activity: latest 10 reviews with repo full_name

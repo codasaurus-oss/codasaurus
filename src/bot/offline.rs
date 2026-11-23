@@ -51,14 +51,12 @@ pub fn offline_mode_from_env_and_db(db_offline: Option<&str>) -> bool {
 /// `CODASAURUS_OFFLINE`, which would otherwise look like a host-platform env
 /// var the operator never set.
 pub fn offline_mode_source(db_offline: Option<&str>) -> (bool, &'static str) {
-    let db_on = db_offline
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+    let db_on = db_offline.map(crate::util::flag_truthy).unwrap_or(false);
     if db_on {
         return (true, "db");
     }
     let env_on = std::env::var("CODASAURUS_OFFLINE")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| crate::util::flag_truthy(&v))
         .unwrap_or(false);
     if env_on {
         return (true, "env");

@@ -568,10 +568,7 @@ impl Default for Config {
 
 /// Map dashboard setting key `*_enabled` → CheckConfig field.
 fn apply_enabled_flag(checks: &mut CheckConfig, key: &str, value: &str) {
-    let enabled = matches!(
-        value.to_ascii_lowercase().as_str(),
-        "true" | "1" | "yes" | "on"
-    );
+    let enabled = crate::util::flag_truthy(value);
     match key {
         "hallucinated_imports_enabled" => checks.hallucinated_imports = enabled,
         "phantom_deps_enabled" => checks.phantom_deps = enabled,
@@ -715,9 +712,7 @@ impl Config {
             for (key, raw) in detectors {
                 let enabled = match raw {
                     serde_json::Value::Bool(b) => *b,
-                    serde_json::Value::String(s) => {
-                        matches!(s.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
-                    }
+                    serde_json::Value::String(s) => crate::util::flag_truthy(s),
                     _ => continue,
                 };
                 apply_detector_key(&mut self.checks, key, enabled);

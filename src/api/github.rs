@@ -31,6 +31,13 @@ async fn resolve_app_slug(state: &AppState) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn slug_unknown_body() -> serde_json::Value {
+    json!({
+        "url": null,
+        "error": "GitHub App slug is unknown, so no direct install link exists. Open https://github.com/settings/apps, pick your app, and install it from there — or set GITHUB_APP_SLUG to the app slug."
+    })
+}
+
 #[utoipa::path(get, path = "/api/github/install-url", tag = "github", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn install_url(
     State(state): State<AppState>,
@@ -42,10 +49,7 @@ pub(crate) async fn install_url(
     }
 
     if crate::util::env_set("GITHUB_APP_ID") {
-        return Ok(Json(json!({
-            "url": null,
-            "error": "GitHub App slug is unknown, so no direct install link exists. Open https://github.com/settings/apps, pick your app, and install it from there — or set GITHUB_APP_SLUG to the app slug."
-        })));
+        return Ok(Json(slug_unknown_body()));
     }
 
     Ok(Json(json!({
@@ -77,10 +81,7 @@ pub(crate) async fn manage_url(
     }
 
     if crate::util::env_set("GITHUB_APP_ID") {
-        return Ok(Json(json!({
-            "url": null,
-            "error": "GitHub App slug is unknown, so no direct install link exists. Open https://github.com/settings/apps, pick your app, and install it from there — or set GITHUB_APP_SLUG to the app slug."
-        })));
+        return Ok(Json(slug_unknown_body()));
     }
 
     Ok(Json(json!({
@@ -102,18 +103,7 @@ async fn ensure_slug(state: &AppState) -> Option<String> {
 /// Query `GET /app` with the configured App credentials and store the
 /// returned slug/name. Returns the slug on success.
 async fn resolve_slug_live(state: &AppState) -> Option<String> {
-    let app_id = db::config::get_config(&state.pool, "github_app_id")
-        .await
-        .ok()
-        .flatten()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("GITHUB_APP_ID").ok())?;
-    let private_key = db::config::get_config(&state.pool, "github_private_key")
-        .await
-        .ok()
-        .flatten()
-        .filter(|k| !k.trim().is_empty())
-        .or_else(crate::github_jwt::resolve_private_key_from_env)?;
+    let (app_id, private_key) = super::github_app_credentials(&state.pool).await?;
     let token = crate::github_jwt::create_app_jwt(&app_id, &private_key).ok()?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))

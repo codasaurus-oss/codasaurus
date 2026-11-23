@@ -26,24 +26,6 @@ fn cache_key(repo: &str, path: &str, git_ref: &str) -> String {
     format!("{repo}\0{path}\0{git_ref}")
 }
 
-fn encode_path_segments(path: &str) -> String {
-    path.split('/')
-        .map(|seg| {
-            let mut out = String::new();
-            for b in seg.bytes() {
-                match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                        out.push(b as char);
-                    }
-                    _ => out.push_str(&format!("%{b:02X}")),
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn decode_contents_json(path: &str, body: &serde_json::Value) -> Result<Option<String>> {
     if body.get("type").and_then(|t| t.as_str()) != Some("file") {
         return Ok(None);
@@ -118,7 +100,7 @@ pub async fn fetch_repo_file(
         })
     };
 
-    let encoded = encode_path_segments(path);
+    let encoded = crate::util::url_encode_path(path);
     let url = format!(
         "https://api.github.com/repos/{repo}/contents/{encoded}?ref={}",
         crate::util::url_encode(git_ref)
@@ -185,22 +167,7 @@ pub async fn fetch_repo_file_with_sha(
     if path.is_empty() || git_ref.is_empty() {
         return Ok(None);
     }
-    let encoded = path
-        .split('/')
-        .map(|seg| {
-            let mut out = String::new();
-            for b in seg.bytes() {
-                match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                        out.push(b as char);
-                    }
-                    _ => out.push_str(&format!("%{b:02X}")),
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("/");
+    let encoded = crate::util::url_encode_path(path);
 
     let url = format!(
         "https://api.github.com/repos/{repo}/contents/{encoded}?ref={}",
@@ -258,22 +225,7 @@ pub async fn put_repo_file(
     sha: &str,
     message: &str,
 ) -> Result<()> {
-    let encoded = path
-        .split('/')
-        .map(|seg| {
-            let mut out = String::new();
-            for b in seg.bytes() {
-                match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                        out.push(b as char);
-                    }
-                    _ => out.push_str(&format!("%{b:02X}")),
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("/");
+    let encoded = crate::util::url_encode_path(path);
     let url = format!("https://api.github.com/repos/{repo}/contents/{encoded}");
     let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
     let body = serde_json::json!({

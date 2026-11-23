@@ -36,35 +36,31 @@ struct UpsertServerBody {
     name: Option<String>,
 }
 
-async fn add_custom_server_id(pool: &db::DbPool, id: &str) -> Result<(), ApiError> {
+async fn update_custom_server_ids(pool: &db::DbPool, id: &str, add: bool) -> Result<(), ApiError> {
     let mut ids: Vec<String> = db::config::get_config(pool, "mcp_custom_server_ids")
         .await?
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
-    if !ids.iter().any(|i| i == id) {
-        ids.push(id.to_string());
+    let changed = if add {
+        if ids.iter().any(|i| i == id) {
+            false
+        } else {
+            ids.push(id.to_string());
+            true
+        }
+    } else {
+        let before = ids.len();
+        ids.retain(|i| i.as_str() != id);
+        ids.len() != before
+    };
+    if changed {
         db::config::set_config(
             pool,
             "mcp_custom_server_ids",
-            &serde_json::to_string(&ids).unwrap_or_default(),
+            &serde_json::to_string(&ids).expect("server id list is serializable"),
         )
         .await?;
     }
-    Ok(())
-}
-
-async fn remove_custom_server_id(pool: &db::DbPool, id: &str) -> Result<(), ApiError> {
-    let ids: Vec<String> = db::config::get_config(pool, "mcp_custom_server_ids")
-        .await?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    let filtered: Vec<&String> = ids.iter().filter(|i| i.as_str() != id).collect();
-    db::config::set_config(
-        pool,
-        "mcp_custom_server_ids",
-        &serde_json::to_string(&filtered).unwrap_or_default(),
-    )
-    .await?;
     Ok(())
 }
 
@@ -88,8 +84,7 @@ async fn upsert_server(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
 
-    let is_custom = mcp::catalog::find(&id).is_none();
-    let base_url = if is_custom {
+    if mcp::catalog::find(&id).is_none() {
         let base_url = body
             .base_url
             .as_deref()
@@ -109,12 +104,8 @@ async fn upsert_server(
         {
             db::config::set_config(&state.pool, &format!("mcp_{id}_name"), name).await?;
         }
-        add_custom_server_id(&state.pool, &id).await?;
-        base_url
-    } else {
-        String::new()
-    };
-    let _ = base_url;
+        update_custom_server_ids(&state.pool, &id, true).await?;
+    }
 
     db::config::set_config(
         &state.pool,
@@ -154,7 +145,7 @@ async fn delete_server(
     if mcp::catalog::find(&id).is_none() {
         db::config::delete_config(&state.pool, &format!("mcp_{id}_base_url")).await?;
         db::config::delete_config(&state.pool, &format!("mcp_{id}_name")).await?;
-        remove_custom_server_id(&state.pool, &id).await?;
+        update_custom_server_ids(&state.pool, &id, false).await?;
     }
 
     db::audit::log_event(
