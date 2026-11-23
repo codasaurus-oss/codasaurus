@@ -230,7 +230,6 @@ impl LlmConfig {
                 let mut db_legacy_key = None;
                 let mut model = None;
                 let mut text_model = None;
-                let mut base_url = None;
                 for e in entries {
                     match e.key.as_str() {
                         "llm_api_key" if usable_secret(&e.value) => db_key = Some(e.value),
@@ -239,7 +238,6 @@ impl LlmConfig {
                         }
                         "llm_model" if !e.value.is_empty() => model = Some(e.value),
                         "llm_model_cheap" if !e.value.is_empty() => text_model = Some(e.value),
-                        "llm_base_url" if !e.value.is_empty() => base_url = Some(e.value),
                         _ => {}
                     }
                 }
@@ -249,19 +247,16 @@ impl LlmConfig {
                     env_secret("CODASAURUS_API_KEY").as_deref(),
                     legacy_env_api_key().as_deref(),
                 );
-                if base_url.is_none() {
-                    base_url = std::env::var("CODASAURUS_BASE_URL")
-                        .ok()
-                        .filter(|u| !u.is_empty());
-                }
-                if let Some(base_url) = base_url {
-                    return Some(Self::new(
-                        api_key.unwrap_or_default(),
-                        model,
-                        text_model,
-                        base_url,
-                    ));
-                }
+                // The gateway URL is a deployment fact; never take it from DB.
+                let base_url = std::env::var("CODASAURUS_BASE_URL")
+                    .ok()
+                    .filter(|u| !u.is_empty())?;
+                return Some(Self::new(
+                    api_key.unwrap_or_default(),
+                    model,
+                    text_model,
+                    base_url,
+                ));
             }
         }
         Self::from_env()
@@ -374,6 +369,21 @@ mod tests {
         assert_eq!(
             resolve_api_key(db_primary, None, Some("sk-real-env-key"), None).as_deref(),
             Some("sk-real-env-key")
+        );
+    }
+
+    #[test]
+    fn env_gateway_url_is_authoritative_without_db() {
+        let prev = std::env::var("CODASAURUS_BASE_URL").ok();
+        std::env::set_var("CODASAURUS_BASE_URL", "http://gateway.test:4000/v1");
+        let cfg = LlmConfig::from_env();
+        match prev {
+            Some(v) => std::env::set_var("CODASAURUS_BASE_URL", v),
+            None => std::env::remove_var("CODASAURUS_BASE_URL"),
+        }
+        assert_eq!(
+            cfg.map(|c| c.base_url).as_deref(),
+            Some("http://gateway.test:4000/v1")
         );
     }
 }
