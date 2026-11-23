@@ -9,6 +9,7 @@ services:
       POSTGRES_DB: codasaurus
     volumes:
       - codasaurus-pg:/var/lib/postgresql/data
+      - ./docker/litellm-init.sql:/docker-entrypoint-initdb.d/01-litellm.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codasaurus"]
       interval: 10s
@@ -34,6 +35,9 @@ services:
     environment:
       - LITELLM_MODE=PRODUCTION
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?required}
+      - STORE_MODEL_IN_DB=True
+      - DATABASE_URL=${LITELLM_DATABASE_URL:?required}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY:?required}
       # Provider credentials are operator-supplied. Add them here (or via a
       # .env file / LiteLLM admin UI) together with the model definitions;
       # Codasaurus never reads or names them.
