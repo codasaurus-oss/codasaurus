@@ -156,6 +156,15 @@ pub struct SetupStatus {
     pub public_url: String,
 }
 
+/// `llm_provider=disabled` is a deliberate opt-out and completes the step;
+/// every other case needs a config that can actually build (a model alias).
+fn llm_step_complete(provider: Option<&str>, configured: bool) -> bool {
+    match provider {
+        Some(p) if p.eq_ignore_ascii_case("disabled") => true,
+        _ => configured,
+    }
+}
+
 /// GET /api/setup/status — check which setup steps have been completed.
 #[utoipa::path(get, path = "/api/setup/status", tag = "setup", responses((status = 200, description = "OK")))]
 pub(crate) async fn setup_status(
@@ -177,13 +186,13 @@ pub(crate) async fn setup_status(
         .is_some()
         || crate::util::env_set("GITHUB_APP_ID");
 
-    let llm = get_config(&state.pool, "llm_provider")
+    // An env key or base URL alone is not a working LLM: without a model alias
+    // `LlmConfig` fails closed, so the wizard must not report a complete step.
+    let llm_provider = get_config(&state.pool, "llm_provider").await.ok().flatten();
+    let llm_configured = crate::llm::LlmConfig::from_db_or_env(Some(&state.pool))
         .await
-        .ok()
-        .flatten()
-        .is_some()
-        || crate::util::env_set("CODASAURUS_API_KEY")
-        || crate::util::env_set("CODASAURUS_BASE_URL");
+        .is_some();
+    let llm = llm_step_complete(llm_provider.as_deref(), llm_configured);
 
     let admin = db::users::owner_exists(&state.pool).await.unwrap_or(false);
 
@@ -418,13 +427,23 @@ async fn setup_llm(
 
     Ok(Json(SetupResponse {
         status: "ok".into(),
-        message: if test_passed.is_some() {
-            Some("LLM configuration saved".into())
-        } else {
-            None
-        },
+        message: llm_saved_message(test_passed),
         test_passed,
     }))
+}
+
+/// Report what the probe actually proved, so a failed probe never reads as success.
+fn llm_saved_message(test_passed: Option<bool>) -> Option<String> {
+    match test_passed {
+        Some(true) => Some("LLM configuration saved and connection verified".into()),
+        Some(false) => Some(
+            "Saved, but the gateway probe failed. Set CODASAURUS_MODEL (or Settings → LLM) \
+             to a model alias you defined in your LiteLLM gateway, then check the gateway URL \
+             and API key."
+                .into(),
+        ),
+        None => None,
+    }
 }
 
 /// Probe the configured gateway with a minimal chat completion.
@@ -1133,6 +1152,28 @@ mod tests {
             "response leaked DB detail: {body}"
         );
         assert_eq!(body, r#"{"error":"Internal server error"}"#);
+    }
+
+    #[test]
+    fn llm_step_needs_a_working_config_unless_disabled() {
+        assert!(llm_step_complete(Some("disabled"), false));
+        assert!(llm_step_complete(Some("DISABLED"), false));
+        assert!(llm_step_complete(Some("litellm"), true));
+        assert!(!llm_step_complete(Some("litellm"), false));
+        assert!(!llm_step_complete(None, false));
+        assert!(llm_step_complete(None, true));
+    }
+
+    #[test]
+    fn failed_llm_probe_message_does_not_claim_verified() {
+        assert_eq!(
+            llm_saved_message(Some(true)).as_deref(),
+            Some("LLM configuration saved and connection verified")
+        );
+        let failed = llm_saved_message(Some(false)).expect("failed probe must explain itself");
+        assert!(failed.contains("CODASAURUS_MODEL"), "{failed}");
+        assert!(!failed.contains("verified"), "{failed}");
+        assert_eq!(llm_saved_message(None), None);
     }
 
     #[test]
