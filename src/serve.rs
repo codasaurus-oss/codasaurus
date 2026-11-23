@@ -45,7 +45,6 @@ const SYNC_KEYS: &[(&str, &str)] = &[
     ("GITHUB_WEBHOOK_SECRET", "github_webhook_secret"),
     ("GITHUB_APP_SLUG", "github_app_slug"),
     ("CODASAURUS_API_KEY", "llm_api_key"),
-    ("CODASAURUS_EMBEDDING_MODEL", "llm_embedding_model"),
 ];
 
 /// Start the unified server serving API + SPA + webhook on a single port.
