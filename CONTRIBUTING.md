@@ -72,7 +72,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests (with Postgres), `cargo 
 
 ### LLM gateway (LiteLLM)
 
-`docker compose up -d` starts the `litellm` sidecar alongside Postgres and Redis. Provider, model and failover choice live in `litellm.config.yaml`; edit that file and restart only the sidecar (`docker compose restart litellm`) to pick up a change. The app keeps one gateway endpoint and one credential, both supplied by compose env.
+`docker compose up -d` starts the `litellm` sidecar alongside Postgres and Redis. Provider, model and fallback selection are entirely LiteLLM's: define models, provider credentials and failovers in `litellm.config.yaml` (or the LiteLLM admin UI / database), then restart only the sidecar (`docker compose restart litellm`) to pick up a config-file change. Codasaurus keeps one gateway endpoint and one credential, both supplied by compose env, and sends only the alias names you give it (`CODASAURUS_MODEL`, `CODASAURUS_MODEL_CHEAP`, `CODASAURUS_EMBEDDING_MODEL`).
 
 `LITELLM_SALT_KEY` cannot be rotated in place — rotating it invalidates provider keys LiteLLM has stored. That only matters once LiteLLM gets a database; this compose setup has none.
 

@@ -1,18 +1,9 @@
-model_list:
-  - model_name: codasaurus-review
-    litellm_params:
-      model: openrouter/anthropic/claude-sonnet-4.6
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: codasaurus-cheap
-    litellm_params:
-      model: openrouter/qwen/qwen3-coder
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: codasaurus-embedding
-    litellm_params:
-      model: openai/text-embedding-3-small
-      api_key: os.environ/OPENAI_API_KEY
+# Provider template. Define every model, provider credential and fallback in
+# LiteLLM itself (config file, admin UI or its database): this repo ships no
+# model_list and no fallbacks. Codasaurus only sends the alias names it is
+# given, so create matching aliases and set CODASAURUS_MODEL,
+# CODASAURUS_MODEL_CHEAP and CODASAURUS_EMBEDDING_MODEL (or Settings → LLM).
 router_settings:
-  fallbacks: [{ codasaurus-review: [codasaurus-cheap] }]
   num_retries: 0 # the app owns retry; do not double-retry
   allowed_fails: 1
   cooldown_time: 30

@@ -130,15 +130,16 @@ Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding co
 
 ## LLM (optional)
 
-Codasaurus talks to a [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) gateway that fronts every provider. Docker Compose starts the sidecar for you; provider, model and failover choice live in `litellm.config.yaml`, not in the app.
+Codasaurus talks to a [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) gateway that fronts every provider. Docker Compose starts the sidecar for you. Provider, model and fallback selection are entirely LiteLLM's: define the models, provider credentials and fallbacks in `litellm.config.yaml`, the LiteLLM admin UI, or its database.
 
 ```bash
-export LITELLM_MASTER_KEY="sk-..."          # compose: sidecar admin key
+export LITELLM_MASTER_KEY="sk-..."               # compose: sidecar admin key
 export CODASAURUS_API_KEY="$LITELLM_MASTER_KEY"  # app → gateway credential
-export OPENROUTER_API_KEY="sk-or-..."       # consumed by the sidecar
+export CODASAURUS_MODEL="<alias defined in LiteLLM>"
+# optional: CODASAURUS_MODEL_CHEAP, CODASAURUS_EMBEDDING_MODEL
 ```
 
-`CODASAURUS_BASE_URL` is required: it points at the gateway and compose injects `http://litellm:4000/v1`. A key alone is not enough. Any OpenAI-compatible `/v1` endpoint still works directly — point `CODASAURUS_BASE_URL` at it and skip the sidecar. Failover is LiteLLM's `router_settings.fallbacks`, configured in the same YAML.
+`CODASAURUS_BASE_URL` is required: it points at the gateway and compose injects `http://litellm:4000/v1`. A key alone is not enough. Any OpenAI-compatible `/v1` endpoint still works directly — point `CODASAURUS_BASE_URL` at it and skip the sidecar. Codasaurus ships no provider or model names; it sends only the aliases configured above, so failover and routing are whatever you set up in LiteLLM.
 
 Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
 
