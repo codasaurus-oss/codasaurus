@@ -399,7 +399,8 @@ async fn setup_llm(
 
     // Always store the config (+ mirror into process env for immediate ask/review use).
     db::config::set_config(&state.pool, "llm_provider", provider).await?;
-    if !api_key.is_empty() {
+    // A masked placeholder from GET /api/setup/llm must not overwrite the real key.
+    if crate::llm::usable_secret(api_key) {
         db::config::set_config(&state.pool, "llm_api_key", api_key).await?;
         db::config::apply_setting_to_env("llm_api_key", api_key);
     }

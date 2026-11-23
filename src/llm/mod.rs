@@ -9,6 +9,7 @@ mod prompts;
 mod schema;
 
 pub use client::shared_client;
+pub(crate) use config::usable_secret;
 pub use config::{assert_embedding_endpoint_safe, LlmConfig};
 pub use cost::{
     all_paths_low_signal, estimate_spend_microdollars, filter_llm_files, is_low_signal_path,
