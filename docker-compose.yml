@@ -83,6 +83,8 @@ services:
       - CODASAURUS_EMBEDDING_MODEL=${CODASAURUS_EMBEDDING_MODEL:-}
       - CODASAURUS_BASE_URL=http://litellm:4000/v1
       - CODASAURUS_API_KEY=${LITELLM_MASTER_KEY:?required}
+      # Admin credential for gateway management APIs; never used for inference.
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?required}
       - CODASAURUS_MAX_CONCURRENT_REVIEWS=${CODASAURUS_MAX_CONCURRENT_REVIEWS:-4}
       - OIDC_ISSUER=${OIDC_ISSUER:-}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}

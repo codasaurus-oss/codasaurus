@@ -48,6 +48,69 @@ pub struct LlmBody {
     pub provider: String, // "litellm" | "disabled"
     pub api_key: Option<String>,
     pub model: Option<String>,
+    /// Gateway-managed model definition. When present, Codasaurus registers it
+    /// in LiteLLM and stores only the alias plus a scoped virtual key.
+    #[serde(default)]
+    pub upstream_provider: Option<String>,
+    #[serde(default)]
+    pub upstream_model: Option<String>,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub model_alias: Option<String>,
+}
+
+/// Register a model in the gateway and issue a model-scoped virtual key.
+/// Returns `(alias, virtual_key)`; `None` keeps the legacy alias-only flow.
+async fn provision_model(
+    client: &crate::llm::gateway::GatewayClient,
+    body: &LlmBody,
+) -> Result<Option<(String, String, String)>, ApiError> {
+    let (Some(provider), Some(upstream)) = (&body.upstream_provider, &body.upstream_model) else {
+        return Ok(None);
+    };
+    let provider = provider.trim();
+    let upstream = upstream.trim();
+    let alias = body
+        .model_alias
+        .as_deref()
+        .or(body.model.as_deref())
+        .unwrap_or("")
+        .trim();
+    let key = body.api_key.as_deref().unwrap_or("").trim();
+    if provider.is_empty() || upstream.is_empty() || alias.is_empty() {
+        return Err(ApiError::bad_request(
+            "Provider, model and alias are required to register a model",
+        ));
+    }
+    if key.is_empty() {
+        return Err(ApiError::bad_request("A provider API key is required"));
+    }
+    let model = if upstream.contains('/') {
+        upstream.to_string()
+    } else {
+        format!("{provider}/{upstream}")
+    };
+    let request = crate::llm::gateway::ModelRequest {
+        alias: alias.to_string(),
+        upstream: model,
+        api_key: key.to_string(),
+        api_base: body
+            .api_base
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+    };
+    let model_id = client.register_model(request).await.map_err(|e| {
+        tracing::error!(error = %e, "gateway model registration failed");
+        ApiError::bad_request("Could not register the model in the gateway")
+    })?;
+    let virtual_key = client.issue_key(alias).await.map_err(|e| {
+        tracing::error!(error = %e, "gateway key issuance failed");
+        ApiError::bad_request("Could not issue a gateway key for the model")
+    })?;
+    Ok(Some((alias.to_string(), virtual_key, model_id)))
 }
 
 #[derive(Deserialize)]
@@ -369,10 +432,22 @@ async fn get_llm_config(
         .flatten()
         .or_else(|| std::env::var("CODASAURUS_MODEL").ok());
 
+    let models: Vec<serde_json::Value> = match crate::llm::gateway::GatewayClient::from_env() {
+        Some(client) => client
+            .list_models()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| json!({"id": m.id, "name": m.name}))
+            .collect(),
+        None => Vec::new(),
+    };
+
     Ok(Json(json!({
         "provider": provider,
         "api_key": api_key,
         "model": model,
+        "models": models,
     })))
 }
 
@@ -394,16 +469,50 @@ async fn setup_llm(
     };
     let api_key = body.api_key.as_deref().unwrap_or("");
 
+    // Gateway-managed setup: register the model and keep only a scoped virtual key.
+    let managed = if provider == "litellm" {
+        match crate::llm::gateway::GatewayClient::from_env() {
+            Some(client) => provision_model(&client, &body).await?,
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    if provider == "disabled" {
+        if let Some(id) = db::config::get_config(&state.pool, "llm_gateway_model_id")
+            .await
+            .ok()
+            .flatten()
+            .filter(|v| !v.is_empty())
+        {
+            if let Some(client) = crate::llm::gateway::GatewayClient::from_env() {
+                if let Err(e) = client.delete_model(&id).await {
+                    tracing::warn!(error = %e, "could not delete managed gateway model");
+                }
+            }
+            db::config::set_config(&state.pool, "llm_gateway_model_id", "").await?;
+        }
+    }
+
     // Always store the config (+ mirror into process env for immediate ask/review use).
     db::config::set_config(&state.pool, "llm_provider", provider).await?;
-    // A masked placeholder from GET /api/setup/llm must not overwrite the real key.
-    if crate::llm::usable_secret(api_key) {
-        db::config::set_config(&state.pool, "llm_api_key", api_key).await?;
-        db::config::apply_setting_to_env("llm_api_key", api_key);
-    }
-    if let Some(model) = &body.model {
-        db::config::set_config(&state.pool, "llm_model", model).await?;
-        db::config::apply_setting_to_env("llm_model", model);
+    if let Some((alias, virtual_key, model_id)) = &managed {
+        db::config::set_config(&state.pool, "llm_model", alias).await?;
+        db::config::set_config(&state.pool, "llm_api_key", virtual_key).await?;
+        db::config::set_config(&state.pool, "llm_gateway_model_id", model_id).await?;
+        db::config::apply_setting_to_env("llm_model", alias);
+        db::config::apply_setting_to_env("llm_api_key", virtual_key);
+    } else {
+        // A masked placeholder from GET /api/setup/llm must not overwrite the real key.
+        if crate::llm::usable_secret(api_key) {
+            db::config::set_config(&state.pool, "llm_api_key", api_key).await?;
+            db::config::apply_setting_to_env("llm_api_key", api_key);
+        }
+        if let Some(model) = &body.model {
+            db::config::set_config(&state.pool, "llm_model", model).await?;
+            db::config::apply_setting_to_env("llm_model", model);
+        }
     }
 
     // If ?test=true, send a lightweight probe to the gateway
@@ -1172,5 +1281,24 @@ mod tests {
             text.contains("GitHub manifest conversion failed"),
             "unexpected error: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn provision_rejects_blank_provider_key() {
+        let body = LlmBody {
+            provider: "litellm".into(),
+            api_key: Some("   ".into()),
+            model: None,
+            upstream_provider: Some("openrouter".into()),
+            upstream_model: Some("liquid/lfm-3-1.7b:free".into()),
+            api_base: None,
+            model_alias: Some("codasaurus-e2e".into()),
+        };
+        let client = crate::llm::gateway::GatewayClient::new(
+            "http://127.0.0.1:1".into(),
+            "sk-master".into(),
+        );
+        let err = provision_model(&client, &body).await.unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)), "got {err:?}");
     }
 }
