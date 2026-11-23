@@ -1,10 +1,8 @@
-# Provider template. Define every model, provider credential and fallback in
-# this file (or an external LiteLLM instance you manage), then restart the
-# sidecar: it has no database, so models added through LiteLLM's UI will not
-# persist. This repo ships no model_list and no fallbacks. Codasaurus only
-# sends the alias names it is given, so create matching aliases and set
-# CODASAURUS_MODEL, CODASAURUS_MODEL_CHEAP and CODASAURUS_EMBEDDING_MODEL
-# (or Settings → LLM).
+# Provider-neutral gateway template. Codasaurus registers models at runtime through
+# the LiteLLM management API, so no model_list is committed here.
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: true
 router_settings:
   num_retries: 0 # the app owns retry; do not double-retry
   allowed_fails: 1
@@ -14,5 +12,3 @@ litellm_settings:
   request_timeout: 45 # must stay below the app's 60s client timeout
   json_logs: true
   drop_params: false # surface an unsupported response_format instead of silently dropping it
-general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
