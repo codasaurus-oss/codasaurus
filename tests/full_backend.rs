@@ -239,6 +239,142 @@ async fn scalar_text(pool: &db::DbPool, sql: &str, value: &str) -> String {
 }
 
 #[tokio::test]
+async fn qa_pagination_and_filter_edges() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = test_pool().await;
+    let (_email, token, _id) = seed_user(&pool, "maintainer").await;
+    let app = app(pool).await;
+
+    for (uri, expected) in [
+        ("/api/reviews?limit=-5&offset=-1", "\"limit\":1"),
+        ("/api/reviews?limit=0", "\"limit\":1"),
+        ("/api/reviews?limit=100000", "\"limit\":200"),
+        ("/api/reviews?status=definitely-not-a-status", "\"total\":0"),
+        ("/api/audit?page=0&per_page=0", "\"limit\":1"),
+        ("/api/audit?page=-3&limit=-9", "\"limit\":1"),
+    ] {
+        let resp = call(&app, req("GET", uri, Some(&token), None)).await;
+        assert!(
+            resp.status.is_success(),
+            "{uri} -> {} {}",
+            resp.status,
+            resp.body
+        );
+        assert!(
+            resp.body.contains(expected),
+            "{uri}: expected {expected} in {}",
+            resp.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn qa_malformed_inputs_are_rejected_without_leaks() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = test_pool().await;
+    let app = app(pool).await;
+
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from("{not json"))
+        .unwrap();
+    let resp = call(&app, request).await;
+    assert!(
+        resp.status.is_client_error(),
+        "malformed JSON -> {} {}",
+        resp.status,
+        resp.body
+    );
+    assert_clean_error(&resp, "malformed login JSON");
+
+    let missing = call(&app, req("GET", "/api/reviews/not-a-number", None, None)).await;
+    assert!(
+        missing.status.is_client_error(),
+        "bad id -> {} {}",
+        missing.status,
+        missing.body
+    );
+    assert_clean_error(&missing, "non numeric review id");
+}
+
+#[tokio::test]
+async fn qa_nonexistent_resources_return_not_found() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = test_pool().await;
+    let (_email, token, _id) = seed_user(&pool, "owner").await;
+    let app = app(pool).await;
+
+    for uri in ["/api/reviews/999999999", "/api/repos/999999999"] {
+        let resp = call(&app, req("GET", uri, Some(&token), None)).await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND, "{uri} -> {}", resp.body);
+        assert_clean_error(&resp, uri);
+    }
+    let resp = call(
+        &app,
+        req("DELETE", "/api/users/999999999", Some(&token), None),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::NOT_FOUND, "{}", resp.body);
+    assert_clean_error(&resp, "missing user");
+}
+
+#[tokio::test]
+async fn qa_webhook_edge_cases() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = test_pool().await;
+    let app = app(pool).await;
+    let body = serde_json::json!({"action": "opened"}).to_string();
+
+    let signed = |delivery: &str, secret: &str| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body.as_bytes());
+        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-github-event", "pull_request")
+            .header("x-github-delivery", delivery)
+            .header("x-hub-signature-256", sig)
+            .body(axum::body::Body::from(body.clone()))
+            .unwrap()
+    };
+
+    let bad = signed("qa-bad-signature", "wrong-secret");
+    let resp = call(&app, bad).await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{}", resp.body);
+
+    let mut no_delivery = signed("qa-no-delivery", TEST_WEBHOOK_SECRET);
+    no_delivery.headers_mut().remove("x-github-delivery");
+    let resp = call(&app, no_delivery).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST, "{}", resp.body);
+
+    let ping_body = serde_json::json!({"zen": "ok"}).to_string();
+    let mut mac = Hmac::<Sha256>::new_from_slice(TEST_WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(ping_body.as_bytes());
+    let ping = axum::http::Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("content-type", "application/json")
+        .header("x-github-event", "ping")
+        .header(
+            "x-github-delivery",
+            format!("qa-ping-{}", uuid::Uuid::new_v4().simple()),
+        )
+        .header(
+            "x-hub-signature-256",
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
+        )
+        .body(axum::body::Body::from(ping_body))
+        .unwrap();
+    let resp = call(&app, ping).await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.body);
+    assert!(resp.body.contains("ping"), "{}", resp.body);
+}
+
+#[tokio::test]
 async fn public_endpoints_health_docs_branding() {
     let _guard = TEST_SERIAL.lock().await;
     let pool = test_pool().await;
