@@ -43,7 +43,7 @@ pub(crate) async fn suggest_reviewers(
                 }
             };
 
-            let encoded_path = urlencoding_encode(&filename);
+            let encoded_path = crate::util::url_encode_path(&filename);
             let commits_url = format!(
                 "https://api.github.com/repos/{repo}/commits?path={encoded_path}&per_page=3"
             );
@@ -98,17 +98,4 @@ pub(crate) async fn suggest_reviewers(
     reviewers.sort_by_key(|k| std::cmp::Reverse(k.1));
     reviewers.truncate(5);
     reviewers.into_iter().map(|(name, _)| name).collect()
-}
-
-fn urlencoding_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }

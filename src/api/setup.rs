@@ -37,10 +37,6 @@ async fn require_setup_wizard_access(
     require_setup_open_or_admin(state, headers).await
 }
 
-// ---------------------------------------------------------------------------
-// Request / response types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 pub struct DatabaseBody {
     pub provider: String, // "postgres"
@@ -117,10 +113,6 @@ pub struct AdminBody {
     pub password: String,
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(setup_status))
@@ -136,10 +128,6 @@ pub fn router() -> Router<AppState> {
         )
         .route("/admin", post(setup_admin))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct SetupStatus {
@@ -537,11 +525,9 @@ async fn resolve_public_url(state: &AppState, headers: &axum::http::HeaderMap) -
     if let Ok(url) = std::env::var("PUBLIC_URL") {
         return url;
     }
-    // Auto-detect from request Host header. This is client-controlled and only
-    // used as a last-resort fallback before an operator sets `public_url`/`PUBLIC_URL`
-    // explicitly — reject anything that isn't a plain `host[:port]` so a spoofed
-    // Host can't smuggle a scheme, path, or userinfo into the generated GitHub App
-    // manifest (which would point the webhook/OAuth callback at an attacker's domain).
+    // Host is client-controlled and only a last-resort fallback. Require plain
+    // `host[:port]` so a spoofed value cannot smuggle a scheme, path, or userinfo
+    // into the manifest and redirect the webhook/OAuth callback.
     if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
         let valid = !host.is_empty()
             && host.len() <= 253
@@ -564,11 +550,8 @@ async fn resolve_public_url(state: &AppState, headers: &axum::http::HeaderMap) -
 /// Build the GitHub App manifest JSON shared by the HTML page and JSON endpoints.
 fn build_manifest(public_url: &str) -> serde_json::Value {
     let suffix: String = uuid::Uuid::new_v4().to_string().chars().take(4).collect();
-    // Events must match handlers in `bot::handle_webhook`. Installation events keep
-    // the dashboard repo list in sync without a manual Sync after install.
-    // Note: GitHub App manifests do not support logo/avatar — upload
-    // manually after creation (see docs/setup-github-app.md). Logo is served
-    // at `{public_url}/branding/logo.png` for easy download.
+    // Events must match `bot::handle_webhook`; installation events keep the repo
+    // list in sync. Manifests cannot set a logo, so serve one for manual upload.
     json!({
         "name": format!("codasaurus-{}", suffix),
         "url": public_url,

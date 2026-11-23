@@ -185,40 +185,26 @@ impl ImportPattern {
     }
 }
 
+const JS_IMPORT_PATTERNS: &[&str] = &[
+    r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s+['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#,
+    r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#,
+];
+
 static IMPORT_PATTERNS: LazyLock<HashMap<&'static str, Vec<ImportPattern>>> = LazyLock::new(|| {
     let mut m = HashMap::new();
-    m.insert("javascript", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
-    m.insert("jsx", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'']+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
-    m.insert("typescript", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
-    m.insert("tsx", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
+    let js_patterns = || {
+        JS_IMPORT_PATTERNS
+            .iter()
+            .map(|p| ImportPattern::new(p))
+            .collect()
+    };
+    for lang in ["javascript", "jsx", "typescript", "tsx"] {
+        m.insert(lang, js_patterns());
+    }
     m.insert(
         "python",
         vec![

@@ -177,7 +177,7 @@ fn path_signal_score(path: &str) -> i32 {
         score += 20;
     }
 
-    if looks_security_sensitive(path) {
+    if crate::bot::review::is_critical_full_file_path(path) {
         score += 15;
     }
 
@@ -271,24 +271,6 @@ fn top_level_root(path: &str) -> &str {
     path.split('/').next().unwrap_or(path)
 }
 
-/// Prefer auth / crypto / infra paths when ranking samples (local copy to avoid
-/// coupling to the review pipeline module tree).
-fn looks_security_sensitive(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("auth")
-        || lower.contains("crypto")
-        || lower.contains("secret")
-        || lower.contains("password")
-        || lower.contains("middleware")
-        || lower.contains("rbac")
-        || lower.contains("permission")
-        || lower.contains("/k8s/")
-        || lower.contains("/kubernetes/")
-        || lower.contains("/helm/")
-        || lower.ends_with(".tf")
-        || lower.ends_with(".tfvars")
-}
-
 async fn collect_related_for_path(
     client: &reqwest::Client,
     headers: &HeaderMap,
@@ -298,7 +280,7 @@ async fn collect_related_for_path(
     sem: Arc<Semaphore>,
 ) -> Vec<(i64, String)> {
     let mut out = Vec::new();
-    let encoded = encode_path_query(path);
+    let encoded = crate::util::url_encode_path(path);
     let url = format!(
         "https://api.github.com/repos/{repo}/commits?path={encoded}&per_page={MAX_COMMITS_PER_PATH}"
     );
@@ -392,19 +374,6 @@ fn format_ranked(mut candidates: Vec<RelatedCandidate>) -> Vec<String> {
             }
         })
         .collect()
-}
-
-fn encode_path_query(path: &str) -> String {
-    let mut out = String::new();
-    for b in path.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 async fn fetch_json_array(

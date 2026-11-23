@@ -11,10 +11,6 @@ use crate::learning::store::LearningStore;
 use super::errors::ApiError;
 use super::AppState;
 
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, Default)]
 pub struct ListReviewsParams {
     pub repo_id: Option<i64>,
@@ -26,10 +22,6 @@ pub struct ListReviewsParams {
     #[serde(alias = "per_page")]
     pub _per_page: Option<i64>,
 }
-
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct DismissBody {
@@ -49,10 +41,6 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/sarif", get(get_review_sarif))
         .route("/dismiss", post(dismiss_finding))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 /// GET /api/reviews
 #[utoipa::path(get, path = "/api/reviews", tag = "reviews", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]

@@ -1039,11 +1039,9 @@ fn split_sql(sql: &str) -> Vec<String> {
     let mut chars = sql.chars().peekable();
 
     while let Some(c) = chars.next() {
-        // A `--` comment runs to end of line and is not SQL. Scanning it as SQL
-        // let an apostrophe in prose ("the review's batch") open a string that
-        // never closed, so every following `;` was swallowed and the rest of the
-        // schema arrived as one multi-statement query — which Postgres rejects
-        // outright, breaking migrations on a fresh database.
+        // `--` comments are not SQL: an apostrophe in prose left a string open,
+        // swallowing later `;` and sending the rest of the schema as one query,
+        // which Postgres rejects on a fresh database.
         if in_line_comment {
             if c == '\n' {
                 in_line_comment = false;

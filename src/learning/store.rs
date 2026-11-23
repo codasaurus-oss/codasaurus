@@ -1,19 +1,8 @@
 use crate::db::{db_execute, db_fetch_all, db_scalar, DbPool};
+use crate::util::block_on;
 use anyhow::Result;
-use std::sync::LazyLock;
-use tokio::runtime::{Handle, Runtime};
 
 use crate::detectors::Finding;
-
-static FALLBACK_RT: LazyLock<Runtime> =
-    LazyLock::new(|| Runtime::new().expect("failed to create fallback tokio runtime"));
-
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    match Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => FALLBACK_RT.block_on(fut),
-    }
-}
 
 /// Learning scope keys that apply to `repo_full_name`, broadest first:
 /// global (`""`), org (`"owner/"`), repo (`"owner/repo"`).
@@ -414,11 +403,9 @@ impl LearningStore {
         // scope specificity first, then how much evidence backs the rule, then id
         // as a final tiebreak.
         //
-        // Specificity is ordered by scope *length*, not by the scope string. Each
-        // broader scope is a strict prefix of the narrower one (`""` < `"owner/"` <
-        // `"owner/repo"`), so length is exactly as precise — and unlike a string
-        // sort it does not depend on the database's collation, which may ignore
-        // punctuation such as `/` at the primary level.
+        // Scope length is the specificity measure: each scope is a strict prefix of
+        // the next, and unlike a string sort it does not depend on DB collation,
+        // which may ignore punctuation such as `/` at the primary level.
         let mut rules_by_detector: std::collections::HashMap<String, Vec<Rule>> =
             std::collections::HashMap::new();
         for (id, detector, file_pattern, message_pattern, action) in db_fetch_all!(
@@ -502,11 +489,9 @@ impl LearningStore {
                 // `ignore` wins over every other action, at any scope, and is checked
                 // first because it is also the cheapest exit.
                 //
-                // Precedence deliberately does NOT apply here. `always_warn` rules are
-                // auto-approved from *mined PR comments* (see mine::mine_pr_comment_feedback)
-                // and are always repo-scoped, so letting the highest-precedence match win
-                // outright would let an unauthenticated comment on one PR un-suppress a
-                // finding a maintainer had explicitly dismissed org-wide.
+                // Precedence deliberately does not apply: `always_warn` rules come
+                // from unauthenticated mined PR comments, so a repo-scoped one
+                // must never un-suppress an org-wide maintainer dismissal.
                 if let Some(rule) = matching.clone().find(|r| r.action == "ignore") {
                     *hits_by_rule.entry(rule.id.as_str()).or_default() += 1;
                     return None;

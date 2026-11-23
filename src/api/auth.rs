@@ -31,10 +31,6 @@ const LOGIN_RATE_WINDOW: Duration = Duration::from_secs(15 * 60);
 static LOGIN_ATTEMPTS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-// ---------------------------------------------------------------------------
-// Request / response types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 pub struct LoginBody {
     pub email: String,
@@ -68,10 +64,6 @@ pub struct AcceptInviteBody {
     pub password: String,
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
@@ -83,10 +75,6 @@ pub fn router() -> Router<AppState> {
         .route("/invite/{token}", get(invite_info))
         .route("/invite/{token}/accept", post(accept_invite))
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Extract the session token from the Cookie header.
 pub(crate) fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -188,10 +176,6 @@ pub async fn auth_middleware(
         .map_err(|_| ApiError::unauthorized("Authentication required"))?;
     Ok(next.run(req).await)
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 /// POST /api/auth/login
 #[utoipa::path(post, path = "/api/auth/login", tag = "auth", responses((status = 200, description = "OK")))]

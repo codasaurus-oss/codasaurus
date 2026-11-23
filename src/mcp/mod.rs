@@ -223,12 +223,9 @@ pub async fn call_tool(pool: &DbPool, qualified_name: &str, arguments: &Value) -
         bail!("malformed MCP tool name: {qualified_name}");
     };
 
-    // Re-validate against the currently enabled server + its live tool list before
-    // executing anything — the model only sees this list when tools are *offered*,
-    // but a jailbroken/hallucinating model can still emit a call for a name it was
-    // never given (e.g. lifted from injected PR content), or for a server that was
-    // disabled after tools were listed for this review. Never trust the tool call
-    // in isolation from the current allowlist.
+    // Re-check the live allowlist before executing: the model can emit a tool
+    // name lifted from injected PR content, or call a server disabled after
+    // tools were offered for this review.
     let server = list_servers(pool)
         .await
         .into_iter()
