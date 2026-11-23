@@ -1,0 +1,25 @@
+model_list:
+  - model_name: codasaurus-review
+    litellm_params:
+      model: openrouter/anthropic/claude-sonnet-4.6
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: codasaurus-cheap
+    litellm_params:
+      model: openrouter/qwen/qwen3-coder
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: codasaurus-embedding
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY
+router_settings:
+  fallbacks: [{ codasaurus-review: [codasaurus-cheap] }]
+  num_retries: 0 # the app owns retry; do not double-retry
+  allowed_fails: 1
+  cooldown_time: 30
+  retry_after: 0
+litellm_settings:
+  request_timeout: 45 # must stay below the app's 60s client timeout
+  json_logs: true
+  drop_params: false # surface an unsupported response_format instead of silently dropping it
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
