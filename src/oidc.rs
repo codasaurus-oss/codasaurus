@@ -124,11 +124,11 @@ pub async fn authorization_url(cfg: &OidcConfig, store: &StateStore) -> Result<(
     let url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
         disc.authorization_endpoint,
-        urlencoding_encode(&cfg.client_id),
-        urlencoding_encode(&cfg.redirect_uri),
-        urlencoding_encode(&cfg.scopes),
-        urlencoding_encode(&state),
-        urlencoding_encode(&challenge),
+        crate::util::url_encode(&cfg.client_id),
+        crate::util::url_encode(&cfg.redirect_uri),
+        crate::util::url_encode(&cfg.scopes),
+        crate::util::url_encode(&state),
+        crate::util::url_encode(&challenge),
     );
     Ok((url, state))
 }
@@ -244,17 +244,4 @@ fn email_from_claims(claims: &IdClaims) -> Result<String> {
         }
     }
     bail!("OIDC token has no email claim")
-}
-
-fn urlencoding_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }

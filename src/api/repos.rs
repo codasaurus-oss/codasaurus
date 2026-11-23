@@ -11,19 +11,11 @@ use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use super::errors::ApiError;
 use super::AppState;
 
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 pub struct UpdateRepoBody {
     pub config_json: String,
     pub active: bool,
 }
-
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,10 +25,6 @@ pub fn router() -> Router<AppState> {
         .route("/{id}", put(update_repo))
         .route("/{id}", delete(delete_repo))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 /// GET /api/repos
 #[utoipa::path(get, path = "/api/repos", tag = "repos", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]

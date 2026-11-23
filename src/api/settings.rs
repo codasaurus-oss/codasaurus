@@ -10,10 +10,6 @@ use crate::github_jwt;
 use super::errors::ApiError;
 use super::AppState;
 
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 pub struct SetSettingBody {
     pub value: String,
@@ -124,10 +120,6 @@ const ALLOWED_KEYS: &[&str] = &[
     "oidc_allow_public_client",
 ];
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_settings))
@@ -142,10 +134,6 @@ pub fn router() -> Router<AppState> {
         // `/{key}` last so static segments win.
         .route("/{key}", put(set_setting))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 fn mask_if_sensitive(key: &str, value: String) -> String {
     if SENSITIVE_KEYS.contains(&key) && !value.is_empty() {

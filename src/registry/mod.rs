@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::runtime::{Handle, Runtime};
 use tokio::sync::Semaphore;
+
+pub(crate) use crate::util::block_on;
 
 const CACHE_MAX_SIZE: usize = 10_000;
 /// Bound concurrent registry/OSV fan-out when warming caches for large PRs.
@@ -86,16 +87,6 @@ static ASYNC_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
         }
     }
 });
-
-static FALLBACK_RT: LazyLock<Runtime> =
-    LazyLock::new(|| Runtime::new().expect("failed to create registry fallback runtime"));
-
-pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    match Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => FALLBACK_RT.block_on(fut),
-    }
-}
 
 pub fn async_client() -> Result<&'static reqwest::Client> {
     ASYNC_CLIENT

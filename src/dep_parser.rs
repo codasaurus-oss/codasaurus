@@ -104,15 +104,7 @@ pub fn extract_go_mod_deps(content: &str) -> Vec<String> {
     let mut pkgs = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with(')')
-            || line.starts_with("module ")
-            || line.starts_with("go ")
-            || line.starts_with("exclude ")
-            || line.starts_with("retract ")
-            || line.starts_with("replace ")
-        {
+        if is_go_mod_noise(line) {
             continue;
         }
         // Handle single-line require: "require pkg v1.0" and block require: "pkg v1.0"
@@ -127,6 +119,124 @@ pub fn extract_go_mod_deps(content: &str) -> Vec<String> {
         }
     }
     pkgs
+}
+
+/// A manifest dependency paired with the version declared in that manifest.
+pub struct VersionedDep {
+    pub name: String,
+    pub version: String,
+}
+
+/// Strip range prefixes so the declared version can be queried as an exact version.
+pub fn clean_version(v: &str) -> String {
+    v.trim_start_matches(['^', '~', '=', '>', '<', ' '])
+        .to_string()
+}
+
+/// Lines in a `go.mod` that never declare a direct dependency.
+pub fn is_go_mod_noise(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with("//")
+        || line.starts_with(')')
+        || line.starts_with("module ")
+        || line.starts_with("go ")
+        || line.starts_with("exclude ")
+        || line.starts_with("retract ")
+        || line.starts_with("replace ")
+}
+
+pub fn extract_npm_versioned(content: &str) -> Vec<VersionedDep> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    let mut deps = Vec::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(obj) = json.get(key).and_then(|d| d.as_object()) {
+            for (name, version) in obj {
+                if let Some(v) = version.as_str() {
+                    deps.push(VersionedDep {
+                        name: name.clone(),
+                        version: clean_version(v),
+                    });
+                }
+            }
+        }
+    }
+    deps
+}
+
+pub fn extract_cargo_versioned(content: &str) -> Vec<VersionedDep> {
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let mut deps = Vec::new();
+    for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(obj) = table.get(key).and_then(|d| d.as_table()) {
+            for (name, value) in obj {
+                let version = value.as_str().map(str::to_string).or_else(|| {
+                    value
+                        .as_table()
+                        .and_then(|t| t.get("version"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                });
+                if let Some(v) = version {
+                    deps.push(VersionedDep {
+                        name: name.clone(),
+                        version: clean_version(&v),
+                    });
+                }
+            }
+        }
+    }
+    deps
+}
+
+pub fn extract_go_mod_versioned(content: &str) -> Vec<VersionedDep> {
+    let mut deps = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if is_go_mod_noise(line) {
+            continue;
+        }
+        let rest = line.strip_prefix("require ").unwrap_or(line);
+        if rest == "(" || rest.trim().is_empty() {
+            continue;
+        }
+        let mut parts = rest.split_whitespace();
+        if let (Some(name), Some(version)) = (parts.next(), parts.next()) {
+            if name.contains('/') && version.starts_with('v') {
+                deps.push(VersionedDep {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                });
+            }
+        }
+    }
+    deps
+}
+
+pub fn extract_requirements_versioned(content: &str) -> Vec<VersionedDep> {
+    let mut deps = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
+            continue;
+        }
+        if let Some((name, version)) = line.split_once("==") {
+            let name = name.trim().to_lowercase();
+            let version = version
+                .split(|c: char| c == ';' || c.is_whitespace())
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !name.is_empty() && !version.is_empty() {
+                deps.push(VersionedDep { name, version });
+            }
+        }
+    }
+    deps
 }
 
 #[cfg(test)]

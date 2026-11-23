@@ -121,7 +121,7 @@ pub async fn fetch_repo_file(
     let encoded = encode_path_segments(path);
     let url = format!(
         "https://api.github.com/repos/{repo}/contents/{encoded}?ref={}",
-        urlencoding_query(git_ref)
+        crate::util::url_encode(git_ref)
     );
 
     let resp = retry_async(
@@ -204,7 +204,7 @@ pub async fn fetch_repo_file_with_sha(
 
     let url = format!(
         "https://api.github.com/repos/{repo}/contents/{encoded}?ref={}",
-        urlencoding_query(git_ref)
+        crate::util::url_encode(git_ref)
     );
     let resp = retry_async(
         &RetryConfig::api_default(),
@@ -365,26 +365,11 @@ pub async fn fetch_repo_files_parallel(
     out
 }
 
-fn urlencoding_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn query_encoding_keeps_simple_refs() {
-        assert_eq!(urlencoding_query("main"), "main");
-        assert!(urlencoding_query("feat/foo").contains('%'));
+        assert_eq!(crate::util::url_encode("main"), "main");
+        assert!(crate::util::url_encode("feat/foo").contains('%'));
     }
 }

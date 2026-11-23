@@ -28,7 +28,9 @@ tmp/
 
 # Generated tool directories
 .codegraph/
+graphify-out/
 .playwright-mcp/
+.serena/
 
 .cursor/
 docker-compose.override.yml

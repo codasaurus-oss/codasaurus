@@ -3,57 +3,75 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::Url;
 
-/// Validate that a URL is safe to request from the server (blocks SSRF to private/metadata IPs).
-///
-/// When `allow_loopback` is true (Ollama local inference), `localhost` / `127.0.0.1`
-/// are permitted. Private LAN and cloud-metadata addresses are always rejected.
-pub fn validate_llm_base_url(raw: &str, allow_loopback: bool) -> Result<(), String> {
+fn is_loopback_host_name(host: &str) -> bool {
+    host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+fn is_metadata_host(host: &str) -> bool {
+    matches!(
+        host,
+        "metadata.google.internal" | "metadata" | "metadata.azure.com"
+    ) || host.ends_with(".internal")
+        || host.ends_with(".local")
+}
+
+fn validate_url(
+    raw: &str,
+    allowed_schemes: &[&str],
+    scheme_hint: &str,
+    allow_loopback_host: bool,
+    allow_loopback_ip: bool,
+) -> Result<(), String> {
     let url = Url::parse(raw).map_err(|e| format!("Invalid URL: {e}"))?;
-
-    match url.scheme() {
-        "http" | "https" => {}
-        other => {
-            return Err(format!(
-                "Unsupported URL scheme '{other}' — use http or https"
-            ))
-        }
+    if !allowed_schemes.contains(&url.scheme()) {
+        return Err(format!(
+            "Unsupported URL scheme '{}' — {scheme_hint}",
+            url.scheme()
+        ));
     }
-
     let host = url
         .host_str()
         .ok_or_else(|| "URL must include a host".to_string())?;
-
     let host_lower = host.to_ascii_lowercase();
-    let is_loopback_host = host_lower == "localhost"
-        || host_lower.ends_with(".localhost")
-        || host_lower == "127.0.0.1"
-        || host_lower == "::1";
-
-    if is_loopback_host {
-        if allow_loopback {
-            return Ok(());
-        }
+    if is_loopback_host_name(&host_lower) {
+        return if allow_loopback_host {
+            Ok(())
+        } else {
+            Err(format!("Host '{host}' is not allowed (SSRF protection)"))
+        };
+    }
+    if is_metadata_host(&host_lower) {
         return Err(format!("Host '{host}' is not allowed (SSRF protection)"));
     }
-
-    if matches!(
-        host_lower.as_str(),
-        "metadata.google.internal" | "metadata" | "metadata.azure.com"
-    ) || host_lower.ends_with(".internal")
-        || host_lower.ends_with(".local")
-    {
-        return Err(format!("Host '{host}' is not allowed (SSRF protection)"));
-    }
-
     if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip, allow_loopback) {
+        if is_blocked_ip(ip, allow_loopback_ip) {
             return Err(format!(
                 "IP address '{ip}' is not allowed (SSRF protection)"
             ));
         }
     }
-
     Ok(())
+}
+
+fn host_is_loopback(raw: &str) -> bool {
+    Url::parse(raw)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| is_loopback_host_name(&host))
+}
+
+/// Validate that a URL is safe to request from the server (blocks SSRF to private/metadata IPs).
+///
+/// When `allow_loopback` is true (Ollama local inference), `localhost` / `127.0.0.1`
+/// are permitted. Private LAN and cloud-metadata addresses are always rejected.
+pub fn validate_llm_base_url(raw: &str, allow_loopback: bool) -> Result<(), String> {
+    validate_url(
+        raw,
+        &["http", "https"],
+        "use http or https",
+        allow_loopback,
+        allow_loopback,
+    )
 }
 
 /// Like [`validate_llm_base_url`], then resolve DNS and reject private/metadata answers
@@ -79,67 +97,21 @@ pub async fn validate_http_url_resolved(raw: &str, allow_loopback: bool) -> Resu
 /// `127.0.0.1`, `::1`) is permitted for local setup; private LAN and
 /// cloud-metadata addresses are always rejected.
 pub fn validate_postgres_url(raw: &str) -> Result<(), String> {
-    let url = Url::parse(raw).map_err(|e| format!("Invalid URL: {e}"))?;
-
-    match url.scheme() {
-        "postgres" | "postgresql" => {}
-        other => {
-            return Err(format!(
-                "Unsupported URL scheme '{other}' — use postgres:// or postgresql://"
-            ))
-        }
-    }
-
-    let host = url
-        .host_str()
-        .ok_or_else(|| "URL must include a host".to_string())?;
-
-    let host_lower = host.to_ascii_lowercase();
-    let is_loopback_host = host_lower == "localhost"
-        || host_lower.ends_with(".localhost")
-        || host_lower == "127.0.0.1"
-        || host_lower == "::1";
-
-    // Local setup: allow explicit loopback hosts only.
-    let allow_loopback = is_loopback_host;
-
-    if is_loopback_host {
-        return Ok(());
-    }
-
-    if matches!(
-        host_lower.as_str(),
-        "metadata.google.internal" | "metadata" | "metadata.azure.com"
-    ) || host_lower.ends_with(".internal")
-        || host_lower.ends_with(".local")
-    {
-        return Err(format!("Host '{host}' is not allowed (SSRF protection)"));
-    }
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip, allow_loopback) {
-            return Err(format!(
-                "IP address '{ip}' is not allowed (SSRF protection)"
-            ));
-        }
-    }
-
-    Ok(())
+    // Local setup always permits loopback hostnames, but only those hostnames
+    // may resolve to loopback IPs (checked here for literals, in the resolved variant for DNS).
+    validate_url(
+        raw,
+        &["postgres", "postgresql"],
+        "use postgres:// or postgresql://",
+        true,
+        host_is_loopback(raw),
+    )
 }
 
 /// Like [`validate_postgres_url`], then resolve DNS and reject private/metadata answers.
 pub async fn validate_postgres_url_resolved(raw: &str) -> Result<(), String> {
     validate_postgres_url(raw)?;
-    let url = Url::parse(raw).map_err(|e| format!("Invalid URL: {e}"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| "URL must include a host".to_string())?;
-    let host_lower = host.to_ascii_lowercase();
-    let allow_loopback = host_lower == "localhost"
-        || host_lower.ends_with(".localhost")
-        || host_lower == "127.0.0.1"
-        || host_lower == "::1";
-    resolve_and_check_host(raw, allow_loopback).await
+    resolve_and_check_host(raw, host_is_loopback(raw)).await
 }
 
 async fn resolve_and_check_host(raw: &str, allow_loopback: bool) -> Result<(), String> {

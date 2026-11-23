@@ -1,5 +1,49 @@
 //! Shared helpers used across the bot and API.
 
+use std::fmt::Write as _;
+use std::future::Future;
+use std::sync::LazyLock;
+use tokio::runtime::{Handle, Runtime};
+
+static FALLBACK_RT: LazyLock<Runtime> =
+    LazyLock::new(|| Runtime::new().expect("failed to create fallback tokio runtime"));
+
+/// Run a future from sync code, reusing the current multi-thread runtime when possible.
+///
+/// `block_in_place` is required because callers may already hold blocking work on the
+/// runtime; calling `Handle::block_on` directly would panic in that case.
+pub fn block_on<F: Future>(fut: F) -> F::Output {
+    match Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => FALLBACK_RT.block_on(fut),
+    }
+}
+
+/// Percent-encode everything outside RFC 3986 unreserved characters.
+pub fn url_encode(s: &str) -> String {
+    percent_encode(s, false)
+}
+
+/// Like [`url_encode`], but leaves `/` intact for path segments.
+pub fn url_encode_path(s: &str) -> String {
+    percent_encode(s, true)
+}
+
+fn percent_encode(s: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'_' | b'.' | b'~')
+            || (keep_slash && b == b'/')
+        {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 /// GitHub API related constants.
 pub mod github {
     /// Number of files to fetch per API page when listing PR files.

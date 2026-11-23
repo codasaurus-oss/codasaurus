@@ -9,10 +9,6 @@ use crate::db;
 use super::errors::ApiError;
 use super::AppState;
 
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, Default)]
 pub struct ListAuditParams {
     pub event_type: Option<String>,
@@ -22,17 +18,9 @@ pub struct ListAuditParams {
     pub per_page: Option<i64>,
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_audit))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 /// GET /api/audit
 #[utoipa::path(get, path = "/api/audit", tag = "audit", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]

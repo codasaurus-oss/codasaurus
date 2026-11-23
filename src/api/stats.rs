@@ -16,17 +16,9 @@ static STATS_CACHE: LazyLock<Mutex<(Instant, Option<serde_json::Value>)>> =
 
 const STATS_CACHE_TTL: Duration = Duration::from_secs(30);
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(stats))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 /// GET /api/stats
 #[utoipa::path(get, path = "/api/stats", tag = "stats", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
