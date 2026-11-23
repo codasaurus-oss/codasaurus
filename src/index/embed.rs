@@ -16,7 +16,7 @@ pub async fn embed_texts(
         return Ok(Vec::new());
     }
     if !embedding_configured(&config.embedding_model) {
-        tracing::warn!("no embedding model configured; skipping semantic index batch");
+        tracing::debug!("no embedding model configured; skipping semantic index batch");
         return Ok(Vec::new());
     }
     if crate::bot::offline::offline_mode_from_env_and_db(None) {
