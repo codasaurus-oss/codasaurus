@@ -25,5 +25,3 @@ services:
         sync: false
       - key: GITHUB_WEBHOOK_SECRET
         sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false
