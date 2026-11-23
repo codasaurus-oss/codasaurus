@@ -9,6 +9,7 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+#[derive(Clone)]
 pub struct ModelRequest {
     pub alias: String,
     pub upstream: String,
@@ -43,14 +44,11 @@ impl GatewayClient {
         }
     }
 
-    /// Admin credential is the master key; fall back to the app key for older
-    /// deployments where the same value served both roles.
+    /// Management always uses the master key. The app key (`CODASAURUS_API_KEY`)
+    /// is model-scoped and must never be used for admin calls.
     pub fn from_env() -> Option<Self> {
         let base = std::env::var("CODASAURUS_BASE_URL").ok()?;
-        let admin = std::env::var("LITELLM_MASTER_KEY")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| std::env::var("CODASAURUS_API_KEY").ok())?;
+        let admin = std::env::var("LITELLM_MASTER_KEY").ok()?;
         if base.trim().is_empty() || admin.trim().is_empty() {
             return None;
         }
@@ -62,6 +60,7 @@ impl GatewayClient {
         method: Method,
         path: &str,
         body: Option<Value>,
+        timeout: Option<Duration>,
     ) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
         let mut req = self
@@ -69,6 +68,9 @@ impl GatewayClient {
             .request(method, &url)
             .header("Authorization", format!("Bearer {}", self.admin_key))
             .header("Accept", "application/json");
+        if let Some(timeout) = timeout {
+            req = req.timeout(timeout);
+        }
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -101,7 +103,9 @@ impl GatewayClient {
             "litellm_params": params,
             "model_info": { "managed_by": "codasaurus" },
         });
-        let value: Value = self.request(Method::POST, "/model/new", Some(body)).await?;
+        let value: Value = self
+            .request(Method::POST, "/model/new", Some(body), None)
+            .await?;
         value
             .get("model_id")
             .or_else(|| value.get("id"))
@@ -120,13 +124,21 @@ impl GatewayClient {
                 Method::PATCH,
                 &format!("/model/{id}/update"),
                 Some(json!({ "litellm_params": params })),
+                None,
             )
             .await?;
         Ok(())
     }
 
     pub async fn list_models(&self) -> Result<Vec<GatewayModel>> {
-        let value: Value = self.request(Method::GET, "/model/info", None).await?;
+        let value: Value = self
+            .request(
+                Method::GET,
+                "/model/info",
+                None,
+                Some(Duration::from_secs(2)),
+            )
+            .await?;
         let items = value
             .get("data")
             .or_else(|| value.get("models"))
@@ -154,7 +166,25 @@ impl GatewayClient {
 
     pub async fn delete_model(&self, id: &str) -> Result<()> {
         let _: Value = self
-            .request(Method::POST, "/model/delete", Some(json!({ "id": id })))
+            .request(
+                Method::POST,
+                "/model/delete",
+                Some(json!({ "id": id })),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Revoke a previously issued virtual key so re-saves do not accumulate keys.
+    pub async fn revoke_key(&self, key: &str) -> Result<()> {
+        let _: Value = self
+            .request(
+                Method::POST,
+                "/key/delete",
+                Some(json!({ "keys": [key] })),
+                None,
+            )
             .await?;
         Ok(())
     }
@@ -166,6 +196,7 @@ impl GatewayClient {
                 Method::POST,
                 "/key/generate",
                 Some(json!({ "models": [alias] })),
+                None,
             )
             .await?;
         value
@@ -276,7 +307,43 @@ mod tests {
             )
             .route(
                 "/model/m-1/update",
-                patch(|| async { Json(serde_json::json!({})) }),
+                patch({
+                    let c = captured.clone();
+                    move |req: Request| {
+                        let c = c.clone();
+                        async move {
+                            let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+                                .await
+                                .unwrap();
+                            c.lock().unwrap().push((
+                                "update".into(),
+                                String::new(),
+                                String::from_utf8(body.to_vec()).unwrap(),
+                            ));
+                            Json(serde_json::json!({}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/key/delete",
+                post({
+                    let c = captured.clone();
+                    move |req: Request| {
+                        let c = c.clone();
+                        async move {
+                            let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+                                .await
+                                .unwrap();
+                            c.lock().unwrap().push((
+                                "revoke".into(),
+                                String::new(),
+                                String::from_utf8(body.to_vec()).unwrap(),
+                            ));
+                            Json(serde_json::json!({"deleted_keys": ["sk-old"]}))
+                        }
+                    }
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -349,5 +416,36 @@ mod tests {
             err.to_string().contains("gateway"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn update_model_uses_patch_and_keeps_id() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let base = spawn(captured.clone()).await;
+        mock(&base)
+            .update_model(
+                "m-1",
+                ModelRequest {
+                    alias: "alias".into(),
+                    upstream: "openrouter/foo".into(),
+                    api_key: "new-key".into(),
+                    api_base: None,
+                },
+            )
+            .await
+            .unwrap();
+        let rows = captured.lock().unwrap();
+        assert_eq!(rows[0].0, "update");
+        assert!(rows[0].2.contains("new-key"));
+    }
+
+    #[tokio::test]
+    async fn revoke_key_sends_old_key() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let base = spawn(captured.clone()).await;
+        mock(&base).revoke_key("sk-old").await.unwrap();
+        let rows = captured.lock().unwrap();
+        assert_eq!(rows[0].0, "revoke");
+        assert!(rows[0].2.contains("sk-old"));
     }
 }

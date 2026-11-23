@@ -65,6 +65,14 @@ pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> String
                 }
             }
         }
+        if let Some(real) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return real.to_string();
+        }
     }
     peer.to_string()
 }

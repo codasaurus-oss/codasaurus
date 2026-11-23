@@ -75,6 +75,8 @@ fn upstream_model_name(provider: &str, upstream: &str) -> String {
 async fn provision_model(
     client: &crate::llm::gateway::GatewayClient,
     body: &LlmBody,
+    current_model_id: Option<&str>,
+    old_key: Option<&str>,
 ) -> Result<Option<(String, String, String)>, ApiError> {
     let (Some(provider), Some(upstream)) = (&body.upstream_provider, &body.upstream_model) else {
         return Ok(None);
@@ -108,14 +110,36 @@ async fn provision_model(
             .filter(|v| !v.is_empty())
             .map(str::to_string),
     };
-    let model_id = client.register_model(request).await.map_err(|e| {
-        tracing::error!(error = %e, "gateway model registration failed");
-        ApiError::bad_request("Could not register the model in the gateway")
-    })?;
-    let virtual_key = client.issue_key(alias).await.map_err(|e| {
-        tracing::error!(error = %e, "gateway key issuance failed");
-        ApiError::bad_request("Could not issue a gateway key for the model")
-    })?;
+    let model_id = match current_model_id {
+        Some(id) => {
+            client.update_model(id, request).await.map_err(|e| {
+                tracing::error!(error = %e, "gateway model update failed");
+                ApiError::bad_request("Could not update the model in the gateway")
+            })?;
+            id.to_string()
+        }
+        None => client.register_model(request).await.map_err(|e| {
+            tracing::error!(error = %e, "gateway model registration failed");
+            ApiError::bad_request("Could not register the model in the gateway")
+        })?,
+    };
+    let virtual_key = match client.issue_key(alias).await {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::error!(error = %e, "gateway key issuance failed");
+            if current_model_id.is_none() {
+                let _ = client.delete_model(&model_id).await;
+            }
+            return Err(ApiError::bad_request(
+                "Could not issue a gateway key for the model",
+            ));
+        }
+    };
+    if let Some(old) = old_key.filter(|k| !k.is_empty() && *k != virtual_key) {
+        if let Err(e) = client.revoke_key(old).await {
+            tracing::warn!(error = %e, "could not revoke the previous gateway key");
+        }
+    }
     Ok(Some((alias.to_string(), virtual_key, model_id)))
 }
 
@@ -475,29 +499,57 @@ async fn setup_llm(
     };
     let api_key = body.api_key.as_deref().unwrap_or("");
 
-    // Gateway-managed setup: register the model and keep only a scoped virtual key.
-    let managed = if provider == "litellm" {
-        match crate::llm::gateway::GatewayClient::from_env() {
-            Some(client) => provision_model(&client, &body).await?,
-            None => None,
-        }
+    let stored_model_id = db::config::get_config(&state.pool, "llm_gateway_model_id")
+        .await
+        .ok()
+        .flatten()
+        .filter(|v| !v.is_empty());
+    let stored_key = db::config::get_config(&state.pool, "llm_api_key")
+        .await
+        .ok()
+        .flatten();
+    let wants_managed = body.upstream_provider.is_some() || body.upstream_model.is_some();
+
+    // Gateway-managed setup: register/update the model and keep only a scoped virtual key.
+    let managed = if provider == "litellm" && wants_managed {
+        let client = crate::llm::gateway::GatewayClient::from_env().ok_or_else(|| {
+            ApiError::bad_request(
+                "Gateway management is not configured. Set LITELLM_MASTER_KEY and CODASAURUS_BASE_URL.",
+            )
+        })?;
+        provision_model(
+            &client,
+            &body,
+            stored_model_id.as_deref(),
+            stored_key.as_deref(),
+        )
+        .await?
     } else {
         None
     };
 
     if provider == "disabled" {
-        if let Some(id) = db::config::get_config(&state.pool, "llm_gateway_model_id")
-            .await
-            .ok()
-            .flatten()
-            .filter(|v| !v.is_empty())
-        {
+        let mut deleted = true;
+        if let Some(id) = &stored_model_id {
             if let Some(client) = crate::llm::gateway::GatewayClient::from_env() {
-                if let Err(e) = client.delete_model(&id).await {
+                if let Err(e) = client.delete_model(id).await {
                     tracing::warn!(error = %e, "could not delete managed gateway model");
+                    deleted = false;
+                }
+            }
+        }
+        if deleted {
+            if let (Some(client), Some(key)) = (
+                crate::llm::gateway::GatewayClient::from_env(),
+                stored_key.as_deref().filter(|k| !k.is_empty()),
+            ) {
+                if let Err(e) = client.revoke_key(key).await {
+                    tracing::warn!(error = %e, "could not revoke gateway key on disable");
                 }
             }
             db::config::set_config(&state.pool, "llm_gateway_model_id", "").await?;
+            db::config::set_config(&state.pool, "llm_api_key", "").await?;
+            db::config::apply_setting_to_env("llm_api_key", "");
         }
     }
 
@@ -1316,7 +1368,9 @@ mod tests {
             "http://127.0.0.1:1".into(),
             "sk-master".into(),
         );
-        let err = provision_model(&client, &body).await.unwrap_err();
+        let err = provision_model(&client, &body, None, None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)), "got {err:?}");
     }
 }
