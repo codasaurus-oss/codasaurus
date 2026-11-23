@@ -103,16 +103,22 @@ pub(crate) async fn post_chat(
             }
             let resp = request.send().await?;
             // 5xx / 429 come back as a status-carrying reqwest error so the
-            // shared predicate retries them; the body only matters for 4xx.
-            match resp.error_for_status_ref() {
-                Err(e)
-                    if e.status()
-                        .is_some_and(|s| s.is_server_error() || s.as_u16() == 429) =>
-                {
-                    Err(e.into())
-                }
-                _ => Ok(resp),
+            // shared predicate retries them. Read the gateway body first so its
+            // diagnostic is not lost when the response is converted.
+            let status = resp.status();
+            if status.is_server_error() || status.as_u16() == 429 {
+                let err = resp
+                    .error_for_status_ref()
+                    .expect_err("retryable status yields an error");
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    %status,
+                    body = %body.chars().take(500).collect::<String>(),
+                    "LLM gateway returned a retryable status"
+                );
+                return Err(err.into());
             }
+            Ok(resp)
         },
     )
     .await;
