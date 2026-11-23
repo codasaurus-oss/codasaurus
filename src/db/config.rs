@@ -251,6 +251,7 @@ pub const ENV_MIRROR_KEYS: &[(&str, &str)] = &[
     ("llm_api_key", "CODASAURUS_API_KEY"),
     ("llm_model", "CODASAURUS_MODEL"),
     ("llm_model_cheap", "CODASAURUS_MODEL_CHEAP"),
+    ("llm_embedding_model", "CODASAURUS_EMBEDDING_MODEL"),
     ("github_app_slug", "GITHUB_APP_SLUG"),
     ("jira_base_url", "JIRA_BASE_URL"),
     ("jira_email", "JIRA_EMAIL"),

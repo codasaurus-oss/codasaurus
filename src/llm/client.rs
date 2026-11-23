@@ -263,12 +263,12 @@ mod tests {
     fn config() -> LlmConfig {
         LlmConfig {
             api_key: "test-key".into(),
-            model: "codasaurus-review".into(),
-            text_model: "codasaurus-cheap".into(),
+            model: "my-review-alias".into(),
+            text_model: "my-cheap-alias".into(),
             max_tokens: 2048,
             temperature: 0.1,
             base_url: "http://litellm:4000/v1".into(),
-            embedding_model: "codasaurus-embedding".into(),
+            embedding_model: "my-embedding-alias".into(),
         }
     }
 
@@ -278,8 +278,8 @@ mod tests {
             json!({"role": "system", "content": "sys"}),
             json!({"role": "user", "content": "hi"}),
         ];
-        let body = chat_body(&config(), "codasaurus-review", &messages, 2048);
-        assert_eq!(body["model"], "codasaurus-review");
+        let body = chat_body(&config(), "my-review-alias", &messages, 2048);
+        assert_eq!(body["model"], "my-review-alias");
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
         assert_eq!(body["max_tokens"], 2048);

@@ -1,27 +1,21 @@
 //! Provider-neutral LLM configuration: the gateway endpoint, its credential and
-//! the stable model aliases the app sends. Provider choice and model slugs live
-//! in `litellm.config.yaml`; the only provider-named code left is the one-release
-//! legacy credential read below.
+//! the model aliases the operator defined in the gateway. The app names no
+//! provider or model; every model value here is user-supplied.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-
-/// Aliases sent to the gateway. An env override replaces one when an operator
-/// still pins a concrete model.
-const REVIEW_ALIAS: &str = "codasaurus-review";
-const CHEAP_ALIAS: &str = "codasaurus-cheap";
-const EMBEDDING_ALIAS: &str = "codasaurus-embedding";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default, skip_serializing)]
     pub api_key: String,
 
-    /// Strong model for structured `review_diff` (quality-critical).
-    #[serde(default = "default_model")]
+    /// Strong model for structured `review_diff` (quality-critical). Required:
+    /// the alias must exist in the gateway.
+    #[serde(default)]
     pub model: String,
 
-    /// Cheap model for summarize / describe / ask / docs helpers.
+    /// Cheap model for summarize / describe / ask / docs helpers. Optional.
     #[serde(default)]
     pub text_model: String,
 
@@ -34,43 +28,22 @@ pub struct LlmConfig {
     #[serde(default)]
     pub base_url: String,
 
-    /// Model used for `/embeddings` calls (semantic index). BYOK — if the
-    /// configured `base_url` doesn't support embeddings, the feature fails
-    /// open per-repo rather than failing the review.
-    #[serde(default = "default_embedding_model")]
+    /// Model used for `/embeddings` calls (semantic index). Optional: with no
+    /// configured value, embedding is skipped rather than sent with an empty
+    /// model name.
+    #[serde(default)]
     pub embedding_model: String,
 }
 
-/// Env override wins; otherwise the alias goes on the wire.
-fn resolve_model(env_value: Option<&str>, alias: &str) -> String {
-    env_value
+/// First non-empty, non-masked value; DB wins over env. A masked dashboard
+/// placeholder never reaches the wire.
+fn resolve_model(db: Option<&str>, env: Option<&str>) -> Option<String> {
+    [db, env]
+        .into_iter()
+        .flatten()
         .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or(alias)
-        .to_string()
-}
-
-/// Chat model sent to the gateway. A retired dashboard `llm_model` row is
-/// dropped on purpose: upgraded installs hold provider slugs LiteLLM rejects
-/// with a 400, so only the env override or the stable alias goes on the wire.
-fn gateway_model(_retired_db_model: Option<&str>, env_model: Option<&str>, alias: &str) -> String {
-    resolve_model(env_model, alias)
-}
-
-fn default_model() -> String {
-    gateway_model(
-        None,
-        env_secret("CODASAURUS_MODEL").as_deref(),
-        REVIEW_ALIAS,
-    )
-}
-
-fn default_cheap_model() -> String {
-    gateway_model(
-        None,
-        env_secret("CODASAURUS_MODEL_CHEAP").as_deref(),
-        CHEAP_ALIAS,
-    )
+        .find(|v| usable_secret(v))
+        .map(str::to_string)
 }
 
 fn default_max_tokens() -> u32 {
@@ -81,32 +54,19 @@ fn default_temperature() -> f32 {
     0.1
 }
 
-fn default_embedding_model() -> String {
-    resolve_model(
-        env_secret("CODASAURUS_EMBEDDING_MODEL").as_deref(),
-        EMBEDDING_ALIAS,
-    )
-}
-
 /// Masked dashboard placeholders must never be sent back as a credential.
 pub(crate) fn usable_secret(value: &str) -> bool {
     !value.is_empty() && !value.contains('•') && !value.contains('*')
 }
 
-fn env_secret(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| usable_secret(v))
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
 
-/// Credential precedence: DB `llm_api_key`, legacy DB key, env
-/// `CODASAURUS_API_KEY`, then the legacy env key. Masked placeholders are
-/// dropped here, so no caller can forward one.
-fn resolve_api_key(
-    db_primary: Option<&str>,
-    db_legacy: Option<&str>,
-    env_primary: Option<&str>,
-    env_legacy: Option<&str>,
-) -> Option<String> {
-    [db_primary, db_legacy, env_primary, env_legacy]
+/// Credential precedence: DB `llm_api_key`, then env `CODASAURUS_API_KEY`.
+/// Masked placeholders are dropped here, so no caller can forward one.
+fn resolve_api_key(db_primary: Option<&str>, env_primary: Option<&str>) -> Option<String> {
+    [db_primary, env_primary]
         .into_iter()
         .flatten()
         .find(|v| usable_secret(v))
@@ -116,11 +76,6 @@ fn resolve_api_key(
 /// Gateway endpoint from the environment; empty counts as unset (fail closed).
 fn resolve_base_url(value: Option<String>) -> Option<String> {
     value.filter(|url| !url.is_empty())
-}
-
-// shortcut: legacy OpenRouter key read, delete one release after the LiteLLM migration.
-fn legacy_env_api_key() -> Option<String> {
-    std::env::var("OPENROUTER_API_KEY").ok()
 }
 
 fn llm_disabled(provider: Option<&str>) -> bool {
@@ -199,36 +154,44 @@ impl LlmConfig {
     /// Assemble a config from already-resolved parts; every constructor ends here.
     fn new(
         api_key: String,
-        model: Option<String>,
-        text_model: Option<String>,
+        model: String,
+        text_model: String,
         base_url: String,
+        embedding_model: String,
     ) -> Self {
         Self {
             api_key,
-            model: model.unwrap_or_else(default_model),
-            text_model: text_model.unwrap_or_else(default_cheap_model),
+            model,
+            text_model,
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             base_url,
-            embedding_model: default_embedding_model(),
+            embedding_model,
         }
     }
 
     /// Load chat-completions config from the environment.
     ///
     /// `CODASAURUS_BASE_URL` points at any `/v1`-style endpoint (the compose
-    /// sidecar by default). Without one there is no endpoint, so this fails
-    /// closed. An API key is optional for local endpoints.
+    /// sidecar by default). Without one there is no endpoint, and without
+    /// `CODASAURUS_MODEL` there is no model, so this fails closed. An API key is
+    /// optional for local endpoints.
     pub fn from_env() -> Option<Self> {
-        let base_url = resolve_base_url(std::env::var("CODASAURUS_BASE_URL").ok())?;
-        let api_key = resolve_api_key(
-            None,
-            None,
-            std::env::var("CODASAURUS_API_KEY").ok().as_deref(),
-            legacy_env_api_key().as_deref(),
-        )
-        .unwrap_or_default();
-        Some(Self::new(api_key, None, None, base_url))
+        let base_url = resolve_base_url(env_var("CODASAURUS_BASE_URL"))?;
+        let model = resolve_model(None, env_var("CODASAURUS_MODEL").as_deref())?;
+        let api_key =
+            resolve_api_key(None, env_var("CODASAURUS_API_KEY").as_deref()).unwrap_or_default();
+        let text_model =
+            resolve_model(None, env_var("CODASAURUS_MODEL_CHEAP").as_deref()).unwrap_or_default();
+        let embedding_model = resolve_model(None, env_var("CODASAURUS_EMBEDDING_MODEL").as_deref())
+            .unwrap_or_default();
+        Some(Self::new(
+            api_key,
+            model,
+            text_model,
+            base_url,
+            embedding_model,
+        ))
     }
 
     /// Model used for non-review text helpers.
@@ -256,23 +219,40 @@ impl LlmConfig {
             // One round-trip for every key the config needs.
             if let Ok(entries) = crate::db::config::get_all_config(pool).await {
                 let mut db_key = None;
-                let mut db_legacy_key = None;
+                let mut db_model = None;
+                let mut db_text_model = None;
+                let mut db_embedding_model = None;
                 for e in entries {
                     match e.key.as_str() {
                         "llm_api_key" => db_key = Some(e.value),
-                        "openrouter_api_key" => db_legacy_key = Some(e.value),
+                        "llm_model" => db_model = Some(e.value),
+                        "llm_model_cheap" => db_text_model = Some(e.value),
+                        "llm_embedding_model" => db_embedding_model = Some(e.value),
                         _ => {}
                     }
                 }
-                let api_key = resolve_api_key(
-                    db_key.as_deref(),
-                    db_legacy_key.as_deref(),
-                    std::env::var("CODASAURUS_API_KEY").ok().as_deref(),
-                    legacy_env_api_key().as_deref(),
-                );
+                let env_model = env_var("CODASAURUS_MODEL");
+                let model = resolve_model(db_model.as_deref(), env_model.as_deref())?;
+                let api_key =
+                    resolve_api_key(db_key.as_deref(), env_var("CODASAURUS_API_KEY").as_deref());
+                let env_text_model = env_var("CODASAURUS_MODEL_CHEAP");
+                let text_model = resolve_model(db_text_model.as_deref(), env_text_model.as_deref())
+                    .unwrap_or_default();
+                let env_embedding_model = env_var("CODASAURUS_EMBEDDING_MODEL");
+                let embedding_model = resolve_model(
+                    db_embedding_model.as_deref(),
+                    env_embedding_model.as_deref(),
+                )
+                .unwrap_or_default();
                 // The gateway URL is a deployment fact; never take it from DB.
-                let base_url = resolve_base_url(std::env::var("CODASAURUS_BASE_URL").ok())?;
-                return Some(Self::new(api_key.unwrap_or_default(), None, None, base_url));
+                let base_url = resolve_base_url(env_var("CODASAURUS_BASE_URL"))?;
+                return Some(Self::new(
+                    api_key.unwrap_or_default(),
+                    model,
+                    text_model,
+                    base_url,
+                    embedding_model,
+                ));
             }
         }
         Self::from_env()
@@ -284,7 +264,7 @@ impl LlmConfig {
             Some(LlmBlock::Disabled) => "LLM provider is set to **disabled** under Settings → LLM. Set it to LiteLLM and save the gateway key.".into(),
             Some(LlmBlock::Offline) if pool.is_some() => "Offline / air-gap mode is on — LLM commands are disabled. Turn it off under Settings → System.".into(),
             Some(LlmBlock::Offline) => "Offline / air-gap mode is on — LLM commands are disabled.".into(),
-            None => "No LLM endpoint or API key found. Set `CODASAURUS_BASE_URL` / `CODASAURUS_API_KEY` for the LiteLLM gateway, then try again. If you saved a key under **Settings → LLM**, re-save it (masked `••••` values are not re-sent).".into(),
+            None => "No LLM configured. Set `CODASAURUS_MODEL` (or **Settings → LLM**) to a model alias you defined in LiteLLM, plus `CODASAURUS_BASE_URL` / `CODASAURUS_API_KEY` for the gateway. If you saved a key under **Settings → LLM**, re-save it (masked `••••` values are not re-sent).".into(),
         }
     }
 }
@@ -294,39 +274,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_model_uses_alias_unless_overridden() {
+    fn resolve_model_requires_a_value_and_db_wins() {
+        // Made-up user values: the app ships no model names.
         assert_eq!(
-            resolve_model(None, "codasaurus-review"),
-            "codasaurus-review"
+            resolve_model(Some("my-review-alias"), Some("my-env-alias")).as_deref(),
+            Some("my-review-alias")
         );
         assert_eq!(
-            resolve_model(Some(""), "codasaurus-cheap"),
-            "codasaurus-cheap"
+            resolve_model(None, Some("my-env-alias")).as_deref(),
+            Some("my-env-alias")
         );
+        assert_eq!(resolve_model(None, None), None);
+        assert_eq!(resolve_model(Some("   "), Some("")), None);
+        // A masked placeholder never wins over a usable value.
         assert_eq!(
-            resolve_model(Some("   "), "codasaurus-embedding"),
-            "codasaurus-embedding"
-        );
-        assert_eq!(
-            resolve_model(Some("pinned-model"), "codasaurus-review"),
-            "pinned-model"
-        );
-    }
-
-    #[test]
-    fn retired_db_model_rows_are_ignored() {
-        // Upgraded installs still hold provider slugs the gateway answers with a 400.
-        assert_eq!(
-            gateway_model(
-                Some("openrouter/anthropic/claude-sonnet-4"),
-                None,
-                REVIEW_ALIAS
-            ),
-            "codasaurus-review"
-        );
-        assert_eq!(
-            gateway_model(Some("openrouter/openai/gpt-4o-mini"), None, CHEAP_ALIAS),
-            "codasaurus-cheap"
+            resolve_model(Some("••••"), Some("my-env-alias")).as_deref(),
+            Some("my-env-alias")
         );
     }
 
@@ -334,42 +297,31 @@ mod tests {
     fn effective_text_model_falls_back_to_primary() {
         let cfg = LlmConfig {
             api_key: String::new(),
-            model: "codasaurus-review".into(),
+            model: "my-review-alias".into(),
             text_model: String::new(),
             max_tokens: 2048,
             temperature: 0.1,
             base_url: "http://litellm:4000/v1".into(),
-            embedding_model: "codasaurus-embedding".into(),
+            embedding_model: "my-embedding-alias".into(),
         };
-        assert_eq!(cfg.effective_text_model(), "codasaurus-review");
+        assert_eq!(cfg.effective_text_model(), "my-review-alias");
     }
 
     #[test]
-    fn api_key_precedence_is_db_new_then_db_legacy_then_env() {
+    fn api_key_precedence_is_db_then_env() {
         assert_eq!(
-            resolve_api_key(
-                Some("db-new"),
-                Some("db-legacy"),
-                Some("env-new"),
-                Some("env-legacy")
-            )
-            .as_deref(),
-            Some("db-new")
+            resolve_api_key(Some("db-key"), None).as_deref(),
+            Some("db-key")
         );
         assert_eq!(
-            resolve_api_key(None, Some("db-legacy"), Some("env-new"), Some("env-legacy"))
-                .as_deref(),
-            Some("db-legacy")
+            resolve_api_key(None, Some("env-key")).as_deref(),
+            Some("env-key")
         );
         assert_eq!(
-            resolve_api_key(None, None, Some("env-new"), Some("env-legacy")).as_deref(),
-            Some("env-new")
+            resolve_api_key(Some("db-key"), Some("env-key")).as_deref(),
+            Some("db-key")
         );
-        assert_eq!(
-            resolve_api_key(None, None, None, Some("env-legacy")).as_deref(),
-            Some("env-legacy")
-        );
-        assert_eq!(resolve_api_key(None, None, None, None), None);
+        assert_eq!(resolve_api_key(None, None), None);
         // Masked dashboard placeholders are filtered before precedence runs.
         assert!(!usable_secret("••••1234"));
         assert!(usable_secret("sk-real-key"));
@@ -403,7 +355,7 @@ mod tests {
     #[test]
     fn masked_db_credential_cannot_shadow_real_env_key() {
         assert_eq!(
-            resolve_api_key(Some("••••••••"), None, Some("real-key"), None).as_deref(),
+            resolve_api_key(Some("••••••••"), Some("real-key")).as_deref(),
             Some("real-key")
         );
     }

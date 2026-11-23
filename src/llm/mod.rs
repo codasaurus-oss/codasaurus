@@ -1,5 +1,5 @@
-//! LLM operations. Provider and model choice live in the gateway config; this
-//! module only sends stable aliases and parses replies.
+//! LLM operations. Provider, model and fallback choice live in the gateway; this
+//! module only sends the aliases the operator configured and parses replies.
 
 pub mod budget;
 mod client;
