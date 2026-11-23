@@ -130,16 +130,17 @@ Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding co
 
 ## LLM (optional)
 
+Codasaurus talks to a [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) gateway that fronts every provider. Docker Compose starts the sidecar for you; provider, model and failover choice live in `litellm.config.yaml`, not in the app.
+
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."
-# or Ollama / any OpenAI-compatible endpoint
-export CODASAURUS_BASE_URL="http://localhost:11434/v1"
-export CODASAURUS_MODEL="qwen2.5-coder:7b"
+export LITELLM_MASTER_KEY="sk-..."          # compose: sidecar admin key
+export CODASAURUS_API_KEY="$LITELLM_MASTER_KEY"  # app → gateway credential
+export OPENROUTER_API_KEY="sk-or-..."       # consumed by the sidecar
 ```
 
-Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
+`CODASAURUS_BASE_URL` is required: it points at the gateway and compose injects `http://litellm:4000/v1`. A key alone is not enough. Any OpenAI-compatible `/v1` endpoint still works directly — point `CODASAURUS_BASE_URL` at it and skip the sidecar. Failover is LiteLLM's `router_settings.fallbacks`, configured in the same YAML.
 
-**Multi-provider / fallback:** `CODASAURUS_BASE_URL` accepts any OpenAI-compatible `/v1` endpoint, including a self-hosted [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) proxy — point Codasaurus at LiteLLM and it handles routing across OpenAI/Anthropic/Azure/Bedrock/etc. For a lighter setup with no extra service, set `CODASAURUS_FALLBACK_BASE_URL` (+ optional `CODASAURUS_FALLBACK_API_KEY` / `CODASAURUS_FALLBACK_MODEL`) to a second provider — Codasaurus automatically retries there if the primary endpoint fails.
+Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
 
 ---
 

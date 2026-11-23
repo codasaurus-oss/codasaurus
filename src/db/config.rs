@@ -214,11 +214,6 @@ pub async fn get_all_config(pool: &DbPool) -> Result<Vec<AppConfig>, sqlx::Error
     Ok(entries)
 }
 
-/// Prefetch the full map into the process cache (boot / after bulk writes).
-pub async fn warm_config_cache(pool: &DbPool) {
-    let _ = get_all_config(pool).await;
-}
-
 /// Dashboard keys that mirror process environment variables.
 ///
 /// Format: `(db_key, env_key)`.
@@ -248,14 +243,13 @@ pub const ENV_MIRROR_KEYS: &[(&str, &str)] = &[
         "CODASAURUS_AUTO_IMPROVE_MAX_FILES",
     ),
     ("auto_improve_max_diff", "CODASAURUS_AUTO_IMPROVE_MAX_DIFF"),
-    ("allow_local_llm", "CODASAURUS_ALLOW_LOCAL_LLM"),
     ("insecure_cookies", "CODASAURUS_INSECURE_COOKIES"),
     ("secure_cookies", "CODASAURUS_SECURE_COOKIES"),
     ("llm_daily_budget_usd", "CODASAURUS_LLM_DAILY_BUDGET_USD"),
     ("offline_mode", "CODASAURUS_OFFLINE"),
     // LLM — so `@codasaurus ask` and workers see dashboard keys without restart.
     ("llm_provider", "CODASAURUS_LLM_PROVIDER"),
-    ("openrouter_api_key", "OPENROUTER_API_KEY"),
+    ("llm_api_key", "CODASAURUS_API_KEY"),
     ("llm_model", "CODASAURUS_MODEL"),
     ("llm_model_cheap", "CODASAURUS_MODEL_CHEAP"),
     ("llm_base_url", "CODASAURUS_BASE_URL"),

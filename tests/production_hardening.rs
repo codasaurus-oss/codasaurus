@@ -204,7 +204,7 @@ async fn github_jwt_rejects_bad_pem() {
 #[tokio::test]
 async fn ssrf_blocks_metadata() {
     assert!(codasaurus::ssrf::validate_llm_base_url("http://169.254.169.254/", false).is_err());
-    assert!(codasaurus::ssrf::validate_llm_base_url("https://openrouter.ai/api/v1", false).is_ok());
+    assert!(codasaurus::ssrf::validate_llm_base_url("https://api.example.com/v1", false).is_ok());
 }
 
 #[tokio::test]
@@ -267,7 +267,7 @@ async fn viewer_cannot_write_settings() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/api/settings/llm_provider")
+                .uri("/api/settings/llm_api_key")
                 .header("content-type", "application/json")
                 .header("cookie", format!("codasaurus_session={token}"))
                 .body(Body::from(r#"{"value":"disabled"}"#))

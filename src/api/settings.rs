@@ -46,7 +46,7 @@ const TICKET_KEYS: &[&str] = &[
 ];
 
 const SENSITIVE_KEYS: &[&str] = &[
-    "openrouter_api_key",
+    "llm_api_key",
     "github_private_key",
     "github_webhook_secret",
     "database_url",
@@ -59,10 +59,9 @@ const SENSITIVE_KEYS: &[&str] = &[
 /// Writable config keys — prevents arbitrary config writes.
 const ALLOWED_KEYS: &[&str] = &[
     "llm_provider",
-    "openrouter_api_key",
+    "llm_api_key",
     "llm_model",
     "llm_model_cheap",
-    "llm_base_url",
     "llm_daily_budget_usd",
     "public_url",
     "default_severity",
@@ -105,7 +104,6 @@ const ALLOWED_KEYS: &[&str] = &[
     "max_llm_diff_chars",
     "auto_improve_max_files",
     "auto_improve_max_diff",
-    "allow_local_llm",
     "insecure_cookies",
     "secure_cookies",
     // Ticket integrations
@@ -188,7 +186,7 @@ pub(crate) async fn get_settings(
         }
     }
 
-    // Offline is a kill-switch independent of OpenRouter keys. Surface the
+    // Offline is a kill-switch independent of the LLM gateway credential. Surface the
     // effective value when `CODASAURUS_OFFLINE` in the process env overrides DB.
     let db_off = map
         .get("offline_mode")
@@ -299,26 +297,6 @@ async fn set_setting(
             .parse::<f64>()
             .map_err(|_| ApiError::bad_request("llm_daily_budget_usd must be a number"))?;
     }
-    if key == "llm_base_url" && !body.value.is_empty() {
-        let provider = db::config::get_config(&state.pool, "llm_provider")
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let from_db = db::config::get_config(&state.pool, "allow_local_llm")
-            .await
-            .ok()
-            .flatten()
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        let from_env = std::env::var("CODASAURUS_ALLOW_LOCAL_LLM")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let allow_loopback = provider == "ollama" || from_db || from_env;
-        crate::ssrf::validate_llm_base_url_resolved(&body.value, allow_loopback)
-            .await
-            .map_err(ApiError::bad_request)?;
-    }
 
     match key.as_str() {
         "audit_retention_days" => parse_positive_int(&body.value, &key, 7, 730)?,
@@ -332,7 +310,6 @@ async fn set_setting(
         "auto_improve_max_files" => parse_positive_int(&body.value, &key, 1, 500)?,
         "auto_improve_max_diff" => parse_positive_int(&body.value, &key, 1000, 500_000)?,
         "hsts"
-        | "allow_local_llm"
         | "insecure_cookies"
         | "secure_cookies"
         | "oidc_allow_open_join"

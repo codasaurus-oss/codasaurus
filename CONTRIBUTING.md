@@ -70,6 +70,12 @@ cargo build --release --locked
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests (with Postgres), `cargo deny`, actionlint, and a release-style build.
 
+### LLM gateway (LiteLLM)
+
+`docker compose up -d` starts the `litellm` sidecar alongside Postgres and Redis. Provider, model and failover choice live in `litellm.config.yaml`; edit that file and restart only the sidecar (`docker compose restart litellm`) to pick up a change. The app keeps one gateway endpoint and one credential, both supplied by compose env.
+
+`LITELLM_SALT_KEY` cannot be rotated in place — rotating it invalidates provider keys LiteLLM has stored. That only matters once LiteLLM gets a database; this compose setup has none.
+
 ## Pull request guidelines
 
 ### Before you open a PR
