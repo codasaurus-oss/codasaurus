@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # ── Stage 1: Build the SPA from codasaurus-frontend ─────────────
 FROM node:20-alpine AS frontend
 ARG DASHBOARD_REF=main
@@ -18,15 +20,18 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 ENV CODASAURUS_SKIP_FRONTEND_BUILD=1
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/app/target \
+    mkdir -p src && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
     && cargo build --release --locked 2>&1 | tail -1 \
     && rm -rf src
 
 COPY . .
 COPY --from=frontend /app/svelte-dashboard/dist/ svelte-dashboard/dist/
-RUN cargo build --release --locked \
-    && strip /app/target/release/codasaurus
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/app/target \
+    cargo build --release --locked \
+    && cp target/release/codasaurus /app/codasaurus \
+    && strip /app/codasaurus
 
 # ── Stage 3: Runtime ────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -39,7 +44,7 @@ RUN apt-get update \
     && chown -R 65532:65532 /data /tmp/codasaurus
 WORKDIR /app
 COPY --from=frontend /app/svelte-dashboard/dist/ /app/svelte-dashboard/dist/
-COPY --from=backend /app/target/release/codasaurus /usr/local/bin/codasaurus
+COPY --from=backend /app/codasaurus /usr/local/bin/codasaurus
 USER 65532:65532
 ENV PORT=3000 \
     CODASAURUS_DATA_DIR=/data \
