@@ -7,7 +7,7 @@ use super::cost::estimate_spend_microdollars;
 use super::schema::review_response_format;
 use crate::llm::budget;
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde_json::json;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -173,7 +173,7 @@ pub(crate) async fn chat_text(
 
     let model = config.effective_text_model();
     let body = text_body(model, system_prompt, user_prompt, max_tokens);
-    let first = post_chat(
+    let resp = post_chat(
         client,
         config,
         model,
@@ -182,14 +182,14 @@ pub(crate) async fn chat_text(
         prompt_chars,
         false,
     )
-    .await
-    .and_then(|resp| text_from_response(&resp));
+    .await?;
 
     // Free / alias routers sometimes pick a reasoning model that spends the
     // entire budget thinking and returns no content. Retry once with room to answer.
-    match first {
-        Err(e) if e.to_string().contains("missing content") => {
-            tracing::warn!(error = %e, "empty LLM content; retrying with a larger budget");
+    match text_from_response(&resp) {
+        TextOutcome::Text(text) => Ok(text),
+        TextOutcome::Empty => {
+            tracing::warn!("empty LLM content; retrying with a larger budget");
             let retry_tokens = max_tokens.saturating_mul(3).max(1500);
             let body = text_body(model, system_prompt, user_prompt, retry_tokens);
             let resp = post_chat(
@@ -202,20 +202,29 @@ pub(crate) async fn chat_text(
                 false,
             )
             .await?;
-            text_from_response(&resp)
+            match text_from_response(&resp) {
+                TextOutcome::Text(text) => Ok(text),
+                TextOutcome::Empty => Err(anyhow::anyhow!("LLM response missing content")),
+            }
         }
-        other => other,
     }
 }
 
-fn text_from_response(resp: &serde_json::Value) -> Result<String> {
+enum TextOutcome {
+    Text(String),
+    Empty,
+}
+
+fn text_from_response(resp: &serde_json::Value) -> TextOutcome {
     let choice = &resp["choices"][0];
-    let text = choice["message"]["content"]
+    let Some(text) = choice["message"]["content"]
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .context("LLM response missing content")
-        .inspect_err(|_| crate::metrics::record_llm_error())?;
+    else {
+        crate::metrics::record_llm_error();
+        return TextOutcome::Empty;
+    };
 
     let mut out = text.to_string();
     if choice["finish_reason"].as_str() == Some("length") {
@@ -223,7 +232,7 @@ fn text_from_response(resp: &serde_json::Value) -> Result<String> {
         out = truncate_to_sentence(&out).to_string();
         out.push_str("\n\n_(reply reached the model token limit; raise the model budget or use a non-reasoning model)_");
     }
-    Ok(out)
+    TextOutcome::Text(out)
 }
 
 /// Longest prefix of `text` that ends on a sentence boundary.

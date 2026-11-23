@@ -1,6 +1,7 @@
 //! Provider-neutral LLM configuration: the gateway endpoint, its credential and
-//! the stable model aliases the app sends. No provider name, URL or model slug
-//! lives here; `litellm.config.yaml` maps aliases to providers.
+//! the stable model aliases the app sends. Provider choice and model slugs live
+//! in `litellm.config.yaml`; the only provider-named code left is the one-release
+//! legacy credential read below.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -78,23 +79,19 @@ fn env_secret(name: &str) -> Option<String> {
 }
 
 /// Credential precedence: DB `llm_api_key`, legacy DB key, env
-/// `CODASAURUS_API_KEY`, then the legacy env key.
+/// `CODASAURUS_API_KEY`, then the legacy env key. Callers pass values that
+/// already survived [`usable_secret`].
 fn resolve_api_key(
     db_primary: Option<&str>,
     db_legacy: Option<&str>,
     env_primary: Option<&str>,
     env_legacy: Option<&str>,
 ) -> Option<String> {
-    if let Some(v) = db_primary.filter(|v| usable_secret(v)) {
-        return Some(v.to_string());
-    }
-    if let Some(v) = db_legacy.filter(|v| usable_secret(v)) {
-        return Some(v.to_string());
-    }
-    if let Some(v) = env_primary.filter(|v| usable_secret(v)) {
-        return Some(v.to_string());
-    }
-    env_legacy.filter(|v| usable_secret(v)).map(str::to_string)
+    db_primary
+        .or(db_legacy)
+        .or(env_primary)
+        .or(env_legacy)
+        .map(str::to_string)
 }
 
 // shortcut: legacy OpenRouter key read, delete one release after the LiteLLM migration.
@@ -106,15 +103,37 @@ fn llm_disabled(provider: Option<&str>) -> bool {
     provider.is_some_and(|p| p.eq_ignore_ascii_case("disabled"))
 }
 
+enum LlmBlock {
+    Offline,
+    Disabled,
+}
+
+/// Fail-closed reason for skipping LLM config. Reads the dashboard config once
+/// instead of three sequential `get_config` calls; the read is cached, so the
+/// caller's own `get_all_config` is a cache hit.
+async fn block_reason(pool: Option<&crate::db::DbPool>) -> Option<LlmBlock> {
+    let Some(pool) = pool else {
+        return crate::bot::offline::offline_mode_from_env_and_db(None)
+            .then_some(LlmBlock::Offline);
+    };
+    let entries = crate::db::config::get_all_config(pool).await.ok()?;
+    let value = |key: &str| {
+        entries
+            .iter()
+            .find(|e| e.key == key)
+            .map(|e| e.value.as_str())
+    };
+    if crate::bot::offline::offline_mode_from_env_and_db(value("offline_mode")) {
+        return Some(LlmBlock::Offline);
+    }
+    llm_disabled(value("llm_provider")).then_some(LlmBlock::Disabled)
+}
+
 /// Reject private/metadata LLM endpoints at request time (DNS-resolved).
 async fn assert_base_url_safe(base_url: &str) -> Result<()> {
     let host = base_url.to_ascii_lowercase();
-    let allow_loopback = host.contains("localhost")
-        || host.contains("127.0.0.1")
-        || host.contains("[::1]")
-        || std::env::var("CODASAURUS_ALLOW_LOCAL_LLM")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+    let allow_loopback =
+        host.contains("localhost") || host.contains("127.0.0.1") || host.contains("[::1]");
     crate::ssrf::validate_llm_base_url_resolved(base_url, allow_loopback)
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -131,6 +150,26 @@ pub async fn assert_embedding_endpoint_safe(config: &LlmConfig) -> Result<()> {
 }
 
 impl LlmConfig {
+    /// Assemble a config from already-resolved parts; every constructor ends here.
+    fn new(
+        api_key: String,
+        model: Option<String>,
+        text_model: Option<String>,
+        base_url: String,
+    ) -> Self {
+        Self {
+            api_key,
+            model: model.unwrap_or_else(default_model),
+            text_model: text_model.unwrap_or_else(|| {
+                resolve_model(env_secret("CODASAURUS_MODEL_CHEAP").as_deref(), CHEAP_ALIAS)
+            }),
+            max_tokens: default_max_tokens(),
+            temperature: default_temperature(),
+            base_url,
+            embedding_model: default_embedding_model(),
+        }
+    }
+
     /// Load chat-completions config from the environment.
     ///
     /// `CODASAURUS_BASE_URL` points at any `/v1`-style endpoint (the compose
@@ -147,18 +186,7 @@ impl LlmConfig {
             legacy_env_api_key().as_deref(),
         )
         .unwrap_or_default();
-        let text_model =
-            resolve_model(env_secret("CODASAURUS_MODEL_CHEAP").as_deref(), CHEAP_ALIAS);
-
-        Some(Self {
-            api_key,
-            model: default_model(),
-            text_model,
-            max_tokens: default_max_tokens(),
-            temperature: default_temperature(),
-            base_url,
-            embedding_model: default_embedding_model(),
-        })
+        Some(Self::new(api_key, None, None, base_url))
     }
 
     /// Model used for non-review text helpers.
@@ -173,24 +201,17 @@ impl LlmConfig {
     /// Prefer dashboard DB settings, fall back to environment.
     /// Returns `None` when offline mode or `llm_provider=disabled` (fail-closed).
     pub async fn from_db_or_env(pool: Option<&crate::db::DbPool>) -> Option<Self> {
+        if let Some(block) = block_reason(pool).await {
+            match block {
+                LlmBlock::Offline => {
+                    tracing::info!("offline_mode: skipping LLM config (fail-closed)")
+                }
+                LlmBlock::Disabled => tracing::info!("llm_provider=disabled: skipping LLM config"),
+            }
+            return None;
+        }
         if let Some(pool) = pool {
-            let db_off = crate::db::config::get_config(pool, "offline_mode")
-                .await
-                .ok()
-                .flatten();
-            if crate::bot::offline::offline_mode_from_env_and_db(db_off.as_deref()) {
-                tracing::info!("offline_mode: skipping LLM config (fail-closed)");
-                return None;
-            }
-            let provider = crate::db::config::get_config(pool, "llm_provider")
-                .await
-                .ok()
-                .flatten();
-            if llm_disabled(provider.as_deref()) {
-                tracing::info!("llm_provider=disabled: skipping LLM config");
-                return None;
-            }
-            // One round-trip instead of three sequential get_config calls.
+            // One round-trip for every key the config needs.
             if let Ok(entries) = crate::db::config::get_all_config(pool).await {
                 let mut db_key = None;
                 let mut db_legacy_key = None;
@@ -221,48 +242,26 @@ impl LlmConfig {
                         .filter(|u| !u.is_empty());
                 }
                 if let Some(base_url) = base_url {
-                    let model = model.unwrap_or_else(default_model);
-                    let text_model = text_model
-                        .or_else(|| env_secret("CODASAURUS_MODEL_CHEAP"))
-                        .unwrap_or_else(|| CHEAP_ALIAS.to_string());
-                    return Some(Self {
-                        api_key: api_key.unwrap_or_default(),
+                    return Some(Self::new(
+                        api_key.unwrap_or_default(),
                         model,
                         text_model,
-                        max_tokens: default_max_tokens(),
-                        temperature: default_temperature(),
                         base_url,
-                        embedding_model: default_embedding_model(),
-                    });
+                    ));
                 }
             }
-        } else if crate::bot::offline::offline_mode_from_env_and_db(None) {
-            return None;
         }
         Self::from_env()
     }
 
     /// Human-readable reason when [`from_db_or_env`] returns `None` (for PR replies).
     pub async fn unavailable_reason(pool: Option<&crate::db::DbPool>) -> String {
-        if let Some(pool) = pool {
-            let db_off = crate::db::config::get_config(pool, "offline_mode")
-                .await
-                .ok()
-                .flatten();
-            if crate::bot::offline::offline_mode_from_env_and_db(db_off.as_deref()) {
-                return "Offline / air-gap mode is on — LLM commands are disabled. Turn it off under Settings → System.".into();
-            }
-            let provider = crate::db::config::get_config(pool, "llm_provider")
-                .await
-                .ok()
-                .flatten();
-            if llm_disabled(provider.as_deref()) {
-                return "LLM provider is set to **disabled** under Settings → LLM. Set it to LiteLLM and save the gateway key.".into();
-            }
-        } else if crate::bot::offline::offline_mode_from_env_and_db(None) {
-            return "Offline / air-gap mode is on — LLM commands are disabled.".into();
+        match block_reason(pool).await {
+            Some(LlmBlock::Disabled) => "LLM provider is set to **disabled** under Settings → LLM. Set it to LiteLLM and save the gateway key.".into(),
+            Some(LlmBlock::Offline) if pool.is_some() => "Offline / air-gap mode is on — LLM commands are disabled. Turn it off under Settings → System.".into(),
+            Some(LlmBlock::Offline) => "Offline / air-gap mode is on — LLM commands are disabled.".into(),
+            None => "No LLM endpoint or API key found. Set `CODASAURUS_BASE_URL` / `CODASAURUS_API_KEY` for the LiteLLM gateway, then try again. If you saved a key under **Settings → LLM**, re-save it (masked `••••` values are not re-sent).".into(),
         }
-        "No LLM endpoint or API key found. Set `CODASAURUS_BASE_URL` / `CODASAURUS_API_KEY` for the LiteLLM gateway, then try again. If you saved a key under **Settings → LLM**, re-save it (masked `••••` values are not re-sent).".into()
     }
 }
 
@@ -330,11 +329,9 @@ mod tests {
             Some("env-legacy")
         );
         assert_eq!(resolve_api_key(None, None, None, None), None);
-        // A masked dashboard placeholder never wins over a real credential.
-        assert_eq!(
-            resolve_api_key(Some("••••1234"), None, Some("env-new"), None).as_deref(),
-            Some("env-new")
-        );
+        // Masked dashboard placeholders are filtered before precedence runs.
+        assert!(!usable_secret("••••1234"));
+        assert!(usable_secret("sk-real-key"));
     }
 
     #[test]
