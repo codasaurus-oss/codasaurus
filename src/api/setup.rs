@@ -60,6 +60,16 @@ pub struct LlmBody {
     pub model_alias: Option<String>,
 }
 
+/// LiteLLM needs an explicit provider prefix even for names containing `/`.
+fn upstream_model_name(provider: &str, upstream: &str) -> String {
+    let prefix = format!("{provider}/");
+    if upstream.starts_with(&prefix) {
+        upstream.to_string()
+    } else {
+        format!("{prefix}{upstream}")
+    }
+}
+
 /// Register a model in the gateway and issue a model-scoped virtual key.
 /// Returns `(alias, virtual_key)`; `None` keeps the legacy alias-only flow.
 async fn provision_model(
@@ -86,11 +96,7 @@ async fn provision_model(
     if key.is_empty() {
         return Err(ApiError::bad_request("A provider API key is required"));
     }
-    let model = if upstream.contains('/') {
-        upstream.to_string()
-    } else {
-        format!("{provider}/{upstream}")
-    };
+    let model = upstream_model_name(provider, upstream);
     let request = crate::llm::gateway::ModelRequest {
         alias: alias.to_string(),
         upstream: model,
@@ -1280,6 +1286,18 @@ mod tests {
         assert!(
             text.contains("GitHub manifest conversion failed"),
             "unexpected error: {text}"
+        );
+    }
+
+    #[test]
+    fn upstream_model_name_is_provider_prefixed() {
+        assert_eq!(
+            upstream_model_name("openrouter", "liquid/lfm-3-1.7b:free"),
+            "openrouter/liquid/lfm-3-1.7b:free"
+        );
+        assert_eq!(
+            upstream_model_name("openrouter", "openrouter/foo"),
+            "openrouter/foo"
         );
     }
 
