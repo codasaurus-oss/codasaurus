@@ -34,8 +34,9 @@ services:
     environment:
       - LITELLM_MODE=PRODUCTION
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?required}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Provider credentials are operator-supplied. Add them here (or via a
+      # .env file / LiteLLM admin UI) together with the model definitions;
+      # Codasaurus never reads or names them.
     volumes:
       - ./litellm.config.yaml:/app/config.yaml:ro
     healthcheck:
@@ -74,6 +75,8 @@ services:
       - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       - CODASAURUS_MODEL=${CODASAURUS_MODEL:-}
+      - CODASAURUS_MODEL_CHEAP=${CODASAURUS_MODEL_CHEAP:-}
+      - CODASAURUS_EMBEDDING_MODEL=${CODASAURUS_EMBEDDING_MODEL:-}
       - CODASAURUS_BASE_URL=http://litellm:4000/v1
       - CODASAURUS_API_KEY=${LITELLM_MASTER_KEY:?required}
       - CODASAURUS_MAX_CONCURRENT_REVIEWS=${CODASAURUS_MAX_CONCURRENT_REVIEWS:-4}
