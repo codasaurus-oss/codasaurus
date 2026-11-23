@@ -11,8 +11,8 @@ mod schema;
 pub use client::shared_client;
 pub use config::{assert_embedding_endpoint_safe, LlmConfig};
 pub use cost::{
-    all_paths_low_signal, default_cheap_model, estimate_spend_microdollars, filter_llm_files,
-    is_low_signal_path, should_run_auto_improve,
+    all_paths_low_signal, estimate_spend_microdollars, filter_llm_files, is_low_signal_path,
+    should_run_auto_improve,
 };
 pub use prompts::{build_review_prompt, IssueContext, ReviewContext};
 pub use schema::{review_schema, JudgeOutcome, LlmIssue, LlmReplacement, LlmReviewOutput};
@@ -27,6 +27,10 @@ use serde_json::json;
 /// output comes back even if the model still wants to call a tool.
 const MAX_TOOL_ITERATIONS: usize = 4;
 
+/// System-prompt overhead in the review cost estimate: the prompt string is
+/// built separately, so its length is approximated rather than measured.
+const REVIEW_PROMPT_OVERHEAD_CHARS: usize = 800;
+
 pub async fn review_diff(
     diff: &str,
     config: &LlmConfig,
@@ -38,7 +42,7 @@ pub async fn review_diff(
     let max_diff = crate::bot_runtime::BotRuntimeConfig::default().max_llm_diff_chars;
     let diff = truncate_chars(diff, max_diff);
     let prompt = build_review_prompt(&diff, context);
-    let prompt_chars = prompt.len() + 800;
+    let prompt_chars = prompt.len() + REVIEW_PROMPT_OVERHEAD_CHARS;
     crate::metrics::record_llm_request(prompt_chars, config.max_tokens, true);
     let micros = estimate_spend_microdollars(prompt_chars, config.max_tokens, true);
     budget::record_local_spend_micros(micros);
