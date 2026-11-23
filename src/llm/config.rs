@@ -50,8 +50,27 @@ fn resolve_model(env_value: Option<&str>, alias: &str) -> String {
         .to_string()
 }
 
+/// Chat model sent to the gateway. A retired dashboard `llm_model` row is
+/// dropped on purpose: upgraded installs hold provider slugs LiteLLM rejects
+/// with a 400, so only the env override or the stable alias goes on the wire.
+fn gateway_model(_retired_db_model: Option<&str>, env_model: Option<&str>, alias: &str) -> String {
+    resolve_model(env_model, alias)
+}
+
 fn default_model() -> String {
-    resolve_model(env_secret("CODASAURUS_MODEL").as_deref(), REVIEW_ALIAS)
+    gateway_model(
+        None,
+        env_secret("CODASAURUS_MODEL").as_deref(),
+        REVIEW_ALIAS,
+    )
+}
+
+fn default_cheap_model() -> String {
+    gateway_model(
+        None,
+        env_secret("CODASAURUS_MODEL_CHEAP").as_deref(),
+        CHEAP_ALIAS,
+    )
 }
 
 fn default_max_tokens() -> u32 {
@@ -182,9 +201,7 @@ impl LlmConfig {
         Self {
             api_key,
             model: model.unwrap_or_else(default_model),
-            text_model: text_model.unwrap_or_else(|| {
-                resolve_model(env_secret("CODASAURUS_MODEL_CHEAP").as_deref(), CHEAP_ALIAS)
-            }),
+            text_model: text_model.unwrap_or_else(default_cheap_model),
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             base_url,
@@ -237,16 +254,12 @@ impl LlmConfig {
             if let Ok(entries) = crate::db::config::get_all_config(pool).await {
                 let mut db_key = None;
                 let mut db_legacy_key = None;
-                let mut model = None;
-                let mut text_model = None;
                 for e in entries {
                     match e.key.as_str() {
                         "llm_api_key" if usable_secret(&e.value) => db_key = Some(e.value),
                         "openrouter_api_key" if usable_secret(&e.value) => {
                             db_legacy_key = Some(e.value)
                         }
-                        "llm_model" if !e.value.is_empty() => model = Some(e.value),
-                        "llm_model_cheap" if !e.value.is_empty() => text_model = Some(e.value),
                         _ => {}
                     }
                 }
@@ -260,12 +273,7 @@ impl LlmConfig {
                 let base_url = std::env::var("CODASAURUS_BASE_URL")
                     .ok()
                     .filter(|u| !u.is_empty())?;
-                return Some(Self::new(
-                    api_key.unwrap_or_default(),
-                    model,
-                    text_model,
-                    base_url,
-                ));
+                return Some(Self::new(api_key.unwrap_or_default(), None, None, base_url));
             }
         }
         Self::from_env()
@@ -303,6 +311,23 @@ mod tests {
         assert_eq!(
             resolve_model(Some("pinned-model"), "codasaurus-review"),
             "pinned-model"
+        );
+    }
+
+    #[test]
+    fn retired_db_model_rows_are_ignored() {
+        // Upgraded installs still hold provider slugs the gateway answers with a 400.
+        assert_eq!(
+            gateway_model(
+                Some("openrouter/anthropic/claude-sonnet-4"),
+                None,
+                REVIEW_ALIAS
+            ),
+            "codasaurus-review"
+        );
+        assert_eq!(
+            gateway_model(Some("openrouter/openai/gpt-4o-mini"), None, CHEAP_ALIAS),
+            "codasaurus-cheap"
         );
     }
 

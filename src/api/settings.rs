@@ -60,8 +60,6 @@ const SENSITIVE_KEYS: &[&str] = &[
 const ALLOWED_KEYS: &[&str] = &[
     "llm_provider",
     "llm_api_key",
-    "llm_model",
-    "llm_model_cheap",
     "llm_daily_budget_usd",
     "public_url",
     "default_severity",
@@ -169,6 +167,8 @@ pub(crate) async fn get_settings(
         "llm_base_url",
         "allow_local_llm",
         "openrouter_api_key",
+        "llm_model",
+        "llm_model_cheap",
     ];
 
     let mut map = serde_json::Map::new();
