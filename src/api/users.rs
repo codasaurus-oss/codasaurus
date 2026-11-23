@@ -245,12 +245,6 @@ async fn remove_user(
             return Err(ApiError::bad_request("Cannot remove the last owner"));
         }
     }
-    if target.email == actor.email {
-        let owners = db::users::owner_count(&state.pool).await?;
-        if owners <= 1 {
-            return Err(ApiError::bad_request("Cannot remove the last owner"));
-        }
-    }
     db::users::delete_sessions_for_email(&state.pool, &target.email).await?;
     let ok = db::users::delete_user(&state.pool, id).await?;
     if !ok {

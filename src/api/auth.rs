@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -7,6 +7,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -131,10 +132,13 @@ fn clear_cookie() -> String {
     cookie
 }
 
-pub(crate) use super::rate_limit::client_ip_from_headers as client_ip;
-
-fn check_auth_rate_limit(headers: &axum::http::HeaderMap, email: &str) -> Result<(), ApiError> {
-    let key = format!("{}/{}", client_ip(headers), email.trim().to_lowercase());
+fn check_auth_rate_limit(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    email: &str,
+) -> Result<(), ApiError> {
+    let rate = super::rate_limit::client_ip(peer, headers, super::rate_limit::trusted_proxies());
+    let key = format!("{rate}/{}", email.trim().to_lowercase());
     let mut map = LOGIN_ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
     map.retain(|_, (_, started)| now.duration_since(*started) < LOGIN_RATE_WINDOW);
@@ -181,10 +185,11 @@ pub async fn auth_middleware(
 #[utoipa::path(post, path = "/api/auth/login", tag = "auth", responses((status = 200, description = "OK")))]
 pub(crate) async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    check_auth_rate_limit(&headers, &body.email)?;
+    check_auth_rate_limit(peer.ip(), &headers, &body.email)?;
 
     let user = db::users::verify_password(&state.pool, &body.email, &body.password)
         .await
@@ -379,6 +384,7 @@ async fn invite_info(
 /// POST /api/auth/invite/:token/accept
 async fn accept_invite(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Path(token): Path<String>,
     Json(body): Json<AcceptInviteBody>,
@@ -409,7 +415,7 @@ async fn accept_invite(
         e
     };
 
-    check_auth_rate_limit(&headers, &email)?;
+    check_auth_rate_limit(peer.ip(), &headers, &email)?;
 
     if let Err(msg) = db::users::validate_password_policy(&body.password, &email) {
         return Err(ApiError::bad_request(msg));

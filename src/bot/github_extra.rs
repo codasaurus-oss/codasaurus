@@ -5,7 +5,7 @@ use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use anyhow::Result;
 use reqwest::header::HeaderMap;
 
-const USER_AGENT: &str = concat!("codasaurus/", env!("CARGO_PKG_VERSION"));
+use crate::bot::USER_AGENT;
 /// GitHub caps check-run annotations at 50.
 const MAX_ANNOTATIONS: usize = 50;
 

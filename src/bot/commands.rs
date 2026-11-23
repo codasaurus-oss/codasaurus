@@ -1307,7 +1307,7 @@ async fn spawn_review(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
     }
 
     drop(_guard);
-    prune_pr_lock(&repo_name, pr_number).await;
+    prune_pr_lock(&repo_name, pr_number, lock).await;
 }
 
 async fn spawn_ignore_comment(ctx: WebhookContext, pr_number: i64, fingerprint: Option<String>) {

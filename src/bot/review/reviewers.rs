@@ -76,7 +76,7 @@ pub(crate) async fn suggest_reviewers(
             // _permit dropped here → semaphore permit returned automatically
 
             if !commits.is_empty() {
-                let mut local = counts.lock().unwrap();
+                let mut local = counts.lock().expect("reviewer counts lock poisoned");
                 for commit in &commits {
                     if let Some(login) = commit["author"]["login"].as_str() {
                         if login != author {
@@ -93,7 +93,7 @@ pub(crate) async fn suggest_reviewers(
         let _ = h.await;
     }
 
-    let counts = author_counts.lock().unwrap();
+    let counts = author_counts.lock().expect("author counts lock poisoned");
     let mut reviewers: Vec<(String, usize)> = counts.clone().into_iter().collect();
     reviewers.sort_by_key(|k| std::cmp::Reverse(k.1));
     reviewers.truncate(5);

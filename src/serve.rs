@@ -91,7 +91,7 @@ pub async fn serve(
             .flatten();
         let db_on = db_off
             .as_deref()
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(crate::util::flag_truthy)
             .unwrap_or(false);
         let host_env_on = std::env::var_os("CODASAURUS_OFFLINE").is_some_and(|v| {
             matches!(
@@ -321,7 +321,7 @@ async fn security_headers_middleware(req: Request, next: Next) -> Response {
     );
     // HSTS when forced, or when PUBLIC_URL (env/dashboard) is https.
     let hsts = std::env::var("CODASAURUS_HSTS")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| crate::util::flag_truthy(&v))
         .unwrap_or(false)
         || std::env::var("PUBLIC_URL")
             .map(|u| u.starts_with("https://"))

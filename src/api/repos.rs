@@ -44,21 +44,9 @@ async fn sync_repos(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
-    use crate::db::config::get_config;
-
-    let app_id = get_config(&state.pool, "github_app_id")
+    let (app_id, private_key) = super::github_app_credentials(&state.pool)
         .await
-        .ok()
-        .flatten()
-        .or_else(|| std::env::var("GITHUB_APP_ID").ok())
         .ok_or_else(|| ApiError::bad_request("No GitHub App configured"))?;
-    let private_key = get_config(&state.pool, "github_private_key")
-        .await
-        .ok()
-        .flatten()
-        .filter(|k| !k.trim().is_empty())
-        .or_else(crate::github_jwt::resolve_private_key_from_env)
-        .ok_or_else(|| ApiError::bad_request("No GitHub App private key configured"))?;
 
     let jwt = crate::github_jwt::create_app_jwt(&app_id, &private_key)
         .map_err(|e| ApiError::internal(format!("JWT error: {e}")))?;
@@ -192,7 +180,7 @@ async fn sync_repos(
             )
             .await
             {
-                eprintln!("  [sync_repos] Failed to save repo: {e}");
+                tracing::warn!(error = %e, "failed to save synced repo");
             } else {
                 total += 1;
             }

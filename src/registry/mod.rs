@@ -50,7 +50,7 @@ pub fn offline_mode() -> bool {
         return true;
     }
     std::env::var("CODASAURUS_OFFLINE")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| crate::util::flag_truthy(&v))
         .unwrap_or(false)
 }
 

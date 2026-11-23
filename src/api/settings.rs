@@ -339,10 +339,7 @@ async fn set_setting(
     )
     .await;
     if key == "offline_mode" {
-        let on = matches!(
-            body.value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        );
+        let on = crate::util::flag_truthy(&body.value);
         crate::registry::set_offline_mode(on);
         // Clearing the kill-switch: drop process env so a stale CODASAURUS_OFFLINE=1
         // from an earlier mirror does not keep LLM disabled until restart.
@@ -450,17 +447,9 @@ async fn test_github_connection(
     let (app_id, private_key) = if let Some(c) = cfg {
         (c.app_id, c.private_key)
     } else {
-        let app_id = config_or_env(&state.pool, "github_app_id", "GITHUB_APP_ID")
+        super::github_app_credentials(&state.pool)
             .await
-            .ok_or_else(|| ApiError::bad_request("GitHub App is not configured"))?;
-        let private_key = db::config::get_config(&state.pool, "github_private_key")
-            .await
-            .ok()
-            .flatten()
-            .filter(|k| !k.trim().is_empty())
-            .or_else(crate::github_jwt::resolve_private_key_from_env)
-            .ok_or_else(|| ApiError::bad_request("GitHub App private key is not configured"))?;
-        (app_id, private_key)
+            .ok_or_else(|| ApiError::bad_request("GitHub App is not configured"))?
     };
 
     let token = github_jwt::create_app_jwt(&app_id, &private_key)

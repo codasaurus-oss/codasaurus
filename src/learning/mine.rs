@@ -7,7 +7,7 @@ use anyhow::Result;
 use reqwest::header::HeaderMap;
 use uuid::Uuid;
 
-const USER_AGENT: &str = concat!("codasaurus/", env!("CARGO_PKG_VERSION"));
+use crate::bot::USER_AGENT;
 
 /// After a dashboard/comment dismissal, promote repeated detector noise into a rule.
 ///

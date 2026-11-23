@@ -86,10 +86,13 @@ fn main() -> Result<()> {
                 _ => "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into(),
             };
 
-            let bot_config = if codasaurus::util::env_set("GITHUB_APP_ID") {
+            let app_id = std::env::var("GITHUB_APP_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty());
+            let bot_config = if let Some(app_id) = app_id {
                 match github_jwt::require_private_key_from_env() {
                     Ok(key) => Some(bot::BotConfig {
-                        app_id: std::env::var("GITHUB_APP_ID").unwrap(),
+                        app_id,
                         private_key: key,
                         webhook_secret: std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
                         host: host.clone(),
