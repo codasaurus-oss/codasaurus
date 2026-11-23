@@ -44,7 +44,7 @@ const SYNC_KEYS: &[(&str, &str)] = &[
     // `github_jwt::resolve_private_key_from_env()`.
     ("GITHUB_WEBHOOK_SECRET", "github_webhook_secret"),
     ("GITHUB_APP_SLUG", "github_app_slug"),
-    ("OPENROUTER_API_KEY", "openrouter_api_key"),
+    ("CODASAURUS_API_KEY", "llm_api_key"),
 ];
 
 /// Start the unified server serving API + SPA + webhook on a single port.
@@ -434,10 +434,7 @@ async fn health_response(require_db: bool) -> impl IntoResponse {
         if let Ok(Some(p)) = crate::db::config::get_config(pool, "llm_provider").await {
             llm_disabled = p.eq_ignore_ascii_case("disabled");
         }
-        if let Ok(Some(url)) = crate::db::config::get_config(pool, "llm_base_url").await {
-            has_llm_endpoint = !url.trim().is_empty();
-        }
-        if let Ok(Some(key)) = crate::db::config::get_config(pool, "openrouter_api_key").await {
+        if let Ok(Some(key)) = crate::db::config::get_config(pool, "llm_api_key").await {
             if !key.trim().is_empty() {
                 has_llm_endpoint = true;
             }

@@ -471,7 +471,7 @@ async fn setup_endpoints_database_llm_public_url() {
             "POST",
             "/api/setup/llm",
             Some(&token),
-            Some(serde_json::json!({"provider": "disabled"})),
+            Some(serde_json::json!({"provider": "litellm"})),
         ),
     )
     .await;
@@ -486,7 +486,7 @@ async fn setup_endpoints_database_llm_public_url() {
             .await
             .unwrap()
             .as_deref(),
-        Some("disabled")
+        Some("litellm")
     );
 
     let old_url = db::config::get_config(&pool, "public_url").await.unwrap();

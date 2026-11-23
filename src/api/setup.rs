@@ -49,10 +49,9 @@ pub struct DatabaseBody {
 
 #[derive(Deserialize)]
 pub struct LlmBody {
-    pub provider: String, // "openrouter" | "ollama" | "custom"
+    pub provider: String, // "litellm" | "disabled"
     pub api_key: Option<String>,
     pub model: Option<String>,
-    pub base_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -183,7 +182,8 @@ pub(crate) async fn setup_status(
         .ok()
         .flatten()
         .is_some()
-        || crate::util::env_set("OPENROUTER_API_KEY");
+        || crate::util::env_set("CODASAURUS_API_KEY")
+        || crate::util::env_set("CODASAURUS_BASE_URL");
 
     let admin = db::users::owner_exists(&state.pool).await.unwrap_or(false);
 
@@ -348,25 +348,22 @@ async fn get_llm_config(
     require_setup_wizard_access(&state, &headers).await?;
     use db::config::get_config;
 
-    let provider = get_config(&state.pool, "llm_provider")
-        .await
-        .ok()
-        .flatten()
-        .or_else(|| {
-            if crate::util::env_set("OPENROUTER_API_KEY") {
-                Some("openrouter".into())
-            } else if crate::util::env_set("CODASAURUS_BASE_URL") {
-                Some("custom".into())
-            } else {
-                None
-            }
-        });
+    let provider = match get_config(&state.pool, "llm_provider").await.ok().flatten() {
+        Some(p) if p.eq_ignore_ascii_case("disabled") => Some("disabled".to_string()),
+        Some(_) => Some("litellm".to_string()),
+        None if crate::util::env_set("CODASAURUS_API_KEY")
+            || crate::util::env_set("CODASAURUS_BASE_URL") =>
+        {
+            Some("litellm".to_string())
+        }
+        None => None,
+    };
 
-    let api_key = get_config(&state.pool, "openrouter_api_key")
+    let api_key = get_config(&state.pool, "llm_api_key")
         .await
         .ok()
         .flatten()
-        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+        .or_else(|| std::env::var("CODASAURUS_API_KEY").ok())
         .map(|_| "••••••••".to_string()); // never expose full key
 
     let model = get_config(&state.pool, "llm_model")
@@ -375,17 +372,10 @@ async fn get_llm_config(
         .flatten()
         .or_else(|| std::env::var("CODASAURUS_MODEL").ok());
 
-    let base_url = get_config(&state.pool, "llm_base_url")
-        .await
-        .ok()
-        .flatten()
-        .or_else(|| std::env::var("CODASAURUS_BASE_URL").ok());
-
     Ok(Json(json!({
         "provider": provider,
         "api_key": api_key,
         "model": model,
-        "base_url": base_url,
     })))
 }
 
@@ -397,35 +387,30 @@ async fn setup_llm(
     Json(body): Json<LlmBody>,
 ) -> Result<Json<SetupResponse>, ApiError> {
     require_setup_open_or_admin(&state, &headers).await?;
-    let base_url = body.base_url.as_deref().unwrap_or("");
+    let provider = match body.provider.as_str() {
+        "litellm" | "disabled" => body.provider.as_str(),
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "Unsupported LLM provider: {other}. Use litellm or disabled."
+            )))
+        }
+    };
     let api_key = body.api_key.as_deref().unwrap_or("");
 
-    // SSRF guard for user-supplied endpoints
-    if !base_url.is_empty() {
-        let allow_loopback = body.provider == "ollama";
-        ssrf::validate_llm_base_url_resolved(base_url, allow_loopback)
-            .await
-            .map_err(ApiError::bad_request)?;
-    }
-
     // Always store the config (+ mirror into process env for immediate ask/review use).
-    db::config::set_config(&state.pool, "llm_provider", &body.provider).await?;
+    db::config::set_config(&state.pool, "llm_provider", provider).await?;
     if !api_key.is_empty() {
-        db::config::set_config(&state.pool, "openrouter_api_key", api_key).await?;
-        db::config::apply_setting_to_env("openrouter_api_key", api_key);
+        db::config::set_config(&state.pool, "llm_api_key", api_key).await?;
+        db::config::apply_setting_to_env("llm_api_key", api_key);
     }
     if let Some(model) = &body.model {
         db::config::set_config(&state.pool, "llm_model", model).await?;
         db::config::apply_setting_to_env("llm_model", model);
     }
-    if !base_url.is_empty() {
-        db::config::set_config(&state.pool, "llm_base_url", base_url).await?;
-        db::config::apply_setting_to_env("llm_base_url", base_url);
-    }
 
-    // If ?test=true, send a lightweight probe to the LLM endpoint
+    // If ?test=true, send a lightweight probe to the gateway
     let test_passed = if params.test.unwrap_or(false) {
-        test_llm_connection(&body.provider, api_key, body.model.as_deref(), base_url).await?
+        test_llm_connection(provider).await?
     } else {
         None
     };
@@ -441,69 +426,15 @@ async fn setup_llm(
     }))
 }
 
-/// Try a basic chat-completion probe against the provider.
-async fn test_llm_connection(
-    provider: &str,
-    api_key: &str,
-    model: Option<&str>,
-    base_url: &str,
-) -> Result<Option<bool>, ApiError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))?;
-
-    let (url, model_name) = match provider {
-        "openrouter" => (
-            "https://openrouter.ai/api/v1/chat/completions".to_string(),
-            model.unwrap_or("qwen/qwen3-coder:free"),
-        ),
-        "ollama" => {
-            let base = if base_url.is_empty() {
-                "http://localhost:11434"
-            } else {
-                base_url.trim_end_matches('/')
-            };
-            (
-                format!("{base}/v1/chat/completions"),
-                model.unwrap_or("qwen2.5-coder:7b"),
-            )
-        }
-        "custom" => {
-            if base_url.is_empty() {
-                return Ok(Some(false));
-            }
-            ssrf::validate_llm_base_url_resolved(base_url, false)
-                .await
-                .map_err(ApiError::bad_request)?;
-            let base = base_url.trim_end_matches('/');
-            (
-                format!("{base}/chat/completions"),
-                model.unwrap_or("default"),
-            )
-        }
-        "disabled" => return Ok(Some(true)),
-        _ => {
-            return Err(ApiError::bad_request(format!(
-                "Unknown provider: {provider}"
-            )))
-        }
+/// Probe the configured gateway with a minimal chat completion.
+async fn test_llm_connection(provider: &str) -> Result<Option<bool>, ApiError> {
+    if provider == "disabled" {
+        return Ok(Some(true));
+    }
+    let Some(config) = crate::llm::LlmConfig::from_env() else {
+        return Ok(Some(false));
     };
-
-    let mut req = client.post(&url).json(&json!({
-        "model": model_name,
-        "messages": [{"role": "user", "content": "Say 'ok' and nothing else."}],
-        "max_tokens": 10,
-    }));
-
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    match req.send().await {
-        Ok(resp) => Ok(Some(resp.status().is_success())),
-        Err(_) => Ok(Some(false)),
-    }
+    Ok(Some(crate::llm::check_connection(&config).await.is_ok()))
 }
 
 #[derive(Deserialize)]

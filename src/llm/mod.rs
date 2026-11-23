@@ -31,6 +31,27 @@ const MAX_TOOL_ITERATIONS: usize = 4;
 /// built separately, so its length is approximated rather than measured.
 const REVIEW_PROMPT_OVERHEAD_CHARS: usize = 800;
 
+/// Minimal gateway probe for the setup wizard. One chat call, no budget gate.
+pub async fn check_connection(config: &LlmConfig) -> Result<()> {
+    let body = json!({
+        "model": config.model,
+        "messages": [{"role": "user", "content": "Reply with ok"}],
+        "max_tokens": 10,
+        "temperature": 0
+    });
+    post_chat(
+        llm_client()?,
+        config,
+        &config.model,
+        &body,
+        "check_connection",
+        0,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+
 pub async fn review_diff(
     diff: &str,
     config: &LlmConfig,

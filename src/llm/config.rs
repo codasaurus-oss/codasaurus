@@ -129,8 +129,21 @@ async fn block_reason(pool: Option<&crate::db::DbPool>) -> Option<LlmBlock> {
     llm_disabled(value("llm_provider")).then_some(LlmBlock::Disabled)
 }
 
+/// The compose sidecar is deployment-controlled, not user-supplied: its private
+/// network address is expected, so only it skips the DNS-resolved SSRF gate.
+fn is_gateway_host(base_url: &str) -> bool {
+    url::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .as_deref()
+        == Some("litellm")
+}
+
 /// Reject private/metadata LLM endpoints at request time (DNS-resolved).
 async fn assert_base_url_safe(base_url: &str) -> Result<()> {
+    if is_gateway_host(base_url) {
+        return Ok(());
+    }
     let host = base_url.to_ascii_lowercase();
     let allow_loopback =
         host.contains("localhost") || host.contains("127.0.0.1") || host.contains("[::1]");
@@ -340,5 +353,27 @@ mod tests {
         assert!(llm_disabled(Some("Disabled")));
         assert!(!llm_disabled(Some("litellm")));
         assert!(!llm_disabled(None));
+    }
+
+    #[test]
+    fn gateway_host_exception_is_exact() {
+        assert!(is_gateway_host("http://litellm:4000/v1"));
+        assert!(!is_gateway_host("http://litellm.example.com:4000/v1"));
+        assert!(!is_gateway_host("http://evil-litellm:4000/v1"));
+    }
+
+    #[test]
+    fn masked_db_credential_cannot_shadow_real_env_key() {
+        let masked = "••••••••";
+        // from_db_or_env only forwards DB values that survive usable_secret.
+        let db_primary = if usable_secret(masked) {
+            Some(masked)
+        } else {
+            None
+        };
+        assert_eq!(
+            resolve_api_key(db_primary, None, Some("sk-real-env-key"), None).as_deref(),
+            Some("sk-real-env-key")
+        );
     }
 }
