@@ -5,6 +5,7 @@ pub mod budget;
 mod client;
 mod config;
 mod cost;
+pub mod gateway;
 mod prompts;
 mod schema;
 
