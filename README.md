@@ -138,16 +138,18 @@ Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding co
 
 ## LLM (optional)
 
-Codasaurus talks to a [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) gateway that fronts every provider. Docker Compose starts the sidecar for you. Provider, model and fallback selection are entirely LiteLLM's: define the models, provider credentials and fallbacks in `litellm.config.yaml`, the LiteLLM admin UI, or its database.
+Codasaurus talks to a [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) gateway that fronts every provider. Docker Compose starts the sidecar in database mode. Configure providers, models, provider credentials and the daily LLM budget in Codasaurus onboarding or **Settings → LLM**; Codasaurus registers the model through LiteLLM's management API and issues a model-scoped virtual key for inference. `litellm.config.yaml` contains gateway runtime settings only, not provider or model definitions.
 
 ```bash
-export LITELLM_MASTER_KEY="sk-..."               # compose: sidecar admin key
-export CODASAURUS_API_KEY="$LITELLM_MASTER_KEY"  # app → gateway credential
-export CODASAURUS_MODEL="<alias defined in LiteLLM>"
-# optional: CODASAURUS_MODEL_CHEAP, CODASAURUS_EMBEDDING_MODEL
+export LITELLM_MASTER_KEY="sk-..."          # sidecar management only
+export LITELLM_DATABASE_URL="postgresql://..." # dedicated LiteLLM database
+export LITELLM_SALT_KEY="..."              # keep stable; rotating invalidates stored provider keys
+# Compose sets CODASAURUS_BASE_URL=http://litellm:4000/v1.
+# CODASAURUS_API_KEY is an optional legacy/direct-endpoint inference credential;
+# dashboard-managed setup stores a virtual key in the Codasaurus database.
 ```
 
-`CODASAURUS_BASE_URL` is required: it points at the gateway and compose injects `http://litellm:4000/v1`. A key alone is not enough. Any OpenAI-compatible `/v1` endpoint still works directly — point `CODASAURUS_BASE_URL` at it and skip the sidecar. Codasaurus ships no provider or model names; it sends only the aliases configured above, so failover and routing are whatever you set up in LiteLLM.
+A positive `llm_daily_budget_usd` is enforced by LiteLLM on the virtual key with a one-day reset window. Empty or `0` means unlimited. Codasaurus spend figures are telemetry, not billing truth. Any OpenAI-compatible `/v1` endpoint still works for inference, but managed models and gateway-enforced budgets require the LiteLLM sidecar and its management database.
 
 Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
 

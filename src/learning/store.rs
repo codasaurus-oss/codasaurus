@@ -228,7 +228,7 @@ impl LearningStore {
     ///
     /// Decay *archives* the rule it returns, so it must pick the same one the
     /// filter applied. The path match therefore runs through
-    /// [`path_matches_pattern`] in Rust rather than being re-expressed in SQL:
+    /// `path_matches_pattern` in Rust rather than being re-expressed in SQL:
     /// the SQL version silently disagreed with the filter (it had no `*`-glob
     /// branch, and a `%` or `_` inside a stored pattern became a LIKE wildcard
     /// that matched everything), so decay could archive a rule that had never
