@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ── Stage 1: Build the SPA from codasaurus-frontend ─────────────
-FROM node:20-alpine AS frontend
+FROM node:22-alpine AS frontend
 ARG DASHBOARD_REF=main
 ARG SKIP_FRONTEND=0
 RUN apk add --no-cache git
