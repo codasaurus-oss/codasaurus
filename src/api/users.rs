@@ -135,7 +135,7 @@ pub(crate) async fn create_invite(
     let (invite, raw) =
         db::invites::create_invite(&state.pool, email.as_deref(), &body.role, &actor.email, 7)
             .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
+            .map_err(ApiError::internal_error)?;
 
     audit_invite(&state.pool, "user.invite", &actor.email, invite.id).await;
 
@@ -259,10 +259,7 @@ pub(crate) async fn transfer_bootstrap(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = rbac::require_owner(&state, &headers).await?;
-    let actor_user = db::users::get_user_by_email(&state.pool, &actor.email)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Authentication required"))?;
-    if !actor_user.is_bootstrap {
+    if !actor.is_bootstrap {
         return Err(ApiError::forbidden(
             "Only the bootstrap owner can transfer that role",
         ));
@@ -270,7 +267,7 @@ pub(crate) async fn transfer_bootstrap(
     let target = db::users::get_user_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("User not found"))?;
-    if target.id == actor_user.id {
+    if target.email == actor.email {
         return Err(ApiError::bad_request("Already the bootstrap owner"));
     }
     if rbac::normalize_role(&target.role) != "owner" {

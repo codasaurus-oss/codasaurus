@@ -88,8 +88,8 @@ pub(crate) async fn upsert_server(
     Json(body): Json<UpsertServerBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
-
-    if mcp::catalog::find(&id).is_none() {
+    let custom = mcp::catalog::find(&id).is_none();
+    let base_url = if custom {
         let base_url = body
             .base_url
             .as_deref()
@@ -100,29 +100,38 @@ pub(crate) async fn upsert_server(
         crate::ssrf::validate_http_url_resolved(&base_url, false)
             .await
             .map_err(ApiError::bad_request)?;
-        db::config::set_config(&state.pool, &format!("mcp_{id}_base_url"), &base_url).await?;
+        Some(base_url)
+    } else {
+        None
+    };
+
+    let enabled_key = format!("mcp_{id}_enabled");
+    let api_key_key = format!("mcp_{id}_api_key");
+    let base_url_key = format!("mcp_{id}_base_url");
+    let name_key = format!("mcp_{id}_name");
+    let mut entries = vec![(
+        enabled_key.as_str(),
+        if body.enabled { "true" } else { "false" },
+    )];
+    if let Some(key) = body.api_key.as_deref() {
+        if !key.is_empty() && !key.contains('•') {
+            entries.push((api_key_key.as_str(), key));
+        }
+    }
+    if let Some(base_url) = base_url.as_deref() {
+        entries.push((base_url_key.as_str(), base_url));
         if let Some(name) = body
             .name
             .as_deref()
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            db::config::set_config(&state.pool, &format!("mcp_{id}_name"), name).await?;
+            entries.push((name_key.as_str(), name));
         }
-        update_custom_server_ids(&state.pool, &id, true).await?;
     }
-
-    db::config::set_config(
-        &state.pool,
-        &format!("mcp_{id}_enabled"),
-        if body.enabled { "true" } else { "false" },
-    )
-    .await?;
-
-    if let Some(key) = body.api_key.as_deref() {
-        if !key.is_empty() && !key.contains('•') {
-            db::config::set_config(&state.pool, &format!("mcp_{id}_api_key"), key).await?;
-        }
+    db::config::set_configs(&state.pool, &entries).await?;
+    if custom {
+        update_custom_server_ids(&state.pool, &id, true).await?;
     }
 
     db::audit::log_event(
@@ -145,12 +154,17 @@ pub(crate) async fn delete_server(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
-
-    db::config::delete_config(&state.pool, &format!("mcp_{id}_enabled")).await?;
-    db::config::delete_config(&state.pool, &format!("mcp_{id}_api_key")).await?;
-    if mcp::catalog::find(&id).is_none() {
-        db::config::delete_config(&state.pool, &format!("mcp_{id}_base_url")).await?;
-        db::config::delete_config(&state.pool, &format!("mcp_{id}_name")).await?;
+    let custom = mcp::catalog::find(&id).is_none();
+    let enabled_key = format!("mcp_{id}_enabled");
+    let api_key_key = format!("mcp_{id}_api_key");
+    let base_url_key = format!("mcp_{id}_base_url");
+    let name_key = format!("mcp_{id}_name");
+    let mut keys = vec![enabled_key.as_str(), api_key_key.as_str()];
+    if custom {
+        keys.extend([base_url_key.as_str(), name_key.as_str()]);
+    }
+    db::config::delete_configs(&state.pool, &keys).await?;
+    if custom {
         update_custom_server_ids(&state.pool, &id, false).await?;
     }
 
@@ -175,14 +189,17 @@ pub(crate) async fn test_server(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
 
-    let base_url = db::config::get_config(&state.pool, &format!("mcp_{id}_base_url"))
-        .await?
+    let base_url_key = format!("mcp_{id}_base_url");
+    let api_key_key = format!("mcp_{id}_api_key");
+    let (stored_base_url, api_key) = tokio::join!(
+        db::config::get_config(&state.pool, &base_url_key),
+        db::config::get_config(&state.pool, &api_key_key),
+    );
+    let base_url = stored_base_url?
         .filter(|v| !v.is_empty())
         .or_else(|| mcp::catalog::find(&id).map(|e| e.base_url.to_string()))
         .ok_or_else(|| ApiError::bad_request("Server is not configured"))?;
-    let api_key = db::config::get_config(&state.pool, &format!("mcp_{id}_api_key"))
-        .await?
-        .unwrap_or_default();
+    let api_key = api_key?.unwrap_or_default();
 
     crate::ssrf::validate_http_url_resolved(&base_url, false)
         .await

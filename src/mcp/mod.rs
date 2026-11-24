@@ -96,32 +96,25 @@ pub struct ServerInfo {
     pub is_custom: bool,
 }
 
-async fn custom_server_ids(pool: &DbPool) -> Vec<String> {
-    match crate::db::config::get_config(pool, "mcp_custom_server_ids").await {
-        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
-        _ => Vec::new(),
-    }
+async fn server_configs(pool: &DbPool) -> std::collections::HashMap<String, String> {
+    crate::db::config::get_all_config(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.key, entry.value))
+        .collect()
 }
 
-/// All servers known to this instance: catalog entries plus any custom ones,
-/// merged with their DB-stored enabled/key state. Never returns raw keys.
-pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
+fn list_servers_from_config(config: &std::collections::HashMap<String, String>) -> Vec<ServerInfo> {
     let mut out = Vec::new();
 
     for entry in catalog::CATALOG {
-        let enabled = crate::db::config::get_config(pool, &format!("mcp_{}_enabled", entry.id))
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        let key_configured =
-            crate::db::config::get_config(pool, &format!("mcp_{}_api_key", entry.id))
-                .await
-                .ok()
-                .flatten()
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
+        let enabled = config
+            .get(&format!("mcp_{}_enabled", entry.id))
+            .is_some_and(|value| value == "true");
+        let key_configured = config
+            .get(&format!("mcp_{}_api_key", entry.id))
+            .is_some_and(|value| !value.is_empty());
         out.push(ServerInfo {
             id: entry.id.to_string(),
             name: entry.name.to_string(),
@@ -133,28 +126,24 @@ pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
         });
     }
 
-    for id in custom_server_ids(pool).await {
-        let enabled = crate::db::config::get_config(pool, &format!("mcp_{id}_enabled"))
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        let key_configured = crate::db::config::get_config(pool, &format!("mcp_{id}_api_key"))
-            .await
-            .ok()
-            .flatten()
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        let name = crate::db::config::get_config(pool, &format!("mcp_{id}_name"))
-            .await
-            .ok()
-            .flatten()
+    let custom_ids: Vec<String> = config
+        .get("mcp_custom_server_ids")
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    for id in custom_ids {
+        let enabled = config
+            .get(&format!("mcp_{id}_enabled"))
+            .is_some_and(|value| value == "true");
+        let key_configured = config
+            .get(&format!("mcp_{id}_api_key"))
+            .is_some_and(|value| !value.is_empty());
+        let name = config
+            .get(&format!("mcp_{id}_name"))
+            .cloned()
             .unwrap_or_else(|| id.clone());
-        let base_url = crate::db::config::get_config(pool, &format!("mcp_{id}_base_url"))
-            .await
-            .ok()
-            .flatten()
+        let base_url = config
+            .get(&format!("mcp_{id}_base_url"))
+            .cloned()
             .unwrap_or_default();
         out.push(ServerInfo {
             id,
@@ -170,6 +159,12 @@ pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
     out
 }
 
+/// All servers known to this instance: catalog entries plus any custom ones,
+/// merged with their DB-stored enabled/key state. Never returns raw keys.
+pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
+    list_servers_from_config(&server_configs(pool).await)
+}
+
 /// Tool specs for every enabled server, in OpenAI-compatible shape. Empty in
 /// offline mode or when a server's `tools/list` call fails (fails open —
 /// one broken server doesn't kill review).
@@ -178,15 +173,15 @@ pub async fn list_enabled_tools(pool: &DbPool) -> Vec<McpToolSpec> {
         return Vec::new();
     }
 
+    let config = server_configs(pool).await;
     let mut specs = Vec::new();
-    for server in list_servers(pool).await {
+    for server in list_servers_from_config(&config) {
         if !server.enabled || server.base_url.is_empty() {
             continue;
         }
-        let api_key = crate::db::config::get_config(pool, &format!("mcp_{}_api_key", server.id))
-            .await
-            .ok()
-            .flatten()
+        let api_key = config
+            .get(&format!("mcp_{}_api_key", server.id))
+            .cloned()
             .unwrap_or_default();
 
         let tools = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
@@ -226,18 +221,17 @@ pub async fn call_tool(pool: &DbPool, qualified_name: &str, arguments: &Value) -
     // Re-check the live allowlist before executing: the model can emit a tool
     // name lifted from injected PR content, or call a server disabled after
     // tools were offered for this review.
-    let server = list_servers(pool)
-        .await
+    let config = server_configs(pool).await;
+    let server = list_servers_from_config(&config)
         .into_iter()
         .find(|s| s.id == server_id)
         .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server_id}"))?;
     if !server.enabled || server.base_url.is_empty() {
         bail!("MCP server {server_id} is not enabled");
     }
-    let api_key = crate::db::config::get_config(pool, &format!("mcp_{server_id}_api_key"))
-        .await
-        .ok()
-        .flatten()
+    let api_key = config
+        .get(&format!("mcp_{server_id}_api_key"))
+        .cloned()
         .unwrap_or_default();
     let available = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
     let allowed = available

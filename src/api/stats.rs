@@ -2,7 +2,7 @@ use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use crate::db;
@@ -10,9 +10,15 @@ use crate::db;
 use super::errors::ApiError;
 use super::AppState;
 
-/// Cache expensive dashboard stats for 30s (unbounded COUNTs / AVG on large tables).
-static STATS_CACHE: LazyLock<Mutex<(Instant, Option<serde_json::Value>)>> =
-    LazyLock::new(|| Mutex::new((Instant::now() - Duration::from_secs(60), None)));
+#[derive(Default)]
+struct StatsCache {
+    fetched_at: Option<Instant>,
+    value: Option<serde_json::Value>,
+}
+
+/// Single-flight cache: concurrent misses must not all run the rollups.
+static STATS_CACHE: LazyLock<tokio::sync::Mutex<StatsCache>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(StatsCache::default()));
 
 const STATS_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -58,25 +64,24 @@ pub(crate) async fn stats(
     // Belt and suspenders: middleware already gates protected routes, but the
     // handler must stay closed even if served from the unguarded `router()`.
     super::rbac::require_role(&state.pool, &headers, super::rbac::MinRole::Viewer).await?;
-    if let Ok(guard) = STATS_CACHE.lock() {
-        if let Some(ref cached) = guard.1 {
-            if guard.0.elapsed() < STATS_CACHE_TTL {
-                return Ok(Json(cached.clone()));
-            }
+    let mut cache = STATS_CACHE.lock().await;
+    if cache
+        .fetched_at
+        .is_some_and(|at| at.elapsed() < STATS_CACHE_TTL)
+    {
+        if let Some(cached) = &cache.value {
+            return Ok(Json(cached.clone()));
         }
     }
 
-    // Every rollup below is an independent read — one concurrent wave instead
-    // of ~15 sequential round-trips. Core rollups propagate errors; panels
-    // degrade to empty so one slow table cannot blank the dashboard.
+    // Independent reads run together. Core rollups propagate errors; optional
+    // panels degrade to empty so one slow table cannot blank the dashboard.
     let pool = &state.pool;
     let (
         core,
         recent_rows,
-        (),
         dismissals,
         tier1,
-        total_findings,
         reviews_by_day,
         findings_by_day,
         findings_by_detector,
@@ -87,6 +92,8 @@ pub(crate) async fn stats(
         dismissals_prev_7,
         pass_rate_7d,
         pass_rate_prev_7d,
+        spend_usd_last_day,
+        daily_budget_usd,
     ) = tokio::join!(
         db::reviews::get_stats(pool),
         async {
@@ -100,7 +107,6 @@ pub(crate) async fn stats(
                  LIMIT 10"
             )
         },
-        async { crate::metrics::refresh_from_db(pool).await },
         async {
             crate::db::db_scalar!(pool, i64, "SELECT COUNT(*) FROM dismissed_findings").unwrap_or(0)
         },
@@ -110,16 +116,6 @@ pub(crate) async fn stats(
                 i64,
                 "SELECT COUNT(*) FROM findings WHERE detector IN ('secrets','vulnerabilities','iac','hallucinated-imports','phantom-deps')
                  AND review_id IN (SELECT id FROM reviews WHERE created_at >= NOW() - INTERVAL '30 days')"
-            )
-            .unwrap_or(0)
-        },
-        async {
-            crate::db::db_scalar!(
-                pool,
-                i64,
-                "SELECT COUNT(*) FROM findings f
-                 INNER JOIN reviews r ON r.id = f.review_id
-                 WHERE r.created_at >= NOW() - INTERVAL '30 days'"
             )
             .unwrap_or(0)
         },
@@ -237,6 +233,8 @@ pub(crate) async fn stats(
             .ok()
             .flatten()
         },
+        crate::db::events::spend_usd_last_day(pool),
+        crate::llm::budget::daily_budget_usd(Some(pool)),
     );
     let mut core: serde_json::Value = core?;
     let recent_rows: Vec<RecentReview> = recent_rows?;
@@ -258,6 +256,11 @@ pub(crate) async fn stats(
     if let Some(obj) = core.as_object_mut() {
         obj.insert("recent_activity".into(), json!(activity));
     }
+
+    let total_findings = core
+        .get("total_findings")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
 
     // Trust panel: FP proxy + accept rate from dismissals vs Tier-1 findings.
     let fp_proxy = if tier1 == 0 {
@@ -289,8 +292,8 @@ pub(crate) async fn stats(
                 "requests": crate::metrics::llm_request_count(),
                 "prompt_chars": crate::metrics::llm_prompt_chars_total(),
                 "spend_usd_estimate": crate::metrics::llm_spend_usd_estimate(),
-                "spend_usd_last_day": crate::db::events::spend_usd_last_day(&state.pool).await,
-                "daily_budget_usd": crate::llm::budget::daily_budget_usd(Some(&state.pool)).await,
+                "spend_usd_last_day": spend_usd_last_day,
+                "daily_budget_usd": daily_budget_usd,
                 "note": "Estimates from agent_events + process metrics; not billing truth.",
             }),
         );
@@ -414,9 +417,10 @@ pub(crate) async fn stats(
         );
     }
 
-    if let Ok(mut guard) = STATS_CACHE.lock() {
-        *guard = (Instant::now(), Some(core.clone()));
-    }
+    *cache = StatsCache {
+        fetched_at: Some(Instant::now()),
+        value: Some(core.clone()),
+    };
 
     Ok(Json(core))
 }

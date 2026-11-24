@@ -34,7 +34,7 @@ pub async fn consume(store: &StateStore, secret: &str) -> Result<(), ApiError> {
         )),
         Err(err) => {
             tracing::error!(error = %err, "bootstrap secret lookup failed");
-            Err(ApiError::internal("bootstrap secret lookup failed"))
+            Err(ApiError::internal_error("bootstrap secret lookup failed"))
         }
     }
 }

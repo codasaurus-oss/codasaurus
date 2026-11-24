@@ -1,5 +1,12 @@
 use crate::db::models::*;
-use crate::db::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, db_scalar, DbPool};
+use crate::db::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, DbPool};
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ReviewWithRepo {
+    #[sqlx(flatten)]
+    pub review: Review,
+    pub repo_full_name: String,
+}
 
 pub async fn list_reviews(
     pool: &DbPool,
@@ -7,12 +14,15 @@ pub async fn list_reviews(
     status: Option<&str>,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Review>, sqlx::Error> {
+) -> Result<Vec<ReviewWithRepo>, sqlx::Error> {
     match (repo_id, status) {
         (Some(rid), Some(st)) => db_fetch_all!(
             pool,
-            Review,
-            "SELECT * FROM reviews WHERE repo_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            ReviewWithRepo,
+            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
+             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
+             WHERE r.repo_id = ? AND r.status = ?
+             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
             rid,
             st,
             limit,
@@ -20,24 +30,32 @@ pub async fn list_reviews(
         ),
         (Some(rid), None) => db_fetch_all!(
             pool,
-            Review,
-            "SELECT * FROM reviews WHERE repo_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            ReviewWithRepo,
+            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
+             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
+             WHERE r.repo_id = ?
+             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
             rid,
             limit,
             offset
         ),
         (None, Some(st)) => db_fetch_all!(
             pool,
-            Review,
-            "SELECT * FROM reviews WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            ReviewWithRepo,
+            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
+             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
+             WHERE r.status = ?
+             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
             st,
             limit,
             offset
         ),
         (None, None) => db_fetch_all!(
             pool,
-            Review,
-            "SELECT * FROM reviews ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            ReviewWithRepo,
+            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
+             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
+             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
             limit,
             offset
         ),
@@ -46,6 +64,20 @@ pub async fn list_reviews(
 
 pub async fn get_review(pool: &DbPool, id: i64) -> Result<Option<Review>, sqlx::Error> {
     db_fetch_optional!(pool, Review, "SELECT * FROM reviews WHERE id = ?", id)
+}
+
+pub async fn get_review_with_repo(
+    pool: &DbPool,
+    id: i64,
+) -> Result<Option<ReviewWithRepo>, sqlx::Error> {
+    db_fetch_optional!(
+        pool,
+        ReviewWithRepo,
+        "SELECT r.*, repo.full_name AS repo_full_name
+         FROM reviews r JOIN repos repo ON repo.id = r.repo_id
+         WHERE r.id = ?",
+        id
+    )
 }
 
 pub async fn create_review(pool: &DbPool, review: &ReviewCreate) -> Result<Review, sqlx::Error> {
@@ -291,56 +323,43 @@ async fn insert_findings_on(
 }
 
 pub async fn get_stats(pool: &DbPool) -> Result<serde_json::Value, sqlx::Error> {
-    let total_repos: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM repos WHERE active = ?",
-        true
-    )?;
+    #[derive(sqlx::FromRow)]
+    struct StatsRow {
+        total_repos: i64,
+        total_reviews_today: i64,
+        pass_rate: Option<f64>,
+        total_findings: i64,
+        reviews_last_7_days: i64,
+        dismissals_last_7_days: i64,
+    }
 
-    let total_reviews_today: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM reviews
-         WHERE created_at >= CURRENT_DATE
-           AND created_at < CURRENT_DATE + INTERVAL '1 day'"
-    )?;
-
-    // Cast: bare `100.0` is NUMERIC in Postgres, which sqlx won't decode as f64.
-    let pass_rate: Option<f64> = db_scalar!(
-        pool,
-        Option<f64>,
-        "SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
-         FROM reviews
-         WHERE created_at >= NOW() - INTERVAL '30 days'"
-    )?;
-
-    let total_findings: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM findings f
-         INNER JOIN reviews r ON r.id = f.review_id
-         WHERE r.created_at >= NOW() - INTERVAL '30 days'"
-    )?;
-
-    let reviews_last_7_days: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days'"
-    )?;
-
-    let dismissals_last_7_days: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM dismissed_findings WHERE dismissed_at >= NOW() - INTERVAL '7 days'"
-    )?;
+    let stats: StatsRow = sqlx::query_as(
+        "SELECT
+           (SELECT COUNT(*) FROM repos WHERE active = $1) AS total_repos,
+           (SELECT COUNT(*) FROM reviews
+            WHERE created_at >= CURRENT_DATE
+              AND created_at < CURRENT_DATE + INTERVAL '1 day') AS total_reviews_today,
+           (SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
+            FROM reviews
+            WHERE created_at >= NOW() - INTERVAL '30 days') AS pass_rate,
+           (SELECT COUNT(*) FROM findings f
+            INNER JOIN reviews r ON r.id = f.review_id
+            WHERE r.created_at >= NOW() - INTERVAL '30 days') AS total_findings,
+           (SELECT COUNT(*) FROM reviews
+            WHERE created_at >= NOW() - INTERVAL '7 days') AS reviews_last_7_days,
+           (SELECT COUNT(*) FROM dismissed_findings
+            WHERE dismissed_at >= NOW() - INTERVAL '7 days') AS dismissals_last_7_days",
+    )
+    .bind(true)
+    .fetch_one(pool.as_pg())
+    .await?;
 
     Ok(serde_json::json!({
-        "total_repos": total_repos,
-        "total_reviews_today": total_reviews_today,
-        "pass_rate": pass_rate,
-        "total_findings": total_findings,
-        "reviews_last_7_days": reviews_last_7_days,
-        "dismissals_last_7_days": dismissals_last_7_days,
+        "total_repos": stats.total_repos,
+        "total_reviews_today": stats.total_reviews_today,
+        "pass_rate": stats.pass_rate,
+        "total_findings": stats.total_findings,
+        "reviews_last_7_days": stats.reviews_last_7_days,
+        "dismissals_last_7_days": stats.dismissals_last_7_days,
     }))
 }

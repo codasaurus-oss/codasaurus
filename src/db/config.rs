@@ -196,8 +196,37 @@ pub async fn set_config(pool: &DbPool, key: &str, value: &str) -> Result<(), sql
 }
 
 pub async fn delete_config(pool: &DbPool, key: &str) -> Result<(), sqlx::Error> {
-    db_execute!(pool, "DELETE FROM app_config WHERE key = ?", key)?;
-    cache_put(key, None);
+    delete_configs(pool, &[key]).await
+}
+
+pub async fn delete_configs(pool: &DbPool, keys: &[&str]) -> Result<(), sqlx::Error> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    db_execute!(pool, "DELETE FROM app_config WHERE key = ANY(?)", keys)?;
+    for key in keys {
+        cache_put(key, None);
+    }
+    Ok(())
+}
+
+pub async fn set_configs(pool: &DbPool, entries: &[(&str, &str)]) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut query = sqlx::QueryBuilder::new("INSERT INTO app_config (key, value, updated_at) ");
+    query.push_values(entries, |mut row, (key, value)| {
+        row.push_bind(*key)
+            .push_bind(*value)
+            .push("CURRENT_TIMESTAMP");
+    });
+    query.push(
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+    );
+    query.build().execute(pool.as_pg()).await?;
+    for (key, value) in entries {
+        cache_put(key, Some((*value).to_string()));
+    }
     Ok(())
 }
 

@@ -1,7 +1,5 @@
-//! Bounded rate limiting for the dashboard API and GitHub webhook endpoint.
-//! Counters live in Redis with a TTL, so all replicas share one budget and a
-//! restart cannot reset it. `check_auth_rate_limit` in `auth.rs` predates this
-//! and stays separate (keyed by IP+email, not IP/session).
+//! Redis-backed rate limits for authentication, dashboard API, and webhooks.
+//! Counters have a TTL, so all replicas share one budget and restarts cannot reset it.
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderMap;

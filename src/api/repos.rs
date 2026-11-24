@@ -50,14 +50,13 @@ pub(crate) async fn sync_repos(
         .ok_or_else(|| ApiError::bad_request("No GitHub App configured"))?;
 
     let jwt = crate::github_jwt::create_app_jwt(&app_id, &private_key)
-        .map_err(|e| ApiError::internal(format!("JWT error: {e}")))?;
+        .map_err(|e| ApiError::internal_error(format!("JWT error: {e}")))?;
 
     let client = GITHUB_CLIENT
         .as_ref()
-        .ok_or_else(|| ApiError::internal("GitHub API client not available"))?;
+        .ok_or_else(|| ApiError::internal_error("GitHub API client not available"))?;
     let jwt_auth = format!("Bearer {jwt}");
-    let jwt_headers =
-        github_api_headers(&jwt_auth).map_err(|e| ApiError::internal(e.to_string()))?;
+    let jwt_headers = github_api_headers(&jwt_auth).map_err(ApiError::internal_error)?;
 
     let installations: Vec<serde_json::Value> = github_get(
         client,
@@ -91,35 +90,26 @@ async fn sync_installation_repos(
     let Some(repos) = installation_repos(client, jwt_headers, inst_id).await? else {
         return Ok(0);
     };
-    let mut total = 0usize;
-    for repo in &repos {
-        let github_id = repo["id"].as_i64();
-        let Some(full_name) = repo["full_name"].as_str() else {
-            continue;
-        };
-        let Some((owner, name)) = full_name.split_once('/') else {
-            continue;
-        };
-        if let Err(e) = db::repos::create_repo(
-            &state.pool,
-            &db::models::RepoCreate {
-                github_id,
+    let creates: Vec<db::models::RepoCreate> = repos
+        .iter()
+        .filter_map(|repo| {
+            let full_name = repo["full_name"].as_str()?;
+            let (owner, name) = full_name.split_once('/')?;
+            Some(db::models::RepoCreate {
+                github_id: repo["id"].as_i64(),
                 full_name: full_name.to_string(),
                 owner: owner.to_string(),
                 name: name.to_string(),
-                default_branch: repo["default_branch"].as_str().map(|s| s.to_string()),
+                default_branch: repo["default_branch"].as_str().map(str::to_string),
                 installation_id: inst_id,
                 private: repo["private"].as_bool().unwrap_or(false),
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "failed to save synced repo");
-        } else {
-            total += 1;
-        }
-    }
-    Ok(total)
+            })
+        })
+        .collect();
+    Ok(db::repos::upsert_repos(&state.pool, &creates)
+        .await?
+        .try_into()
+        .unwrap_or(usize::MAX))
 }
 
 /// Installation token + paged repo list. `None` when this installation
@@ -145,8 +135,8 @@ async fn installation_repos(
     let Some(token) = token_resp["token"].as_str() else {
         return Ok(None);
     };
-    let token_headers = github_api_headers(&format!("Bearer {token}"))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let token_headers =
+        github_api_headers(&format!("Bearer {token}")).map_err(ApiError::internal_error)?;
 
     let mut all_repos: Vec<serde_json::Value> = Vec::new();
     let mut page_url: Option<String> =
@@ -196,10 +186,7 @@ pub(crate) async fn get_repo(
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    super::rbac::require_repo_read(&state, &headers, id).await?;
-    let repo = db::repos::get_repo(&state.pool, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Repo {id} not found")))?;
+    let (_user, repo) = super::rbac::require_repo_read(&state, &headers, id).await?;
     Ok(Json(json!(repo)))
 }
 
