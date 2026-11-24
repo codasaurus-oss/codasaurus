@@ -687,7 +687,7 @@ pub(crate) async fn handle_webhook(
                 else {
                     return;
                 };
-                if let Err(e) = crate::index::reindex_files(
+                crate::index::reindex_files(
                     pool,
                     client,
                     &headers,
@@ -697,10 +697,7 @@ pub(crate) async fn handle_webhook(
                     &index_cfg,
                     llm_cfg.as_ref(),
                 )
-                .await
-                {
-                    tracing::warn!(error = %e, paths = changed.len(), "incremental index failed");
-                }
+                .await;
             });
         }
     } else if event == "issue_comment" && payload.action == "created" {

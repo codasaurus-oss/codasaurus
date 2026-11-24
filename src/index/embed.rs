@@ -8,6 +8,9 @@ use serde_json::json;
 /// Embed a batch of texts (≤100, per OpenAI's `/embeddings` batch limit).
 /// Returns `Ok(vec![])` when offline or when no embedding model is configured —
 /// callers should treat that as "skip indexing this batch", not an error.
+///
+/// # Errors
+/// Returns an error when endpoint validation or the HTTP request fails.
 pub async fn embed_texts(
     config: &crate::llm::LlmConfig,
     texts: &[String],
@@ -55,7 +58,7 @@ pub async fn embed_texts(
                 .as_array()
                 .map(|a| {
                     a.iter()
-                        .filter_map(|v| v.as_f64())
+                        .filter_map(serde_json::Value::as_f64)
                         .map(|v| v as f32)
                         .collect::<Vec<f32>>()
                 })
