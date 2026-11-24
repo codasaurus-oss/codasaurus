@@ -278,6 +278,83 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     migrate_v24_learning_scope_indexes(pool).await?;
     migrate_v25_rule_hit_telemetry(pool).await?;
     migrate_v26_findings_fingerprint_per_review(pool).await?;
+    migrate_v27_review_queue_hardening(pool).await?;
+    Ok(())
+}
+
+/// v27: the review queue needs explicit ownership and scheduling so a stalled
+/// worker cannot be reclaimed while still running, and retries can back off
+/// instead of immediately re-hitting a rate-limited provider.
+async fn migrate_v27_review_queue_hardening(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 27 {
+        return Ok(());
+    }
+    // Concurrent processes (tests, replicas) can start migrations together.
+    // Serialize DDL and re-check the version under the lock.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(931847263)")
+        .execute(&mut *tx)
+        .await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(&mut *tx)
+        .await?;
+    if current.unwrap_or(0) >= 27 {
+        tx.commit().await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "ALTER TABLE review_jobs
+           ADD COLUMN IF NOT EXISTS lease_id UUID,
+           ADD COLUMN IF NOT EXISTS leased_until TIMESTAMPTZ,
+           ADD COLUMN IF NOT EXISTS run_at TIMESTAMPTZ,
+           ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 5,
+           ADD COLUMN IF NOT EXISTS priority SMALLINT NOT NULL DEFAULT 100,
+           ADD COLUMN IF NOT EXISTS queue_name TEXT NOT NULL DEFAULT 'reviews'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE review_jobs SET run_at = COALESCE(updated_at, created_at) WHERE run_at IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_jobs
+           ALTER COLUMN run_at SET DEFAULT NOW(),
+           ALTER COLUMN run_at SET NOT NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("ALTER TABLE review_jobs DROP CONSTRAINT IF EXISTS review_jobs_status_check")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE review_jobs ADD CONSTRAINT review_jobs_status_check
+           CHECK (status IN ('pending', 'running', 'done', 'failed', 'dead'))",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_review_jobs_ready
+           ON review_jobs (queue_name, priority, run_at, id) WHERE status = 'pending'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_review_jobs_dead
+           ON review_jobs (queue_name, status, updated_at) WHERE status = 'dead'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (27) ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
