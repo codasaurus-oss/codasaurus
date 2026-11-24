@@ -156,6 +156,13 @@ impl<'a> Collector<'a> {
         qualified
     }
 
+    /// Record a symbol and push it as the enclosing scope for its children.
+    fn add_scoped_symbol(&mut self, name: &str, kind: &str, node: Node) -> bool {
+        let qualified = self.add_symbol(name, kind, node);
+        self.scope.push(qualified);
+        true
+    }
+
     fn walk(&mut self, node: Node) {
         let kind = node.kind();
         let mut pushed = false;
@@ -169,24 +176,18 @@ impl<'a> Collector<'a> {
                     } else {
                         SYMBOL_FUNCTION
                     };
-                    let qualified = self.add_symbol(&name, kind, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_scoped_symbol(&name, kind, node);
                 }
             }
             "struct_item" | "enum_item" | "trait_item" | "union_item" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_scoped_symbol(&name, SYMBOL_CLASS, node);
                 }
             }
             "impl_item" => {
                 let name = node.child_by_field_name("type").and_then(|n| self.text(n));
                 if let Some(name) = name {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_scoped_symbol(&name, SYMBOL_CLASS, node);
                 }
             }
             "const_item" | "static_item" => {
@@ -203,24 +204,18 @@ impl<'a> Collector<'a> {
             // --- Go ---
             "function_declaration" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_FUNCTION, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_scoped_symbol(&name, SYMBOL_FUNCTION, node);
                 }
             }
             "method_declaration" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_METHOD, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_scoped_symbol(&name, SYMBOL_METHOD, node);
                 }
             }
             "type_declaration" => {
                 if let Some(spec) = node.child_by_field_name("type") {
                     if let Some(name) = self.node_name(spec) {
-                        let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                        self.scope.push(qualified);
-                        pushed = true;
+                        pushed = self.add_scoped_symbol(&name, SYMBOL_CLASS, node);
                     }
                 }
             }
@@ -253,9 +248,7 @@ impl<'a> Collector<'a> {
                     } else {
                         SYMBOL_FUNCTION
                     };
-                    let qualified = self.add_symbol(&name, kind, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_scoped_symbol(&name, kind, node);
                 }
             }
             "class_definition" => {
@@ -303,9 +296,7 @@ impl<'a> Collector<'a> {
             }
             "method_definition" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_METHOD, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_scoped_symbol(&name, SYMBOL_METHOD, node);
                 }
             }
             "variable_declarator" => {

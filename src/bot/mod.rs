@@ -251,6 +251,27 @@ pub(crate) struct WebhookPayload {
     commits: Option<Vec<serde_json::Value>>,
 }
 
+impl WebhookPayload {
+    /// Minimal payload for programmatic reviews that only carry the PR object.
+    pub(crate) fn for_pull_request(pull_request: Option<serde_json::Value>) -> Self {
+        Self {
+            action: String::new(),
+            pull_request,
+            repo: None,
+            installation: None,
+            comment: None,
+            issue: None,
+            reaction: None,
+            thread: None,
+            sender: None,
+            repositories: None,
+            repositories_added: None,
+            after: None,
+            commits: None,
+        }
+    }
+}
+
 /// Paths added/modified across all commits of a `push` event payload.
 fn payload_commits_paths(payload: &WebhookPayload) -> Vec<String> {
     let mut out = Vec::new();
@@ -385,6 +406,10 @@ fn reactor_can_dismiss(payload: &WebhookPayload) -> bool {
                 .and_then(|s| s.get("login"))
                 .and_then(|v| v.as_str())
         });
+    dismissal_allowed(payload, assoc, login)
+}
+
+fn dismissal_allowed(payload: &WebhookPayload, assoc: &str, login: Option<&str>) -> bool {
     actor_can_dismiss(
         assoc,
         login,
@@ -413,12 +438,7 @@ fn thread_resolver_can_dismiss(payload: &WebhookPayload) -> bool {
                 .and_then(|s| s.get("login"))
                 .and_then(|v| v.as_str())
         });
-    actor_can_dismiss(
-        assoc,
-        login,
-        repo_owner_login(payload),
-        pr_author_login(payload),
-    )
+    dismissal_allowed(payload, assoc, login)
 }
 
 fn actor_can_dismiss(assoc: &str, login: Option<&str>, repo_owner: &str, pr_author: &str) -> bool {
@@ -852,22 +872,13 @@ pub(crate) static REVIEW_PERMITS: std::sync::LazyLock<tokio::sync::Semaphore> =
         tokio::sync::Semaphore::new(n.max(1))
     });
 
-async fn handle_installation_created(
-    installation: Option<InstallationInfo>,
-    repos: Vec<serde_json::Value>,
+/// Shared repo-sync loop for `installation.created` and `installation_repositories.added`.
+async fn sync_installation_repos(
+    pool: &crate::db::DbPool,
+    inst_id: i64,
+    repos: &[serde_json::Value],
 ) {
-    let inst_id = match installation {
-        Some(i) => i.id,
-        None => return,
-    };
-    let pool = match bot_db_pool() {
-        Some(p) => p,
-        None => {
-            tracing::warn!("DB pool not available, skipping repo sync");
-            return;
-        }
-    };
-    for repo in &repos {
+    for repo in repos {
         let github_id = repo["id"].as_i64();
         let full_name = match repo["full_name"].as_str() {
             Some(n) => n.to_string(),
@@ -899,6 +910,24 @@ async fn handle_installation_created(
             tracing::error!(error = %e, "failed to save repo");
         }
     }
+}
+
+async fn handle_installation_created(
+    installation: Option<InstallationInfo>,
+    repos: Vec<serde_json::Value>,
+) {
+    let inst_id = match installation {
+        Some(i) => i.id,
+        None => return,
+    };
+    let pool = match bot_db_pool() {
+        Some(p) => p,
+        None => {
+            tracing::warn!("DB pool not available, skipping repo sync");
+            return;
+        }
+    };
+    sync_installation_repos(pool, inst_id, &repos).await;
     let count = repos.len();
     if let Some(p) = bot_db_pool() {
         crate::db::audit::log_event(
@@ -955,38 +984,7 @@ async fn handle_repos_added(installation: Option<InstallationInfo>, repos: Vec<s
         Some(p) => p,
         None => return,
     };
-    for repo in &repos {
-        let github_id = repo["id"].as_i64();
-        let full_name = match repo["full_name"].as_str() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let parts: Vec<&str> = full_name.splitn(2, '/').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let owner = parts[0].to_string();
-        let name = parts[1].to_string();
-        let default_branch = repo["default_branch"].as_str().map(|s| s.to_string());
-        let private = repo["private"].as_bool().unwrap_or(false);
-
-        if let Err(e) = db::repos::create_repo_from_installation(
-            pool,
-            &RepoCreate {
-                github_id,
-                full_name,
-                owner,
-                name,
-                default_branch,
-                installation_id: inst_id,
-                private,
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %e, "failed to save repo");
-        }
-    }
+    sync_installation_repos(pool, inst_id, &repos).await;
     tracing::info!(count = repos.len(), "synced added repos");
 }
 
