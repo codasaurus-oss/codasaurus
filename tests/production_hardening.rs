@@ -476,6 +476,8 @@ async fn failed_finding_insert_rolls_back_deleted_findings() {
         .await
         .unwrap();
 
+    // The CHECK violation is deliberate: it must roll back the earlier delete
+    // and will emit one expected ERROR line in the Postgres log.
     let result = db::reviews::replace_findings(&pool, review.id, &[finding("bogus", "bad")]).await;
     assert!(result.is_err());
 
