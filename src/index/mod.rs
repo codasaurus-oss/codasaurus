@@ -57,87 +57,135 @@ pub async fn callers_markdown(
     repo_full_name: &str,
     paths: &[String],
 ) -> String {
-    let mut symbols: Vec<(String, String)> = Vec::new();
-    for path in paths {
-        if let Ok(rows) = store::symbols_in_file(pool, repo_full_name, path).await {
-            for (sym, kind, _) in rows {
-                if kind != extract::SYMBOL_IMPORT {
-                    symbols.push((sym, path.clone()));
-                }
-            }
-        }
-    }
+    let Ok(rows) = store::symbols_in_files(pool, repo_full_name, paths).await else {
+        return String::new();
+    };
+    let symbols: Vec<(String, String)> = rows
+        .into_iter()
+        .filter(|(_, _, kind, _)| kind != extract::SYMBOL_IMPORT)
+        .map(|(path, symbol, _, _)| (symbol, path))
+        .collect();
     if symbols.is_empty() {
         return String::new();
     }
-    let mut sections: Vec<String> = Vec::new();
-    for (sym, path) in symbols.iter().take(30) {
-        let Ok(edges) = store::callers_of(pool, repo_full_name, sym).await else {
+
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<String> = symbols
+        .iter()
+        .filter(|(name, _)| seen.insert(name.as_str()))
+        .map(|(name, _)| name.clone())
+        .collect();
+    let Ok(edges) = store::callers_of_many(pool, repo_full_name, &names).await else {
+        return String::new();
+    };
+    let mut callers_by_symbol: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (from, to, kind) in edges {
+        if kind == extract::EDGE_CALLS || kind == extract::EDGE_EXTENDS {
+            callers_by_symbol.entry(to).or_default().push(from);
+        }
+    }
+
+    let mut sections = Vec::new();
+    for (symbol, path) in symbols.iter().take(30) {
+        let Some(callers) = callers_by_symbol.get_mut(symbol) else {
             continue;
         };
-        let mut callers: Vec<String> = edges
-            .into_iter()
-            .filter(|(_, _, k)| k == extract::EDGE_CALLS || k == extract::EDGE_EXTENDS)
-            .map(|(f, _, _)| f)
-            .collect();
         callers.sort();
         callers.dedup();
-        if !callers.is_empty() {
-            let listed = callers
-                .iter()
-                .take(8)
-                .map(|c| format!("`{c}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            sections.push(format!("- `{sym}` ({path}) <- {listed}"));
+        if callers.is_empty() {
+            continue;
         }
+        let listed = callers
+            .iter()
+            .take(8)
+            .map(|caller| format!("`{caller}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sections.push(format!("- `{symbol}` ({path}) <- {listed}"));
     }
     if sections.is_empty() {
         return String::new();
     }
-    let mut out = String::from("**Indexed callers of changed symbols:**\n\n");
-    out.push_str(&sections.join("\n"));
-    out.push('\n');
-    out
+    format!(
+        "**Indexed callers of changed symbols:**\n\n{}\n",
+        sections.join("\n")
+    )
 }
 
-/// Incremental: re-index one changed file.
-// Flat parameters keep the (few) call sites obvious; a struct would only move them.
+/// Incremental: fetch and re-index changed files in bounded parallel batches.
 #[allow(clippy::too_many_arguments)]
-pub async fn reindex_file(
+pub async fn reindex_files(
     pool: &crate::db::DbPool,
     client: &reqwest::Client,
     headers: &reqwest::header::HeaderMap,
     repo_full_name: &str,
     git_ref: &str,
-    path: &str,
+    paths: &[String],
     config: &IndexConfig,
     llm_cfg: Option<&crate::llm::LlmConfig>,
 ) -> Result<(), anyhow::Error> {
-    let Some(lang) = extract::language_name(path) else {
-        return Ok(());
-    };
-    if !config.languages.iter().any(|l| l == lang) {
+    let eligible: Vec<String> = paths
+        .iter()
+        .filter(|path| {
+            extract::language_name(path)
+                .is_some_and(|lang| config.languages.iter().any(|l| l == lang))
+        })
+        .cloned()
+        .collect();
+    if eligible.is_empty() {
         return Ok(());
     }
-    let content =
-        crate::bot::github_files::fetch_repo_file(client, headers, repo_full_name, path, git_ref)
-            .await?;
-    let Some(content) = content else {
+    let fetched = crate::bot::github_files::fetch_repo_files_parallel(
+        client,
+        headers,
+        repo_full_name,
+        &eligible,
+        git_ref,
+        5,
+    )
+    .await;
+    if fetched.len() < eligible.len() {
+        tracing::warn!(
+            repo = repo_full_name,
+            missing = eligible.len() - fetched.len(),
+            "incremental index skipped unavailable files"
+        );
+    }
+    let indices: Vec<extract::FileIndex> = fetched
+        .into_iter()
+        .filter_map(|(path, content)| extract::extract_file(&path, &content))
+        .collect();
+    if indices.is_empty() {
         return Ok(());
-    };
-    if let Some(idx) = extract::extract_file(path, &content) {
-        store::replace_file_index(pool, repo_full_name, &idx).await?;
-        if let Some(llm_cfg) = llm_cfg {
-            if let Err(e) = semantic::reindex_repo_embeddings(
-                pool,
-                llm_cfg,
-                repo_full_name,
-                std::slice::from_ref(&idx),
-            )
-            .await
+    }
+
+    if let Err(error) = store::replace_files_index(pool, repo_full_name, &indices).await {
+        tracing::warn!(error = %error, repo = repo_full_name, "batch index update failed; retrying files");
+        for index in &indices {
+            if let Err(error) =
+                store::replace_files_index(pool, repo_full_name, std::slice::from_ref(index)).await
             {
-                tracing::warn!(error = %e, repo = repo_full_name, path, "semantic index embedding failed");
+                tracing::warn!(error = %error, repo = repo_full_name, path = index.file_path, "incremental index failed");
+            }
+        }
+    }
+    if let Some(llm_cfg) = llm_cfg {
+        if let Err(error) =
+            semantic::reindex_repo_embeddings(pool, llm_cfg, repo_full_name, &indices).await
+        {
+            tracing::warn!(error = %error, repo = repo_full_name, "batch embedding update failed; retrying files");
+            for index in &indices {
+                if let Err(error) = semantic::reindex_repo_embeddings(
+                    pool,
+                    llm_cfg,
+                    repo_full_name,
+                    std::slice::from_ref(index),
+                )
+                .await
+                {
+                    tracing::warn!(error = %error, repo = repo_full_name, path = index.file_path, "semantic index embedding failed");
+                }
             }
         }
     }

@@ -21,40 +21,50 @@ pub async fn replace_repo_index(
         .bind(repo_full_name)
         .execute(&mut *tx)
         .await?;
-    insert_files(&mut tx, repo_full_name, files).await?;
-    upsert_status(&mut tx, repo_full_name, INDEX_READY, None).await?;
-    tx.commit().await
+    finish_index_write(tx, repo_full_name, files).await
 }
 
-/// Incremental update: re-parse one changed file, replacing only its rows.
-pub async fn replace_file_index(
+/// Incremental update for changed files, replacing only their rows in one transaction.
+pub async fn replace_files_index(
     pool: &DbPool,
     repo_full_name: &str,
-    file: &FileIndex,
+    files: &[FileIndex],
 ) -> Result<(), sqlx::Error> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let paths: Vec<String> = files.iter().map(|file| file.file_path.clone()).collect();
     let mut tx = pool.as_pg().begin().await?;
     // Edges first: the subquery reads the very rows the symbol DELETE removes,
     // so deleting symbols first would leave every stale edge behind forever.
     sqlx::query(
         "DELETE FROM repo_edges WHERE repo_full_name = $1 AND
-         (from_symbol = $2 OR
-          from_symbol IN (SELECT symbol_name FROM repo_symbols WHERE repo_full_name = $1 AND file_path = $2))",
+         (from_symbol = ANY($2) OR
+          from_symbol IN (SELECT symbol_name FROM repo_symbols WHERE repo_full_name = $1 AND file_path = ANY($2)))",
     )
     .bind(repo_full_name)
-    .bind(&file.file_path)
+    .bind(&paths)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM repo_symbols WHERE repo_full_name = $1 AND file_path = $2")
+    sqlx::query("DELETE FROM repo_symbols WHERE repo_full_name = $1 AND file_path = ANY($2)")
         .bind(repo_full_name)
-        .bind(&file.file_path)
+        .bind(&paths)
         .execute(&mut *tx)
         .await?;
-    insert_files(&mut tx, repo_full_name, std::slice::from_ref(file)).await?;
-    upsert_status(&mut tx, repo_full_name, INDEX_READY, None).await?;
-    tx.commit().await
+    finish_index_write(tx, repo_full_name, files).await
 }
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+
+async fn finish_index_write(
+    mut tx: Tx<'_>,
+    repo: &str,
+    files: &[FileIndex],
+) -> Result<(), sqlx::Error> {
+    insert_files(&mut tx, repo, files).await?;
+    upsert_status(&mut tx, repo, INDEX_READY, None).await?;
+    tx.commit().await
+}
 
 /// Bulk-insert via `UNNEST` arrays: one round-trip for the whole index instead
 /// of one per symbol/edge (a full repo build is tens of thousands of rows).
@@ -150,58 +160,47 @@ pub async fn index_status(pool: &DbPool, repo: &str) -> Option<(String, String)>
         .map(|row| (row.get(0), row.get(1)))
 }
 
-/// Callers of `symbol`: reverse CALLS/EXTENDS edges pointing at it.
-pub async fn callers_of(
+/// Callers of many symbols, capped per symbol.
+pub async fn callers_of_many(
     pool: &DbPool,
     repo: &str,
-    symbol: &str,
+    symbols: &[String],
 ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
-    query_tuples(
-        pool,
-        "SELECT from_symbol, to_symbol, edge_kind FROM repo_edges
-         WHERE repo_full_name = $1 AND to_symbol = $2
-         ORDER BY from_symbol LIMIT 50",
-        &[repo, symbol],
+    if symbols.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT from_symbol, to_symbol, edge_kind FROM (
+           SELECT from_symbol, to_symbol, edge_kind,
+                  ROW_NUMBER() OVER (PARTITION BY to_symbol ORDER BY from_symbol) AS rn
+           FROM repo_edges
+           WHERE repo_full_name = $1 AND to_symbol = ANY($2)
+         ) ranked
+         WHERE rn <= 50
+         ORDER BY to_symbol, from_symbol",
     )
+    .bind(repo)
+    .bind(symbols)
+    .fetch_all(pool.as_pg())
     .await
 }
 
-/// Symbols defined in a file, so callers can be resolved by name.
-pub async fn symbols_in_file(
+/// Symbols defined in many files, ordered by path and line.
+pub async fn symbols_in_files(
     pool: &DbPool,
     repo: &str,
-    file_path: &str,
-) -> Result<Vec<(String, String, i64)>, sqlx::Error> {
-    query_tuples(
-        pool,
-        "SELECT symbol_name, kind, COALESCE(line, 0) FROM repo_symbols
-         WHERE repo_full_name = $1 AND file_path = $2
-         ORDER BY line",
-        &[repo, file_path],
-    )
-    .await
-}
-
-use sqlx::postgres::PgRow;
-
-/// Fixed-shape SELECT decoded positionally into tuples.
-async fn query_tuples<A, B, C>(
-    pool: &DbPool,
-    sql: &str,
-    args: &[&str],
-) -> Result<Vec<(A, B, C)>, sqlx::Error>
-where
-    A: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-    B: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-    C: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-{
-    let mut q = sqlx::query(sql);
-    for arg in args {
-        q = q.bind(arg);
+    file_paths: &[String],
+) -> Result<Vec<(String, String, String, i64)>, sqlx::Error> {
+    if file_paths.is_empty() {
+        return Ok(Vec::new());
     }
-    q.fetch_all(pool.as_pg()).await.map(|rows| {
-        rows.into_iter()
-            .map(|r: PgRow| (r.get(0), r.get(1), r.get(2)))
-            .collect()
-    })
+    sqlx::query_as(
+        "SELECT file_path, symbol_name, kind, COALESCE(line, 0)::bigint FROM repo_symbols
+         WHERE repo_full_name = $1 AND file_path = ANY($2)
+         ORDER BY file_path, line",
+    )
+    .bind(repo)
+    .bind(file_paths)
+    .fetch_all(pool.as_pg())
+    .await
 }
