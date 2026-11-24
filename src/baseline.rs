@@ -16,7 +16,7 @@ pub fn parse_patch_changed_lines(patch: &str) -> HashSet<usize> {
         if let Some(header) = line.strip_prefix("@@") {
             if let Some(rest) = header.split_once(" +") {
                 if let Some(rhs) = rest.1.split(" @@").next() {
-                    let (start, _count) = parse_hunk_start_count(rhs);
+                    let start = parse_hunk_start(rhs);
                     new_line = start;
                 }
             }
@@ -34,16 +34,8 @@ pub fn parse_patch_changed_lines(patch: &str) -> HashSet<usize> {
     lines
 }
 
-fn parse_hunk_start_count(s: &str) -> (usize, usize) {
-    let s = s.trim();
-    if let Some((start_s, count_s)) = s.split_once(',') {
-        let start = start_s.parse::<usize>().unwrap_or(1);
-        let count = count_s.parse::<usize>().unwrap_or(1);
-        (start, count)
-    } else {
-        let start = s.parse::<usize>().unwrap_or(1);
-        (start, 1)
-    }
+fn parse_hunk_start(s: &str) -> usize {
+    s.split(',').next().unwrap_or(s).trim().parse().unwrap_or(1)
 }
 
 /// Persist all changed-line rows for a PR in one statement.
@@ -165,7 +157,7 @@ async fn record_baselines(
          ON CONFLICT (repo_full_name, fingerprint) DO UPDATE SET last_seen_at = NOW()",
     )
     .bind(repo_full_name)
-    .bind(fingerprints.to_vec())
+    .bind(fingerprints)
     .execute(pool.as_pg())
     .await?;
     Ok(())

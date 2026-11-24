@@ -31,6 +31,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(default)
 }
 
@@ -39,4 +40,19 @@ fn env_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_timeout_env_uses_default() {
+        let key = "CODASAURUS_TEST_ZERO_REVIEW_TIMEOUT";
+        std::env::set_var(key, "0");
+        let timeout = env_u64(key, 300);
+        std::env::remove_var(key);
+
+        assert_eq!(timeout, 300);
+    }
 }
