@@ -3,13 +3,17 @@
 # ── Stage 1: Build the SPA from codasaurus-frontend ─────────────
 FROM node:20-alpine AS frontend
 ARG DASHBOARD_REF=main
+ARG SKIP_FRONTEND=0
 RUN apk add --no-cache git
 WORKDIR /app
-RUN git clone --depth 1 --branch "${DASHBOARD_REF}" \
-      https://github.com/codasaurus-oss/codasaurus-frontend.git svelte-dashboard
-WORKDIR /app/svelte-dashboard
-RUN npm ci --ignore-scripts
-RUN npm run build
+RUN if [ "$SKIP_FRONTEND" = "1" ]; then \
+      mkdir -p svelte-dashboard/dist && \
+      printf '<!doctype html><title>Codasaurus</title>' > svelte-dashboard/dist/index.html; \
+    else \
+      git clone --depth 1 --branch "${DASHBOARD_REF}" \
+        https://github.com/codasaurus-oss/codasaurus-frontend.git svelte-dashboard && \
+      cd svelte-dashboard && npm ci --ignore-scripts && npm run build; \
+    fi
 
 # ── Stage 2: Build Rust binary ──────────────────────────────────
 FROM rust:1.90-slim-bookworm AS backend
