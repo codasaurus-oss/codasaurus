@@ -1,38 +1,17 @@
-use anyhow::{Context, Result};
+const URL: &str = "https://crates.io/api/v1/crates";
 
-pub async fn check_async(package: &str) -> Result<Option<bool>> {
-    let url = format!("https://crates.io/api/v1/crates/{package}");
-    let client = super::async_client().context("registry HTTP client not available")?;
-    let resp = client
-        .get(&url)
-        .header(
-            "User-Agent",
-            concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .await?;
-    match resp.status().as_u16() {
+pub async fn check_async(package: &str) -> anyhow::Result<Option<bool>> {
+    match super::status_code(&format!("{URL}/{package}"), reqwest::Method::GET, None).await? {
         200 => Ok(Some(true)),
         404 => Ok(Some(false)),
         _ => Ok(None),
     }
 }
 
-pub async fn metadata_async(package: &str) -> Result<Option<super::Metadata>> {
-    let url = format!("https://crates.io/api/v1/crates/{package}");
-    let client = super::async_client().context("registry HTTP client not available")?;
-    let resp = client
-        .get(&url)
-        .header(
-            "User-Agent",
-            concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .await?;
-    if resp.status().as_u16() != 200 {
+pub async fn metadata_async(package: &str) -> anyhow::Result<Option<super::Metadata>> {
+    let Some(data) = super::fetch_json(&format!("{URL}/{package}"), None).await? else {
         return Ok(None);
-    }
-    let data: serde_json::Value = resp.json().await?;
+    };
     let license = data["crate"]["license"]
         .as_str()
         .map(str::to_string)

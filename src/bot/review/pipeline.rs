@@ -935,12 +935,13 @@ pub async fn review_pr_with_options(
         )
         .await?;
         if repo_flags.auto_approve {
-            let already_approved = super::github::review_exists_for_commit(
+            let already_approved = super::github::review_exists(
                 client,
                 &auth_header,
                 repo_name,
                 pr_number,
                 head_sha,
+                None,
             )
             .await
             .unwrap_or(false);
@@ -1113,12 +1114,13 @@ pub async fn review_pr_with_options(
 
         let review_url =
             format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews");
-        let already_posted = super::github::review_exists_for_commit(
+        let already_posted = super::github::review_exists(
             client,
             &auth_header,
             repo_name,
             pr_number,
             head_sha,
+            None,
         )
         .await
         .unwrap_or(false);
