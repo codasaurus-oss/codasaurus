@@ -85,7 +85,10 @@ pub(crate) async fn post_chat(
     let pool = crate::bot::CONFIG_POOL.get();
     let started = std::time::Instant::now();
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-    let max_tokens = body["max_tokens"].as_u64().unwrap_or(0) as u32;
+    let max_tokens = body["max_tokens"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
 
     let resp = retry_async(
         &RetryConfig::api_default(),
@@ -121,7 +124,7 @@ pub(crate) async fn post_chat(
     )
     .await;
 
-    let latency_ms = started.elapsed().as_millis() as u64;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let outcome = if resp.is_ok() { "ok" } else { "error" };
     if let Some(pool) = pool {
         crate::db::events::emit_llm_call(
