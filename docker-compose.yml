@@ -38,9 +38,8 @@ services:
       - STORE_MODEL_IN_DB=True
       - DATABASE_URL=${LITELLM_DATABASE_URL:?required}
       - LITELLM_SALT_KEY=${LITELLM_SALT_KEY:?required}
-      # Provider credentials are operator-supplied. Add them here (or via a
-      # .env file / LiteLLM admin UI) together with the model definitions;
-      # Codasaurus never reads or names them.
+      # Provider credentials and models are configured through Codasaurus
+      # onboarding / Settings → LLM, not in the mounted gateway config.
     volumes:
       - ./litellm.config.yaml:/app/config.yaml:ro
     healthcheck:
@@ -82,7 +81,6 @@ services:
       - CODASAURUS_MODEL_CHEAP=${CODASAURUS_MODEL_CHEAP:-}
       - CODASAURUS_EMBEDDING_MODEL=${CODASAURUS_EMBEDDING_MODEL:-}
       - CODASAURUS_BASE_URL=http://litellm:4000/v1
-      - CODASAURUS_API_KEY=${LITELLM_MASTER_KEY:?required}
       # Admin credential for gateway management APIs; never used for inference.
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?required}
       - CODASAURUS_MAX_CONCURRENT_REVIEWS=${CODASAURUS_MAX_CONCURRENT_REVIEWS:-4}

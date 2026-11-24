@@ -190,20 +190,37 @@ impl GatewayClient {
     }
 
     /// Issue a model-scoped virtual key. Applications never use the master key.
-    pub async fn issue_key(&self, alias: &str) -> Result<String> {
+    /// A positive budget is enforced by LiteLLM and resets daily.
+    pub async fn issue_key(&self, alias: &str, daily_budget_usd: f64) -> Result<String> {
+        let mut body = json!({ "models": [alias] });
+        if daily_budget_usd > 0.0 {
+            body["max_budget"] = json!(daily_budget_usd);
+            body["budget_duration"] = json!("1d");
+        }
         let value: Value = self
-            .request(
-                Method::POST,
-                "/key/generate",
-                Some(json!({ "models": [alias] })),
-                None,
-            )
+            .request(Method::POST, "/key/generate", Some(body), None)
             .await?;
         value
             .get("key")
             .and_then(Value::as_str)
             .map(str::to_string)
             .context("LiteLLM gateway did not return a virtual key")
+    }
+
+    /// Set or clear the LiteLLM-enforced daily budget on an existing virtual key.
+    pub async fn update_key_budget(&self, key: &str, daily_budget_usd: f64) -> Result<()> {
+        let mut body = json!({ "key": key });
+        if daily_budget_usd > 0.0 {
+            body["max_budget"] = json!(daily_budget_usd);
+            body["budget_duration"] = json!("1d");
+        } else {
+            body["max_budget"] = Value::Null;
+            body["budget_duration"] = Value::Null;
+        }
+        let _: Value = self
+            .request(Method::POST, "/key/update", Some(body), None)
+            .await?;
+        Ok(())
     }
 }
 
@@ -288,6 +305,10 @@ mod tests {
                 ),
             )
             .route(
+                "/key/update",
+                capture_route("budget", captured.clone(), serde_json::json!({})),
+            )
+            .route(
                 "/model/m-1/update",
                 patch({
                     let c = captured.clone();
@@ -364,11 +385,35 @@ mod tests {
     async fn issue_key_uses_master_key_and_returns_key() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let base = spawn(captured.clone()).await;
-        let key = mock(&base).issue_key("alias").await.unwrap();
+        let key = mock(&base).issue_key("alias", 0.0).await.unwrap();
         assert_eq!(key, "sk-virtual");
         let rows = captured.lock().unwrap();
         assert_eq!(rows[0].1, "Bearer sk-master");
         assert_eq!(rows[0].2, r#"{"models":["alias"]}"#);
+    }
+
+    #[tokio::test]
+    async fn issue_key_sets_daily_budget_and_update_can_clear_it() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let base = spawn(captured.clone()).await;
+        let client = mock(&base);
+
+        client.issue_key("alias", 12.5).await.unwrap();
+        client.update_key_budget("sk-virtual", 12.5).await.unwrap();
+        client.update_key_budget("sk-virtual", 0.0).await.unwrap();
+
+        let rows = captured.lock().unwrap();
+        let generated: serde_json::Value = serde_json::from_str(&rows[0].2).unwrap();
+        assert_eq!(generated["max_budget"], 12.5);
+        assert_eq!(generated["budget_duration"], "1d");
+
+        let updated: serde_json::Value = serde_json::from_str(&rows[1].2).unwrap();
+        assert_eq!(updated["key"], "sk-virtual");
+        assert_eq!(updated["max_budget"], 12.5);
+
+        let cleared: serde_json::Value = serde_json::from_str(&rows[2].2).unwrap();
+        assert!(cleared["max_budget"].is_null());
+        assert!(cleared["budget_duration"].is_null());
     }
 
     #[tokio::test]
