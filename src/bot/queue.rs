@@ -90,7 +90,18 @@ pub async fn claim_batch(pool: &DbPool, stale_secs: i64, limit: i64) -> Result<V
     let lease_id = uuid::Uuid::new_v4();
     let rows = sqlx::query_as::<
         _,
-        (i64, String, i64, String, Option<i64>, String, i32, i16, String, String),
+        (
+            i64,
+            String,
+            i64,
+            String,
+            Option<i64>,
+            String,
+            i32,
+            i16,
+            String,
+            String,
+        ),
     >(
         "UPDATE review_jobs SET
            status = 'running',
@@ -121,7 +132,18 @@ pub async fn claim_batch(pool: &DbPool, stale_secs: i64, limit: i64) -> Result<V
     Ok(rows
         .into_iter()
         .map(
-            |(id, repo, pr_number, head_sha, installation_id, action, attempts, priority, queue_name, lease)| {
+            |(
+                id,
+                repo,
+                pr_number,
+                head_sha,
+                installation_id,
+                action,
+                attempts,
+                priority,
+                queue_name,
+                lease,
+            )| {
                 ReviewJob {
                     id,
                     repo,

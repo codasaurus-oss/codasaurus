@@ -22,21 +22,28 @@ async fn migration_v27_adds_lease_and_scheduling_columns() {
     let pool = db::create_pool(&pg_url())
         .await
         .expect("postgres create_pool / migrations");
-    let _ = sqlx::query("DELETE FROM review_jobs").execute(pool.as_pg()).await;
+    let _ = sqlx::query("DELETE FROM review_jobs")
+        .execute(pool.as_pg())
+        .await;
 
     let repo = format!("acme/schema-{}", uuid::Uuid::new_v4().simple());
     let id = queue::enqueue(&pool, &repo, 77, "schemasha", None, "opened")
         .await
         .expect("enqueue");
-    let row: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, i16, String, i32) =
-        sqlx::query_as(
-            "SELECT created_at, run_at, priority, queue_name, max_attempts
+    let row: (
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        i16,
+        String,
+        i32,
+    ) = sqlx::query_as(
+        "SELECT created_at, run_at, priority, queue_name, max_attempts
                FROM review_jobs WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_one(pool.as_pg())
-        .await
-        .expect("new columns exist");
+    )
+    .bind(id)
+    .fetch_one(pool.as_pg())
+    .await
+    .expect("new columns exist");
     assert_eq!(row.0, row.1, "run_at backfilled from created_at");
     assert_eq!(row.2, 100);
     assert_eq!(row.3, "reviews");
@@ -62,25 +69,38 @@ async fn migration_v27_adds_lease_and_scheduling_columns() {
 async fn queue_lease_backoff_and_dead_letter() {
     let _guard = TEST_SERIAL.lock().await;
     let pool = db::create_pool(&pg_url()).await.expect("pool");
-    let _ = sqlx::query("DELETE FROM review_jobs").execute(pool.as_pg()).await;
+    let _ = sqlx::query("DELETE FROM review_jobs")
+        .execute(pool.as_pg())
+        .await;
     let repo = format!("acme/lease-{}", uuid::Uuid::new_v4().simple());
     let id = queue::enqueue(&pool, &repo, 91, "leasesha", None, "opened")
         .await
         .expect("enqueue");
 
-    let first = queue::claim_next(&pool, 600).await.expect("claim").expect("job");
+    let first = queue::claim_next(&pool, 600)
+        .await
+        .expect("claim")
+        .expect("job");
     assert_eq!(first.id, id);
-    assert!(queue::claim_next(&pool, 600).await.expect("claim").is_none());
+    assert!(queue::claim_next(&pool, 600)
+        .await
+        .expect("claim")
+        .is_none());
 
     sqlx::query("UPDATE review_jobs SET leased_until = NOW() - INTERVAL '1 second' WHERE id = $1")
         .bind(id)
         .execute(pool.as_pg())
         .await
         .expect("expire lease");
-    let second = queue::claim_next(&pool, 600).await.expect("reclaim").expect("job");
+    let second = queue::claim_next(&pool, 600)
+        .await
+        .expect("reclaim")
+        .expect("job");
     assert_ne!(first.lease_id, second.lease_id);
     assert!(
-        !queue::mark_done(&pool, id, &first.lease_id).await.expect("stale done"),
+        !queue::mark_done(&pool, id, &first.lease_id)
+            .await
+            .expect("stale done"),
         "stale lease must not mark done"
     );
     let status: String = sqlx::query_scalar("SELECT status FROM review_jobs WHERE id = $1")
@@ -107,7 +127,10 @@ async fn queue_lease_backoff_and_dead_letter() {
         .execute(pool.as_pg())
         .await
         .expect("make retry due");
-    let third = queue::claim_next(&pool, 600).await.expect("claim after retry").expect("job");
+    let third = queue::claim_next(&pool, 600)
+        .await
+        .expect("claim after retry")
+        .expect("job");
     let outcome = queue::mark_failed(&pool, id, &third.lease_id, "still failing", 5)
         .await
         .expect("dead letter");
@@ -148,7 +171,9 @@ async fn postgres_migrations_enqueue_and_claim() {
     assert_eq!(job.repo, repo);
     assert_eq!(job.pr_number, 42);
 
-    queue::mark_done(&pool, job.id, &job.lease_id).await.expect("mark_done");
+    queue::mark_done(&pool, job.id, &job.lease_id)
+        .await
+        .expect("mark_done");
 
     let email = format!(
         "pg-smoke-{}@example.com",
