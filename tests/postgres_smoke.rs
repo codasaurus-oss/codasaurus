@@ -11,9 +11,44 @@ static TEST_SERIAL: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn pg_url() -> String {
-    std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("CODASAURUS_TEST_DATABASE_URL"))
+    std::env::var("CODASAURUS_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into())
+}
+
+#[tokio::test]
+async fn queue_recovers_null_leases_and_reports_lost_leases() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let _ = sqlx::query("DELETE FROM review_jobs")
+        .execute(pool.as_pg())
+        .await;
+
+    let repo = format!("acme/lease-null-{}", uuid::Uuid::new_v4().simple());
+    let id = queue::enqueue(&pool, &repo, 92, "nulllease", None, "opened")
+        .await
+        .expect("enqueue");
+    sqlx::query("UPDATE review_jobs SET status = 'running', lease_id = NULL, leased_until = NULL WHERE id = $1")
+        .bind(id)
+        .execute(pool.as_pg())
+        .await
+        .expect("simulate pre-v28 running row");
+    let job = queue::claim_next(&pool, 600)
+        .await
+        .expect("reclaim")
+        .expect("job");
+    assert_eq!(job.id, id);
+
+    assert_eq!(
+        queue::mark_failed(&pool, id, "not-the-lease", "boom", 1, 5)
+            .await
+            .expect("mark_failed"),
+        Outcome::LeaseLost
+    );
+    let _ = sqlx::query("DELETE FROM review_jobs WHERE repo = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await;
 }
 
 #[tokio::test]
@@ -110,7 +145,7 @@ async fn queue_lease_backoff_and_dead_letter() {
         .expect("status");
     assert_eq!(status, "running");
 
-    let outcome = queue::mark_failed(&pool, id, &second.lease_id, "rate limited", 1)
+    let outcome = queue::mark_failed(&pool, id, &second.lease_id, "rate limited", 1, 5)
         .await
         .expect("mark_failed");
     assert!(matches!(outcome, Outcome::Scheduled { delay_secs } if delay_secs >= 1));
@@ -131,7 +166,7 @@ async fn queue_lease_backoff_and_dead_letter() {
         .await
         .expect("claim after retry")
         .expect("job");
-    let outcome = queue::mark_failed(&pool, id, &third.lease_id, "still failing", 5)
+    let outcome = queue::mark_failed(&pool, id, &third.lease_id, "still failing", 5, 5)
         .await
         .expect("dead letter");
     assert_eq!(outcome, Outcome::Dead);

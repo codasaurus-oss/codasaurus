@@ -279,6 +279,53 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     migrate_v25_rule_hit_telemetry(pool).await?;
     migrate_v26_findings_fingerprint_per_review(pool).await?;
     migrate_v27_review_queue_hardening(pool).await?;
+    migrate_v28_queue_lease_recovery(pool).await?;
+    Ok(())
+}
+
+/// v28: rows that were `running` when v27 shipped have a NULL lease and can
+/// never be reclaimed; make them immediately claimable and align the ready
+/// index with the claim predicate, which also considers `failed` rows.
+async fn migrate_v28_queue_lease_recovery(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 28 {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(931847263)")
+        .execute(&mut *tx)
+        .await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(&mut *tx)
+        .await?;
+    if current.unwrap_or(0) >= 28 {
+        tx.commit().await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE review_jobs SET leased_until = COALESCE(updated_at, NOW())
+          WHERE status = 'running' AND leased_until IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DROP INDEX IF EXISTS idx_review_jobs_ready")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX idx_review_jobs_ready
+           ON review_jobs (queue_name, priority, run_at, id)
+          WHERE status IN ('pending', 'failed')",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (28) ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
