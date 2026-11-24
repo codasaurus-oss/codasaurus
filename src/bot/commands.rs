@@ -148,7 +148,6 @@ fn extract_ask_question(body: &str) -> Option<String> {
                 return Some(q.to_string());
             }
         }
-        // case-insensitive fallback
         let lower = body.to_ascii_lowercase();
         let p = prefix.to_ascii_lowercase();
         if let Some(idx) = lower.find(&p) {
@@ -970,32 +969,27 @@ async fn spawn_generate_tests(ctx: WebhookContext, pr_number: i64, timeout_secs:
                 continue;
             }
 
-            let Ok(Some(source)) = crate::bot::github_files::fetch_repo_file(
-                client,
-                &headers,
-                &ctx.repo_full_name,
-                path,
-                &head_sha,
-            )
-            .await
-            else {
-                continue;
-            };
-            let mut existing_test = None;
-            for cand in &candidates {
-                if let Ok(Some(t)) = crate::bot::github_files::fetch_repo_file(
+            let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+            let (source, existing_test) = tokio::join!(
+                crate::bot::github_files::fetch_repo_file(
                     client,
                     &headers,
                     &ctx.repo_full_name,
-                    cand,
+                    path,
                     &head_sha,
-                )
-                .await
-                {
-                    existing_test = Some(t);
-                    break;
-                }
-            }
+                ),
+                crate::bot::github_files::fetch_first_existing(
+                    client,
+                    &headers,
+                    &ctx.repo_full_name,
+                    &candidate_refs,
+                    &head_sha,
+                ),
+            );
+            let Ok(Some(source)) = source else {
+                continue;
+            };
+            let existing_test = existing_test.ok().flatten().map(|(_, content)| content);
 
             match crate::llm::generate_tests(path, &source, existing_test.as_deref(), &llm).await {
                 Ok(tests) => sections.push(format!("### `{path}`\n\n{tests}\n")),

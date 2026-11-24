@@ -13,7 +13,7 @@ pub(crate) async fn suggest_reviewers(
     use std::sync::Arc;
     use tokio::sync::Semaphore;
 
-    let max_files = max_files.clamp(0, MAX_REVIEWER_FILES).max(0);
+    let max_files = max_files.clamp(0, MAX_REVIEWER_FILES);
     if max_files == 0 || files.is_empty() {
         return Vec::new();
     }
@@ -37,8 +37,8 @@ pub(crate) async fn suggest_reviewers(
         handles.push(tokio::spawn(async move {
             let _permit = match sem.acquire().await {
                 Ok(p) => p,
-                Err(e) => {
-                    eprintln!("Warning: semaphore closed: {e}");
+                Err(error) => {
+                    tracing::warn!(error = %error, "reviewer semaphore closed");
                     return;
                 }
             };
@@ -73,8 +73,6 @@ pub(crate) async fn suggest_reviewers(
                 Err(_) => vec![],
             };
 
-            // _permit dropped here → semaphore permit returned automatically
-
             if !commits.is_empty() {
                 let mut local = counts.lock().expect("reviewer counts lock poisoned");
                 for commit in &commits {
@@ -88,14 +86,13 @@ pub(crate) async fn suggest_reviewers(
         }));
     }
 
-    // Wait for all fetches to complete
-    for h in handles {
-        let _ = h.await;
+    for handle in handles {
+        let _ = handle.await;
     }
 
-    let counts = author_counts.lock().expect("author counts lock poisoned");
-    let mut reviewers: Vec<(String, usize)> = counts.clone().into_iter().collect();
-    reviewers.sort_by_key(|k| std::cmp::Reverse(k.1));
+    let mut counts = author_counts.lock().expect("author counts lock poisoned");
+    let mut reviewers: Vec<(String, usize)> = std::mem::take(&mut *counts).into_iter().collect();
+    reviewers.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     reviewers.truncate(5);
     reviewers.into_iter().map(|(name, _)| name).collect()
 }
