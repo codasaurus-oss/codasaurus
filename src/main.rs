@@ -49,15 +49,32 @@ enum Commands {
         ready: bool,
     },
 
+    /// Inspect and manage the review job queue
+    #[command(subcommand)]
+    Queue(QueueCommands),
+
+    /// Reset a local dashboard user's password (emergency recovery; no email flow)
+    ResetPassword {
+        /// Account email
+        #[arg(long)]
+        email: String,
+
+        /// New password (min 10 characters)
+        #[arg(long)]
+        password: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum QueueCommands {
     /// Replay a dead-lettered review job
-    QueueReplay {
+    Replay {
         /// review_jobs.id
         #[arg(long)]
         id: i64,
     },
-
     /// Schedule a review job at a future time
-    QueueSchedule {
+    Schedule {
         #[arg(long)]
         repo: String,
         #[arg(long)]
@@ -69,17 +86,6 @@ enum Commands {
         at: String,
         #[arg(long, default_value_t = 100)]
         priority: i16,
-    },
-
-    /// Reset a local dashboard user's password (emergency recovery; no email flow)
-    ResetPassword {
-        /// Account email
-        #[arg(long)]
-        email: String,
-
-        /// New password (min 10 characters)
-        #[arg(long)]
-        password: String,
     },
 }
 
@@ -136,7 +142,7 @@ fn main() -> Result<()> {
         Commands::Version => {
             println!("codasaurus v{}", env!("CARGO_PKG_VERSION"));
         }
-        Commands::QueueReplay { id } => {
+        Commands::Queue(QueueCommands::Replay { id }) => {
             let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
                 "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
             });
@@ -156,13 +162,13 @@ fn main() -> Result<()> {
                 Ok::<(), anyhow::Error>(())
             })?;
         }
-        Commands::QueueSchedule {
+        Commands::Queue(QueueCommands::Schedule {
             repo,
             pr,
             sha,
             at,
             priority,
-        } => {
+        }) => {
             let when = chrono::DateTime::parse_from_rfc3339(at)?.with_timezone(&chrono::Utc);
             let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
                 "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
