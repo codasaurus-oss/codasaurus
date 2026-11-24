@@ -74,6 +74,8 @@ Prebuilt Linux binary: [GitHub Releases](https://github.com/codasaurus-oss/codas
 
 ```text
 codasaurus serve | health | version | reset-password
+codasaurus queue replay --id <job-id>
+codasaurus queue schedule --repo <owner/repo> --pr 42 --sha <sha> --at 2026-11-25T10:00:00Z [--priority 100]
 ```
 
 ---
