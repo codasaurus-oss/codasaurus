@@ -49,10 +49,12 @@ impl GatewayClient {
     pub fn from_env() -> Option<Self> {
         let base = std::env::var("CODASAURUS_BASE_URL").ok()?;
         let admin = std::env::var("LITELLM_MASTER_KEY").ok()?;
-        if base.trim().is_empty() || admin.trim().is_empty() {
+        let base = base.trim();
+        let admin = admin.trim();
+        if base.is_empty() || admin.is_empty() {
             return None;
         }
-        Some(Self::new(base, admin))
+        Some(Self::new(base.to_string(), admin.to_string()))
     }
 
     async fn request<T: serde::de::DeserializeOwned>(
@@ -192,6 +194,7 @@ impl GatewayClient {
     /// Issue a model-scoped virtual key. Applications never use the master key.
     /// A positive budget is enforced by LiteLLM and resets daily.
     pub async fn issue_key(&self, alias: &str, daily_budget_usd: f64) -> Result<String> {
+        validate_budget(daily_budget_usd)?;
         let mut body = json!({ "models": [alias] });
         if daily_budget_usd > 0.0 {
             body["max_budget"] = json!(daily_budget_usd);
@@ -209,6 +212,7 @@ impl GatewayClient {
 
     /// Set or clear the LiteLLM-enforced daily budget on an existing virtual key.
     pub async fn update_key_budget(&self, key: &str, daily_budget_usd: f64) -> Result<()> {
+        validate_budget(daily_budget_usd)?;
         let mut body = json!({ "key": key });
         if daily_budget_usd > 0.0 {
             body["max_budget"] = json!(daily_budget_usd);
@@ -222,6 +226,13 @@ impl GatewayClient {
             .await?;
         Ok(())
     }
+}
+
+fn validate_budget(value: f64) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        bail!("daily budget must be a non-negative finite number");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -414,6 +425,21 @@ mod tests {
         let cleared: serde_json::Value = serde_json::from_str(&rows[2].2).unwrap();
         assert!(cleared["max_budget"].is_null());
         assert!(cleared["budget_duration"].is_null());
+    }
+
+    #[tokio::test]
+    async fn invalid_budgets_are_rejected() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let base = spawn(captured.clone()).await;
+        let client = mock(&base);
+        for budget in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(client.issue_key("alias", budget).await.is_err());
+            assert!(client
+                .update_key_budget("sk-virtual", budget)
+                .await
+                .is_err());
+        }
+        assert!(captured.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
