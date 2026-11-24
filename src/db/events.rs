@@ -35,7 +35,7 @@ pub async fn emit_llm_call(
     }
 }
 
-/// Sum estimated spend for the last ~24 hours (process observability + BudgetGuard).
+/// Sum estimated spend for the last ~24 hours for operator telemetry.
 pub async fn spend_usd_last_day(pool: &DbPool) -> f64 {
     db_scalar!(
         pool,

@@ -99,6 +99,7 @@ pub async fn accept_local(
     email: &str,
     password: &str,
 ) -> Result<User, sqlx::Error> {
+    let password_hash = crate::db::users::hash_password(password)?;
     let mut tx = pool.as_pg().begin().await?;
 
     let claimed: Option<Invite> = sqlx::query_as(
@@ -114,7 +115,6 @@ pub async fn accept_local(
         sqlx::Error::Protocol("Invite not found, expired, or already accepted".into())
     })?;
 
-    let password_hash = crate::db::users::hash_password(password)?;
     let user: User = sqlx::query_as(
         "INSERT INTO users (email, password_hash, role, auth_provider, is_bootstrap)
          VALUES ($1, $2, $3, 'local', false)
