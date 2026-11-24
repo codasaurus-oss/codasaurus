@@ -64,6 +64,7 @@ fn path_matches_pattern(path: &str, pattern: &str) -> bool {
 }
 
 /// Persistent store for feedback learning (shared Postgres pool).
+#[derive(Clone)]
 pub struct LearningStore {
     pool: DbPool,
 }

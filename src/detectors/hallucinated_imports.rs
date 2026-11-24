@@ -12,30 +12,12 @@ pub fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
         if crate::detectors::is_test_or_fixture_path(&file.path) {
             continue;
         }
-        let registry_name = match file.language.as_str() {
-            "javascript" | "typescript" | "tsx" | "jsx" => "npm",
-            "python" => "pypi",
-            "rust" => "crates.io",
-            "go" => "go",
-            _ => continue, // unsupported language for now
+        let Some(registry_name) = crate::detectors::registry_for_language(&file.language) else {
+            continue;
         };
 
-        for import in &file.imports {
-            let package = crate::detectors::extract_package_name(&import.name);
-            let package = match package {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // Skip relative imports and built-ins
-            if package.starts_with('.') || package.starts_with('/') {
-                continue;
-            }
-
+        for (import, package) in crate::detectors::external_imports(file) {
             if is_builtin(&package, registry_name) {
-                continue;
-            }
-            if registry_name == "go" && is_go_stdlib(&package) {
                 continue;
             }
             match registry::check_package(registry_name, &package) {
@@ -141,14 +123,19 @@ static NPM_BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "node:async_hooks",
         "node:buffer",
         "node:child_process",
+        "node:cluster",
         "node:console",
         "node:constants",
         "node:crypto",
         "node:diagnostics_channel",
+        "node:dgram",
         "node:dns",
+        "node:domain",
         "node:events",
+        "node:ffi",
         "node:fs",
         "node:http",
+        "node:http2",
         "node:https",
         "node:inspector",
         "node:module",
@@ -161,10 +148,15 @@ static NPM_BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "node:querystring",
         "node:readline",
         "node:repl",
+        "node:sea",
+        "node:sqlite",
         "node:stream",
         "node:string_decoder",
+        "node:sys",
+        "node:test",
         "node:timers",
         "node:tls",
+        "node:trace_events",
         "node:tty",
         "node:url",
         "node:util",
@@ -177,13 +169,17 @@ static NPM_BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "assert",
         "buffer",
         "child_process",
+        "cluster",
         "console",
         "constants",
         "crypto",
+        "dgram",
         "dns",
+        "domain",
         "events",
         "fs",
         "http",
+        "http2",
         "https",
         "module",
         "net",
@@ -195,8 +191,10 @@ static NPM_BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "repl",
         "stream",
         "string_decoder",
+        "sys",
         "timers",
         "tls",
+        "trace_events",
         "tty",
         "url",
         "util",
@@ -209,7 +207,42 @@ static NPM_BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 static RUST_BUILTINS: LazyLock<HashSet<&'static str>> =
     LazyLock::new(|| HashSet::from(["std", "core", "alloc", "proc_macro"]));
 
+// CPython stdlib names, including modules removed in recent releases.
+static PYTHON_BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    concat!(
+        "__future__ _abc _aix_support _android_support _apple_support _ast _ast_unparse _asyncio _bisect _blake2 _bz2 ",
+        "_codecs _codecs_cn _codecs_hk _codecs_iso2022 _codecs_jp _codecs_kr _codecs_tw _collections _collections_abc _colorize ",
+        "_compat_pickle _contextvars _csv _ctypes _curses _curses_panel _datetime _dbm _decimal _elementtree _frozen_importlib ",
+        "_frozen_importlib_external _functools _gdbm _hashlib _heapq _hmac _imp _interpchannels _interpqueues _interpreters ",
+        "_io _ios_support _json _locale _lsprof _lzma _markupbase _math_integer _md5 _multibytecodec _multiprocessing ",
+        "_opcode _opcode_metadata _operator _osx_support _overlapped _pickle _posixshmem _posixsubprocess _py_abc _py_warnings ",
+        "_pydatetime _pydecimal _pyio _pylong _pyrepl _queue _random _remote_debugging _scproxy _sha1 _sha2 _sha3 _signal ",
+        "_sitebuiltins _socket _sqlite3 _sre _ssl _stat _statistics _string _strptime _struct _suggestions _symtable _sysconfig ",
+        "_thread _threading_local _tkinter _tokenize _tracemalloc _types _typing _uuid _warnings _weakref _weakrefset _winapi ",
+        "_wmi _zoneinfo _zstd abc annotationlib antigravity argparse array ast asyncio atexit base64 bdb binascii bisect ",
+        "builtins bz2 cProfile calendar cmath cmd code codecs codeop collections colorsys compileall compression concurrent ",
+        "configparser contextlib contextvars copy copyreg csv ctypes curses dataclasses datetime dbm decimal difflib dis doctest ",
+        "email encodings ensurepip enum errno faulthandler fcntl filecmp fileinput fnmatch fractions ftplib functools gc ",
+        "genericpath getopt getpass gettext glob graphlib grp gzip hashlib heapq hmac html http idlelib imaplib importlib ",
+        "inspect io ipaddress itertools json keyword linecache locale logging lzma mailbox marshal math mimetypes mmap ",
+        "modulefinder msvcrt multiprocessing netrc nt ntpath nturl2path numbers opcode operator optparse os pathlib pdb pickle ",
+        "pickletools pkgutil platform plistlib poplib posix posixpath pprint profile profiling pstats pty pwd py_compile pyclbr ",
+        "pydoc pydoc_data pyexpat queue quopri random re readline reprlib resource rlcompleter runpy sched secrets select ",
+        "selectors shelve shlex shutil signal site smtplib socket socketserver sqlite3 ssl stat statistics string stringprep ",
+        "struct subprocess symtable sys sysconfig syslog tabnanny tarfile tempfile termios textwrap this threading time timeit ",
+        "tkinter token tokenize tomllib trace traceback tracemalloc tty turtle turtledemo types typing unicodedata unittest ",
+        "urllib uuid venv warnings wave weakref webbrowser winreg winsound wsgiref xml xmlrpc zipapp zipfile zipimport zlib zoneinfo ",
+        "asyncore asynchat audioop cgi cgitb chunk crypt distutils formatter imghdr lib2to3 mailcap nis nntplib ",
+        "ossaudiodev parser pipes sndhdr spwd sunau symbol telnetlib test uu xdrlib",
+    )
+    .split_whitespace()
+    .collect()
+});
+
 fn is_go_stdlib(path: &str) -> bool {
+    if path == "C" {
+        return true;
+    }
     let std_roots = [
         "archive",
         "bufio",
@@ -366,13 +399,16 @@ fn typosquat_match(registry: &str, package: &str) -> Option<&'static str> {
         return None;
     }
     let max_distance = if package.len() <= 4 { 1 } else { 2 };
+    let package_len = package.chars().count();
     popular
         .iter()
-        .find(|&&p| {
-            let dist = levenshtein(package, p);
-            dist > 0 && dist <= max_distance
-        })
         .copied()
+        .filter(|&candidate| package_len.abs_diff(candidate.chars().count()) <= max_distance)
+        .filter(|&candidate| {
+            let distance = levenshtein(package, candidate);
+            distance > 0 && distance <= max_distance
+        })
+        .min()
 }
 
 /// Standard Levenshtein edit distance (insert/delete/substitute), O(n*m).
@@ -396,6 +432,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 pub(crate) fn is_builtin(package: &str, registry: &str) -> bool {
     match registry {
         "npm" => NPM_BUILTINS.contains(package),
+        "pypi" => PYTHON_BUILTINS.contains(package.split('.').next().unwrap_or(package)),
         "crates.io" => {
             if RUST_BUILTINS.contains(package) {
                 return true;
@@ -407,6 +444,7 @@ pub(crate) fn is_builtin(package: &str, registry: &str) -> bool {
                 || package.starts_with("alloc::")
                 || package.starts_with("proc_macro::")
         }
+        "go" => is_go_stdlib(package),
         _ => false,
     }
 }
@@ -428,5 +466,30 @@ mod url_tests {
         assert!(package_registry_url("pypi", "requests").contains("pypi.org"));
         assert!(package_registry_url("crates.io", "serde").contains("crates.io/crates/"));
         assert!(!package_registry_url("npm", "x").contains("www.npm.com"));
+    }
+
+    #[test]
+    fn python_and_go_stdlib_are_builtins() {
+        assert!(is_builtin("os", "pypi"));
+        assert!(is_builtin("os.path", "pypi"));
+        assert!(!is_builtin("requests", "pypi"));
+        assert!(is_builtin("fmt", "go"));
+        assert!(is_builtin("net/http", "go"));
+        assert!(is_builtin("C", "go"));
+        assert!(!is_builtin("github.com/gorilla/mux", "go"));
+    }
+
+    #[test]
+    fn typosquat_choice_is_deterministic() {
+        assert_eq!(typosquat_match("npm", "jeact"), Some("jest"));
+        assert_eq!(typosquat_match("npm", "neact"), Some("next"));
+        assert_eq!(typosquat_match("pypi", "sumpy"), Some("numpy"));
+    }
+
+    #[test]
+    fn current_node_builtins_are_recognized() {
+        for package in ["cluster", "node:cluster", "node:test", "node:sqlite"] {
+            assert!(is_builtin(package, "npm"), "{package} should be built in");
+        }
     }
 }

@@ -262,10 +262,9 @@ pub async fn check_vulnerabilities_async(
     check_osv_async(ecosystem, package).await
 }
 
-/// Batch-query OSV for (ecosystem, package, version) triples via `querybatch`,
-/// one HTTP call per PR file instead of one per dependency. No caching here —
-/// callers (e.g. dependency_vulns detector) run this once per review and fail
-/// open on error. Version is optional; omit to get all known advisories.
+/// Batch-query OSV for (ecosystem, package, version) triples via `querybatch`.
+/// No caching here — callers supply all queries for a review in one call and
+/// fail open on error. Version is optional; omit to get all known advisories.
 pub async fn query_osv_batch(
     queries: &[(String, String, Option<String>)],
 ) -> Result<Vec<Vec<OsvVulnerability>>> {
@@ -528,16 +527,24 @@ mod tests {
     #[test]
     fn test_extract_package_name() {
         assert_eq!(
-            crate::detectors::extract_package_name("react").as_deref(),
+            crate::detectors::extract_package_name("react", "javascript").as_deref(),
             Some("react")
         );
         assert_eq!(
-            crate::detectors::extract_package_name("@scope/package").as_deref(),
+            crate::detectors::extract_package_name("@scope/package", "javascript").as_deref(),
             Some("@scope/package")
         );
         assert_eq!(
-            crate::detectors::extract_package_name("lodash/fp").as_deref(),
+            crate::detectors::extract_package_name("lodash/fp", "javascript").as_deref(),
             Some("lodash")
+        );
+        assert_eq!(
+            crate::detectors::extract_package_name("requests.sessions", "python").as_deref(),
+            Some("requests")
+        );
+        assert_eq!(
+            crate::detectors::extract_package_name("github.com/gorilla/mux", "go").as_deref(),
+            Some("github.com/gorilla/mux")
         );
     }
 
