@@ -38,3 +38,18 @@ pub async fn consume(store: &StateStore, secret: &str) -> Result<(), ApiError> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_key_is_namespaced_and_stable() {
+        let a = secret_key("s3cr3t");
+        let b = secret_key("s3cr3t");
+        assert_eq!(a, b);
+        assert!(a.starts_with("codasaurus:bootstrap:"), "{a}");
+        assert!(!a.contains("s3cr3t"), "raw secret must not appear: {a}");
+        assert_ne!(a, secret_key("other"));
+    }
+}

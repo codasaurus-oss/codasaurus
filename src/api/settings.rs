@@ -238,8 +238,76 @@ fn parse_boolish(value: &str, key: &str) -> Result<(), ApiError> {
     }
 }
 
+/// Pure validation for `PUT /api/settings/:key`. Split out so it is
+/// unit-testable without a database; the handler only does I/O.
+fn validate_setting(key: &str, value: &str) -> Result<(), ApiError> {
+    if key == "review_strictness" {
+        let v = value.trim().to_ascii_lowercase();
+        if !matches!(
+            v.as_str(),
+            "lenient" | "balanced" | "strict" | "nitpick" | ""
+        ) {
+            return Err(ApiError::bad_request(
+                "review_strictness must be lenient|balanced|strict|nitpick",
+            ));
+        }
+        return Ok(());
+    }
+    if key == "llm_daily_budget_usd" && !value.trim().is_empty() {
+        value
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| ApiError::bad_request("llm_daily_budget_usd must be a number"))?;
+        return Ok(());
+    }
+
+    match key {
+        "audit_retention_days" => parse_positive_int(value, key, 7, 730)?,
+        "queue_workers" => parse_positive_int(value, key, 1, 8)?,
+        "max_concurrent_reviews" => parse_positive_int(value, key, 1, 64)?,
+        "review_timeout_secs" => parse_positive_int(value, key, 30, 3600)?,
+        "max_inline_comments" => parse_positive_int(value, key, 1, 100)?,
+        "max_reviewer_files" => parse_positive_int(value, key, 1, 200)?,
+        "max_comment_bytes" => parse_positive_int(value, key, 1000, 500_000)?,
+        "max_llm_diff_chars" => parse_positive_int(value, key, 500, 200_000)?,
+        "auto_improve_max_files" => parse_positive_int(value, key, 1, 500)?,
+        "auto_improve_max_diff" => parse_positive_int(value, key, 1000, 500_000)?,
+        "hsts"
+        | "insecure_cookies"
+        | "secure_cookies"
+        | "oidc_allow_open_join"
+        | "oidc_allow_unverified_email"
+        | "oidc_allow_public_client"
+        | "offline_mode" => parse_boolish(value, key)?,
+        "public_url" | "oidc_redirect_uri" if !value.trim().is_empty() => {
+            let v = value.trim();
+            if !(v.starts_with("http://") || v.starts_with("https://")) {
+                return Err(ApiError::bad_request(format!(
+                    "{key} must be an http(s) URL"
+                )));
+            }
+        }
+        "oidc_issuer" | "jira_base_url" if !value.trim().is_empty() => {
+            // Network validation lives in the handler (async SSRF check).
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Async-only checks (SSRF URL validation) that need I/O.
+async fn validate_setting_async(key: &str, value: &str) -> Result<(), ApiError> {
+    if (key == "oidc_issuer" || key == "jira_base_url") && !value.trim().is_empty() {
+        crate::ssrf::validate_http_url_resolved(value.trim(), false)
+            .await
+            .map_err(ApiError::bad_request)?;
+    }
+    Ok(())
+}
+
 /// PUT /api/settings/:key
-async fn set_setting(
+#[utoipa::path(put, path = "/api/settings/{key}", tag = "settings", params(("key" = String, Path, description = "Setting key")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn set_setting(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(key): Path<String>,
@@ -276,57 +344,8 @@ async fn set_setting(
             ));
         }
     }
-    if key == "review_strictness" {
-        let v = body.value.trim().to_ascii_lowercase();
-        if !matches!(
-            v.as_str(),
-            "lenient" | "balanced" | "strict" | "nitpick" | ""
-        ) {
-            return Err(ApiError::bad_request(
-                "review_strictness must be lenient|balanced|strict|nitpick",
-            ));
-        }
-    }
-    if key == "llm_daily_budget_usd" && !body.value.trim().is_empty() {
-        body.value
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| ApiError::bad_request("llm_daily_budget_usd must be a number"))?;
-    }
-
-    match key.as_str() {
-        "audit_retention_days" => parse_positive_int(&body.value, &key, 7, 730)?,
-        "queue_workers" => parse_positive_int(&body.value, &key, 1, 8)?,
-        "max_concurrent_reviews" => parse_positive_int(&body.value, &key, 1, 64)?,
-        "review_timeout_secs" => parse_positive_int(&body.value, &key, 30, 3600)?,
-        "max_inline_comments" => parse_positive_int(&body.value, &key, 1, 100)?,
-        "max_reviewer_files" => parse_positive_int(&body.value, &key, 1, 200)?,
-        "max_comment_bytes" => parse_positive_int(&body.value, &key, 1000, 500_000)?,
-        "max_llm_diff_chars" => parse_positive_int(&body.value, &key, 500, 200_000)?,
-        "auto_improve_max_files" => parse_positive_int(&body.value, &key, 1, 500)?,
-        "auto_improve_max_diff" => parse_positive_int(&body.value, &key, 1000, 500_000)?,
-        "hsts"
-        | "insecure_cookies"
-        | "secure_cookies"
-        | "oidc_allow_open_join"
-        | "oidc_allow_unverified_email"
-        | "oidc_allow_public_client"
-        | "offline_mode" => parse_boolish(&body.value, &key)?,
-        "public_url" | "oidc_redirect_uri" if !body.value.trim().is_empty() => {
-            let v = body.value.trim();
-            if !(v.starts_with("http://") || v.starts_with("https://")) {
-                return Err(ApiError::bad_request(format!(
-                    "{key} must be an http(s) URL"
-                )));
-            }
-        }
-        "oidc_issuer" | "jira_base_url" if !body.value.trim().is_empty() => {
-            crate::ssrf::validate_http_url_resolved(body.value.trim(), false)
-                .await
-                .map_err(ApiError::bad_request)?;
-        }
-        _ => {}
-    }
+    validate_setting(&key, &body.value)?;
+    validate_setting_async(&key, &body.value).await?;
 
     db::config::set_config(&state.pool, &key, &body.value).await?;
     db::config::apply_setting_to_env(&key, &body.value);
@@ -357,24 +376,26 @@ async fn set_setting(
     })))
 }
 
-async fn get_github_settings(
+#[utoipa::path(get, path = "/api/settings/github", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_github_settings(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
-    let app_id = db::config::get_config(&state.pool, "github_app_id")
-        .await
+    // Independent lookups — one wave instead of three sequential round-trips.
+    let (app_id, app_name, slug) = tokio::join!(
+        db::config::get_config(&state.pool, "github_app_id"),
+        db::config::get_config(&state.pool, "github_app_name"),
+        db::config::get_config(&state.pool, "github_app_slug"),
+    );
+    let app_id = app_id
         .ok()
         .flatten()
         .or_else(|| std::env::var("GITHUB_APP_ID").ok());
 
-    let app_name = db::config::get_config(&state.pool, "github_app_name")
-        .await
-        .ok()
-        .flatten();
+    let app_name = app_name.ok().flatten();
 
-    let slug = db::config::get_config(&state.pool, "github_app_slug")
-        .await
+    let slug = slug
         .ok()
         .flatten()
         .filter(|s| !s.trim().is_empty())
@@ -393,7 +414,8 @@ async fn get_github_settings(
     })))
 }
 
-async fn delete_github_settings(
+#[utoipa::path(delete, path = "/api/settings/github", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn delete_github_settings(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -437,7 +459,8 @@ fn http_client(secs: u64) -> Result<reqwest::Client, ApiError> {
 }
 
 /// POST /api/settings/github/test — verify App JWT against GET /app.
-async fn test_github_connection(
+#[utoipa::path(post, path = "/api/settings/github/test", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn test_github_connection(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -484,7 +507,8 @@ async fn test_github_connection(
 }
 
 /// DELETE /api/settings/oidc — clear SSO config from DB + process env.
-async fn delete_oidc_settings(
+#[utoipa::path(delete, path = "/api/settings/oidc", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn delete_oidc_settings(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -505,7 +529,8 @@ async fn delete_oidc_settings(
 }
 
 /// POST /api/settings/oidc/test — fetch OpenID discovery document.
-async fn test_oidc_connection(
+#[utoipa::path(post, path = "/api/settings/oidc/test", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn test_oidc_connection(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -559,7 +584,8 @@ async fn test_oidc_connection(
 }
 
 /// DELETE /api/settings/tickets — clear Jira + Linear config.
-async fn delete_ticket_settings(
+#[utoipa::path(delete, path = "/api/settings/tickets", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn delete_ticket_settings(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -580,7 +606,8 @@ async fn delete_ticket_settings(
 }
 
 /// POST /api/settings/jira/test — GET /rest/api/3/myself.
-async fn test_jira_connection(
+#[utoipa::path(post, path = "/api/settings/jira/test", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn test_jira_connection(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -632,7 +659,8 @@ async fn test_jira_connection(
 }
 
 /// POST /api/settings/linear/test — GraphQL viewer query.
-async fn test_linear_connection(
+#[utoipa::path(post, path = "/api/settings/linear/test", tag = "settings", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn test_linear_connection(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -688,4 +716,41 @@ async fn test_linear_connection(
         "ok": true,
         "message": format!("Connected as {name}"),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strictness_accepts_known_levels_and_blank() {
+        for v in ["lenient", "balanced", "strict", "nitpick", "", "  Strict  "] {
+            assert!(validate_setting("review_strictness", v).is_ok(), "{v}");
+        }
+        assert!(validate_setting("review_strictness", "chaotic").is_err());
+    }
+
+    #[test]
+    fn numeric_bounds_reject_out_of_range() {
+        assert!(validate_setting("queue_workers", "4").is_ok());
+        assert!(validate_setting("queue_workers", "0").is_err());
+        assert!(validate_setting("queue_workers", "9").is_err());
+        assert!(validate_setting("queue_workers", "many").is_err());
+        assert!(validate_setting("queue_workers", "").is_ok());
+        assert!(validate_setting("review_timeout_secs", "29").is_err());
+        assert!(validate_setting("llm_daily_budget_usd", "abc").is_err());
+        assert!(validate_setting("llm_daily_budget_usd", "12.5").is_ok());
+    }
+
+    #[test]
+    fn boolish_and_url_shapes() {
+        for v in ["true", "1", "yes", "off", ""] {
+            assert!(validate_setting("offline_mode", v).is_ok(), "{v}");
+        }
+        assert!(validate_setting("offline_mode", "maybe").is_err());
+        assert!(validate_setting("public_url", "https://bots.example.com").is_ok());
+        assert!(validate_setting("public_url", "gopher://x").is_err());
+        // Unknown keys pass through — the ALLOWED_KEYS gate lives in the handler.
+        assert!(validate_setting("custom_instructions", "anything").is_ok());
+    }
 }

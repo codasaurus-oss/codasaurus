@@ -24,7 +24,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Deserialize)]
-struct UpsertServerBody {
+pub(crate) struct UpsertServerBody {
     enabled: bool,
     /// Blank/omitted keeps the existing stored key unchanged.
     #[serde(default)]
@@ -37,10 +37,14 @@ struct UpsertServerBody {
 }
 
 async fn update_custom_server_ids(pool: &db::DbPool, id: &str, add: bool) -> Result<(), ApiError> {
-    let mut ids: Vec<String> = db::config::get_config(pool, "mcp_custom_server_ids")
-        .await?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
+    let raw = db::config::get_config(pool, "mcp_custom_server_ids").await?;
+    let mut ids: Vec<String> = match raw {
+        Some(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "mcp_custom_server_ids is corrupt; resetting");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
     let changed = if add {
         if ids.iter().any(|i| i == id) {
             false
@@ -76,7 +80,8 @@ pub(crate) async fn list_servers(
 }
 
 /// PUT /api/mcp/servers/:id
-async fn upsert_server(
+#[utoipa::path(put, path = "/api/mcp/servers/{id}", tag = "mcp", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn upsert_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
@@ -133,7 +138,8 @@ async fn upsert_server(
 }
 
 /// DELETE /api/mcp/servers/:id
-async fn delete_server(
+#[utoipa::path(delete, path = "/api/mcp/servers/{id}", tag = "mcp", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn delete_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
@@ -161,7 +167,8 @@ async fn delete_server(
 }
 
 /// POST /api/mcp/:id/test — initialize + tools/list against the configured server.
-async fn test_server(
+#[utoipa::path(post, path = "/api/mcp/{id}/test", tag = "mcp", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn test_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,

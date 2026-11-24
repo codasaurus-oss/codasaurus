@@ -107,15 +107,25 @@ pub async fn require_repo_read(
 }
 
 /// Resolve a review to its repo and apply the repo read policy.
+/// Single session/user lookup — the old version re-authenticated via
+/// `require_repo_read`, doubling session + user queries per call.
 pub async fn require_review_read(
     state: &AppState,
     headers: &HeaderMap,
     review_id: i64,
 ) -> Result<(UserView, i64), ApiError> {
-    require_role(&state.pool, headers, MinRole::Viewer).await?;
+    let user = require_role(&state.pool, headers, MinRole::Viewer).await?;
     let review = db::reviews::get_review(&state.pool, review_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Review {review_id} not found")))?;
-    let user = require_repo_read(state, headers, review.repo_id).await?;
+    let repo_exists = db::repos::get_repo(&state.pool, review.repo_id)
+        .await?
+        .is_some();
+    if !repo_exists {
+        return Err(ApiError::not_found(format!(
+            "Repo {} not found",
+            review.repo_id
+        )));
+    }
     Ok((user, review.repo_id))
 }

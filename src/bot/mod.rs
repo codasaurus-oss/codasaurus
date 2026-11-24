@@ -30,7 +30,9 @@ pub(crate) mod related_prs;
 pub(crate) mod repo_context;
 mod review;
 mod threads;
-pub(crate) use review::{github_api_headers, next_github_link, GITHUB_CLIENT};
+pub(crate) use review::{
+    github_api_headers, github_get, github_post, next_github_link, GITHUB_CLIENT,
+};
 pub(crate) mod strictness;
 pub(crate) mod title_fix;
 mod verify;

@@ -29,14 +29,6 @@ async fn require_setup_open_or_admin(
     Ok(())
 }
 
-/// Wizard detail endpoints: open before first owner; owner-only after bootstrap.
-async fn require_setup_wizard_access(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(), ApiError> {
-    require_setup_open_or_admin(state, headers).await
-}
-
 #[derive(Deserialize)]
 pub struct DatabaseBody {
     pub provider: String, // "postgres"
@@ -313,11 +305,12 @@ pub(crate) async fn setup_status(
 }
 
 /// GET /api/setup/database — live Postgres connection summary for the wizard.
-async fn get_database_status(
+#[utoipa::path(get, path = "/api/setup/database", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_database_status(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_setup_wizard_access(&state, &headers).await?;
+    require_setup_open_or_admin(&state, &headers).await?;
     state
         .pool
         .ping()
@@ -372,7 +365,8 @@ fn redact_pg_url(raw: &str) -> (String, String) {
 }
 
 /// POST /api/setup/database
-async fn setup_database(
+#[utoipa::path(post, path = "/api/setup/database", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_database(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<DatabaseBody>,
@@ -431,11 +425,12 @@ async fn setup_database(
 }
 
 /// GET /api/setup/llm — return current LLM config from DB + env vars.
-async fn get_llm_config(
+#[utoipa::path(get, path = "/api/setup/llm", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_llm_config(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_setup_wizard_access(&state, &headers).await?;
+    require_setup_open_or_admin(&state, &headers).await?;
     use db::config::get_config;
 
     let provider = match get_config(&state.pool, "llm_provider").await.ok().flatten() {
@@ -482,7 +477,8 @@ async fn get_llm_config(
 }
 
 /// POST /api/setup/llm?test=true
-async fn setup_llm(
+#[utoipa::path(post, path = "/api/setup/llm", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_llm(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<LlmTestParams>,
@@ -623,7 +619,7 @@ pub(crate) async fn get_public_url(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_setup_wizard_access(&state, &headers).await?;
+    require_setup_open_or_admin(&state, &headers).await?;
     let from_db = db::config::get_config(&state.pool, "public_url")
         .await
         .ok()
@@ -654,7 +650,8 @@ fn is_local_url(url: &str) -> bool {
 
 /// POST /api/setup/public-url — save the canonical HTTPS origin used for
 /// GitHub manifest webhook/callback URLs. Open before the first owner exists.
-async fn setup_public_url(
+#[utoipa::path(post, path = "/api/setup/public-url", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_public_url(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<PublicUrlBody>,
@@ -756,7 +753,8 @@ fn build_manifest(public_url: &str) -> serde_json::Value {
 /// GET /api/setup/github/manifest-page — auto-submitting HTML form that
 /// POSTs the manifest to GitHub. This is the officially documented flow:
 /// https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
-async fn github_manifest_page(
+#[utoipa::path(get, path = "/api/setup/github/manifest-page", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_manifest_page(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<ManifestPageQuery>,
@@ -830,7 +828,8 @@ async fn github_manifest_page(
 }
 
 /// GET /api/setup/github/manifest — return the manifest JSON for programmatic use.
-async fn github_manifest_url(
+#[utoipa::path(get, path = "/api/setup/github/manifest-url", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_manifest_url(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -839,7 +838,8 @@ async fn github_manifest_url(
 }
 
 /// POST /api/setup/github
-async fn setup_github(
+#[utoipa::path(post, path = "/api/setup/github", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_github(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<GithubBody>,
@@ -850,10 +850,7 @@ async fn setup_github(
     let token = github_jwt::create_app_jwt(&body.app_id, &body.private_key)
         .map_err(|e| ApiError::bad_request(format!("Invalid GitHub App credentials: {e}")))?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))?;
+    let client = http_client(10)?;
 
     let resp = client
         .get("https://api.github.com/app")
@@ -927,33 +924,44 @@ async fn setup_github(
 /// the manifest code with GitHub, then redirects to the SPA entry point.
 /// This avoids SPA routing issues (hash vs path) because the exchange happens
 /// in a plain page before handing control back to the SPA.
-async fn github_callback_page(
+#[utoipa::path(get, path = "/api/setup/github/callback", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_callback_page(
     Query(params): Query<GithubCallbackQuery>,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
     use axum::response::Html;
+
+    /// Static error page for the manifest callback — both messages are fixed
+    /// strings, so no request input is ever reflected into the HTML.
+    fn error_page(
+        message: &'static str,
+    ) -> (
+        StatusCode,
+        [(axum::http::header::HeaderName, &'static str); 2],
+        Html<String>,
+    ) {
+        use axum::http::header;
+        (
+            StatusCode::BAD_REQUEST,
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'",
+                ),
+            ],
+            Html(format!(
+                r#"<html><body style="font:14px sans-serif;padding:40px">
+                    <p>{message}</p>
+                    <a href="/#/setup/github">Back to setup</a>
+                </body></html>"#
+            )),
+        )
+    }
 
     let code = match params.code {
         Some(ref c) if !c.is_empty() => c.clone(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                [
-                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (
-                        header::CONTENT_SECURITY_POLICY,
-                        "default-src 'none'; style-src 'unsafe-inline'",
-                    ),
-                ],
-                Html(
-                    r#"<html><body style="font:14px sans-serif;padding:40px">
-                        <p>Missing authorization code from GitHub.</p>
-                        <a href="/#/setup/github">Back to setup</a>
-                    </body></html>"#
-                        .into(),
-                ),
-            );
-        }
+        _ => return error_page("Missing authorization code from GitHub."),
     };
 
     // Reject anything that isn't a safe OAuth code charset to prevent XSS when
@@ -963,23 +971,7 @@ async fn github_callback_page(
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/' | '=' | '+'))
         || code.len() > 512
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            [
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (
-                    header::CONTENT_SECURITY_POLICY,
-                    "default-src 'none'; style-src 'unsafe-inline'",
-                ),
-            ],
-            Html(
-                r#"<html><body style="font:14px sans-serif;padding:40px">
-                    <p>Invalid authorization code.</p>
-                    <a href="/#/setup/github">Back to setup</a>
-                </body></html>"#
-                    .into(),
-            ),
-        );
+        return error_page("Invalid authorization code.");
     }
 
     // Pass code via JSON serialization so it cannot break out of a JS string.
@@ -1053,11 +1045,14 @@ async fn github_callback_page(
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/html; charset=utf-8",
+            ),
             // The page exchanges the code with an inline script; the global
             // `script-src 'self'` would block it.
             (
-                header::CONTENT_SECURITY_POLICY,
+                axum::http::header::CONTENT_SECURITY_POLICY,
                 "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
             ),
         ],
@@ -1070,18 +1065,23 @@ fn github_conversion_error(status: reqwest::StatusCode, upstream_body: &str) -> 
     ApiError::bad_request(format!("GitHub manifest conversion failed (HTTP {status})"))
 }
 
+fn http_client(secs: u64) -> Result<reqwest::Client, ApiError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(secs))
+        .build()
+        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))
+}
+
 /// POST /api/setup/github/callback
-async fn github_callback(
+#[utoipa::path(post, path = "/api/setup/github/callback", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_callback(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<GithubCallbackBody>,
 ) -> Result<Json<GithubCallbackResponse>, ApiError> {
     require_setup_open_or_admin(&state, &headers).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))?;
+    let client = http_client(30)?;
 
     let resp = client
         .post(format!(
@@ -1205,7 +1205,8 @@ async fn first_owner_gate(
 }
 
 /// POST /api/setup/admin
-async fn setup_admin(
+#[utoipa::path(post, path = "/api/setup/admin", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_admin(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,

@@ -4,9 +4,9 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::bot::{github_api_headers, next_github_link, GITHUB_CLIENT};
+use crate::bot::{github_api_headers, github_get, github_post, next_github_link, GITHUB_CLIENT};
 use crate::db;
-use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
+use crate::retry::RetryConfig;
 
 use super::errors::ApiError;
 use super::AppState;
@@ -39,7 +39,8 @@ pub(crate) async fn list_repos(
 
 /// POST /api/repos/sync — fetch all installations + repos from GitHub and
 /// store them in the local database.  Returns the number of repos synced.
-async fn sync_repos(
+#[utoipa::path(post, path = "/api/repos/sync", tag = "repos", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn sync_repos(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -58,136 +59,134 @@ async fn sync_repos(
     let jwt_headers =
         github_api_headers(&jwt_auth).map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let installations: Vec<serde_json::Value> = retry_async(
-        &RetryConfig::api_default(),
+    let installations: Vec<serde_json::Value> = github_get(
+        client,
+        &jwt_headers,
+        "https://api.github.com/app/installations",
         "sync_list_installations",
-        &is_reqwest_error_retryable,
-        || async {
-            client
-                .get("https://api.github.com/app/installations")
-                .headers(jwt_headers.clone())
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(Into::into)
-        },
+        &RetryConfig::api_default(),
     )
     .await
     .map_err(|e| ApiError::bad_request(format!("GitHub API: {e}")))?;
 
     let mut total = 0usize;
-
     for inst in &installations {
-        let inst_id = match inst["id"].as_i64() {
-            Some(id) => id,
-            None => continue,
+        let Some(inst_id) = inst["id"].as_i64() else {
+            continue;
         };
+        total += sync_installation_repos(&state, client, &jwt_headers, inst_id).await?;
+    }
 
-        let token_resp: serde_json::Value = retry_async(
+    Ok(Json(json!({ "status": "ok", "synced": total })))
+}
+
+/// Mint an installation token, page all its repos, and persist them.
+/// One bad installation never fails the whole sync.
+async fn sync_installation_repos(
+    state: &AppState,
+    client: &reqwest::Client,
+    jwt_headers: &axum::http::HeaderMap,
+    inst_id: i64,
+) -> Result<usize, ApiError> {
+    let Some(repos) = installation_repos(client, jwt_headers, inst_id).await? else {
+        return Ok(0);
+    };
+    let mut total = 0usize;
+    for repo in &repos {
+        let github_id = repo["id"].as_i64();
+        let Some(full_name) = repo["full_name"].as_str() else {
+            continue;
+        };
+        let Some((owner, name)) = full_name.split_once('/') else {
+            continue;
+        };
+        if let Err(e) = db::repos::create_repo(
+            &state.pool,
+            &db::models::RepoCreate {
+                github_id,
+                full_name: full_name.to_string(),
+                owner: owner.to_string(),
+                name: name.to_string(),
+                default_branch: repo["default_branch"].as_str().map(|s| s.to_string()),
+                installation_id: inst_id,
+                private: repo["private"].as_bool().unwrap_or(false),
+            },
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "failed to save synced repo");
+        } else {
+            total += 1;
+        }
+    }
+    Ok(total)
+}
+
+/// Installation token + paged repo list. `None` when this installation
+/// yields no usable token (already logged); the sync moves on.
+async fn installation_repos(
+    client: &reqwest::Client,
+    jwt_headers: &axum::http::HeaderMap,
+    inst_id: i64,
+) -> Result<Option<Vec<serde_json::Value>>, ApiError> {
+    use crate::retry::{is_reqwest_error_retryable, retry_async};
+
+    let token_resp: serde_json::Value = github_post(
+        client,
+        jwt_headers,
+        &format!("https://api.github.com/app/installations/{inst_id}/access_tokens"),
+        None,
+        "sync_installation_token",
+        &RetryConfig::api_default(),
+    )
+    .await
+    .map_err(|e| ApiError::bad_request(format!("Token request: {e}")))?;
+
+    let Some(token) = token_resp["token"].as_str() else {
+        return Ok(None);
+    };
+    let token_headers = github_api_headers(&format!("Bearer {token}"))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut all_repos: Vec<serde_json::Value> = Vec::new();
+    let mut page_url: Option<String> =
+        Some("https://api.github.com/installation/repositories?per_page=100".into());
+    let mut pages = 0u32;
+
+    while let Some(url) = page_url.take() {
+        pages += 1;
+        let resp = retry_async(
             &RetryConfig::api_default(),
-            "sync_installation_token",
+            "sync_list_repos",
             &is_reqwest_error_retryable,
             || async {
                 client
-                    .post(format!(
-                        "https://api.github.com/app/installations/{inst_id}/access_tokens"
-                    ))
-                    .headers(jwt_headers.clone())
+                    .get(&url)
+                    .headers(token_headers.clone())
                     .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
                     .await
                     .map_err(Into::into)
             },
         )
         .await
-        .map_err(|e| ApiError::bad_request(format!("Token request: {e}")))?;
+        .map_err(|e| ApiError::bad_request(format!("Repos request: {e}")))?;
 
-        let token = match token_resp["token"].as_str() {
-            Some(t) => t.to_string(),
-            None => continue,
-        };
-        let token_auth = format!("Bearer {token}");
-        let token_headers =
-            github_api_headers(&token_auth).map_err(|e| ApiError::internal(e.to_string()))?;
+        page_url = next_github_link(resp.headers());
 
-        let mut all_repos: Vec<serde_json::Value> = Vec::new();
-        let mut page_url: Option<String> =
-            Some("https://api.github.com/installation/repositories?per_page=100".into());
-        let mut pages = 0u32;
-
-        while let Some(url) = page_url.take() {
-            pages += 1;
-            let resp = retry_async(
-                &RetryConfig::api_default(),
-                "sync_list_repos",
-                &is_reqwest_error_retryable,
-                || async {
-                    client
-                        .get(&url)
-                        .headers(token_headers.clone())
-                        .send()
-                        .await
-                        .map_err(Into::into)
-                },
-            )
+        let page_data: serde_json::Value = resp
+            .json()
             .await
-            .map_err(|e| ApiError::bad_request(format!("Repos request: {e}")))?;
+            .map_err(|e| ApiError::bad_request(format!("Repos response: {e}")))?;
 
-            page_url = next_github_link(resp.headers());
-
-            let page_data: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| ApiError::bad_request(format!("Repos response: {e}")))?;
-
-            if let Some(repos) = page_data["repositories"].as_array() {
-                all_repos.extend(repos.iter().cloned());
-            }
-
-            if pages >= 10 || all_repos.len() >= 1000 {
-                break;
-            }
+        if let Some(repos) = page_data["repositories"].as_array() {
+            all_repos.extend(repos.iter().cloned());
         }
 
-        for repo in &all_repos {
-            let github_id = repo["id"].as_i64();
-            let full_name = match repo["full_name"].as_str() {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            let (owner, name) = match full_name.split_once('/') {
-                Some((o, n)) => (o.to_string(), n.to_string()),
-                None => continue,
-            };
-            let default_branch = repo["default_branch"].as_str().map(|s| s.to_string());
-            let private = repo["private"].as_bool().unwrap_or(false);
-
-            if let Err(e) = db::repos::create_repo(
-                &state.pool,
-                &db::models::RepoCreate {
-                    github_id,
-                    full_name,
-                    owner,
-                    name,
-                    default_branch,
-                    installation_id: inst_id,
-                    private,
-                },
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "failed to save synced repo");
-            } else {
-                total += 1;
-            }
+        if pages >= 10 || all_repos.len() >= 1000 {
+            break;
         }
     }
-
-    Ok(Json(json!({ "status": "ok", "synced": total })))
+    Ok(Some(all_repos))
 }
 
 /// GET /api/repos/:id
@@ -205,19 +204,27 @@ pub(crate) async fn get_repo(
 }
 
 /// PUT /api/repos/:id
-async fn update_repo(
+#[utoipa::path(put, path = "/api/repos/{id}", tag = "repos", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn update_repo(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
     Json(body): Json<UpdateRepoBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
+    // Don't persist broken JSON the dashboard could never parse back.
+    if !body.config_json.trim().is_empty()
+        && serde_json::from_str::<serde_json::Value>(&body.config_json).is_err()
+    {
+        return Err(ApiError::bad_request("config_json must be valid JSON"));
+    }
     db::repos::update_repo(&state.pool, id, &body.config_json, body.active).await?;
     Ok(Json(json!({ "status": "ok" })))
 }
 
 /// DELETE /api/repos/:id
-async fn delete_repo(
+#[utoipa::path(delete, path = "/api/repos/{id}", tag = "repos", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn delete_repo(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
