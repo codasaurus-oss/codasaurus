@@ -12,6 +12,11 @@ pub mod client;
 use crate::db::DbPool;
 use anyhow::{bail, Result};
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
+const MAX_CONCURRENT_MCP_FETCHES: usize = 4;
 
 /// Default-deny write-looking tools because PR content can steer the model.
 /// This is a heuristic safety net, not a replacement for operator allowlisting.
@@ -171,39 +176,61 @@ pub async fn list_enabled_tools(pool: &DbPool) -> Vec<McpToolSpec> {
     }
 
     let config = server_configs(pool).await;
-    let mut specs = Vec::new();
-    for server in list_servers_from_config(&config) {
-        if !server.enabled || server.base_url.is_empty() {
-            continue;
-        }
-        let api_key = config
-            .get(&format!("mcp_{}_api_key", server.id))
-            .cloned()
-            .unwrap_or_default();
+    let servers: Vec<_> = list_servers_from_config(&config)
+        .into_iter()
+        .filter(|server| server.enabled && !server.base_url.is_empty())
+        .map(|server| {
+            let api_key = config
+                .get(&format!("mcp_{}_api_key", server.id))
+                .cloned()
+                .unwrap_or_default();
+            (server, api_key)
+        })
+        .collect();
+    let server_count = servers.len();
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_MCP_FETCHES));
+    let mut tasks = JoinSet::new();
 
-        let tools = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
-        for tool in tools {
-            let Some(name) = tool.get("name").and_then(|v| v.as_str()) else {
-                continue;
+    for (index, (server, api_key)) in servers.into_iter().enumerate() {
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let Ok(_permit) = semaphore.acquire().await else {
+                return (index, Vec::new());
             };
-            if is_write_tool(name) {
-                continue;
-            }
-            specs.push(McpToolSpec {
-                qualified_name: format!("{}__{name}", server.id),
-                description: tool
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                input_schema: tool
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
-            });
+            let tools = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
+            let specs = tools
+                .into_iter()
+                .filter_map(|tool| {
+                    let name = tool.get("name")?.as_str()?;
+                    if is_write_tool(name) {
+                        return None;
+                    }
+                    Some(McpToolSpec {
+                        qualified_name: format!("{}__{name}", server.id),
+                        description: tool
+                            .get("description")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        input_schema: tool
+                            .get("inputSchema")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+                    })
+                })
+                .collect();
+            (index, specs)
+        });
+    }
+
+    let mut batches = vec![Vec::new(); server_count];
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((index, specs)) => batches[index] = specs,
+            Err(error) => tracing::warn!(error = %error, "MCP tool discovery task failed"),
         }
     }
-    specs
+    batches.into_iter().flatten().collect()
 }
 
 /// Truncated at 8000 chars — bounds what a tool result can cost in the next
