@@ -83,8 +83,7 @@ pub fn delta_from_patch(path: &str, patch: &str) -> Option<DepDelta> {
             removed_lines.push('\n');
         }
     }
-    // Reconstruct approximate manifests from +/- lines is lossy; prefer full-file when available.
-    // Fallback: parse added hunk as if it were a mini-manifest fragment for cargo/npm keys.
+    // Diff hunks are lossy; callers should prefer full manifests when available.
     if path.to_lowercase().ends_with("package.json") {
         // Can't parse fragments — require full content path in caller.
         return None;
@@ -93,8 +92,7 @@ pub fn delta_from_patch(path: &str, patch: &str) -> Option<DepDelta> {
     let removed = extract_deps(path, &removed_lines).unwrap_or_default();
     let added_set: BTreeSet<_> = added.into_iter().collect();
     let removed_set: BTreeSet<_> = removed.into_iter().collect();
-    // Packages in both are version bumps — treat as neither add nor remove for simplicity,
-    // or list as updated by excluding intersection from both.
+    // Version bumps are rendered separately from additions and removals.
     let both: BTreeSet<_> = added_set.intersection(&removed_set).cloned().collect();
     let added: Vec<_> = added_set.difference(&both).cloned().collect();
     let removed: Vec<_> = removed_set.difference(&both).cloned().collect();
@@ -106,7 +104,6 @@ pub fn delta_from_patch(path: &str, patch: &str) -> Option<DepDelta> {
         added,
         removed,
     };
-    // Surface updates as "added" with note — keep simple: append updated names to added list as `name (updated)`
     for u in both {
         d.added.push(format!("{u} (updated)"));
     }

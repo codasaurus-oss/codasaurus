@@ -20,8 +20,8 @@ pub(crate) static GITHUB_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::n
         .build()
     {
         Ok(client) => Some(client),
-        Err(e) => {
-            eprintln!("Warning: failed to build GitHub API client: {e}");
+        Err(error) => {
+            tracing::error!(error = %error, "failed to build GitHub API client");
             None
         }
     }
@@ -172,18 +172,9 @@ pub(crate) async fn fetch_pr_files(
     unreachable!("the bounded page loop always returns")
 }
 
-/// Fingerprint prefixes Codasaurus has already posted an inline comment for on
-/// this PR, read back from GitHub.
-///
-/// Without this every push re-posts an inline comment for every finding that is
-/// still open, so a PR that takes five pushes to fix accumulates five copies of
-/// the same comment. GitHub is the source of truth rather than our own findings
-/// table, because a finding can be persisted and still never have been commented
-/// on (it was past `max_inline_comments`, or had no line to anchor to).
-///
-/// Best-effort: on any failure this returns empty, which re-posts a comment.
-/// Duplicating a comment is a far better failure than silently withholding a
-/// blocking finding.
+/// Fingerprint prefixes already posted on this PR, read from GitHub because a
+/// persisted finding may never have been commented. Failures return empty so a
+/// duplicate is preferred to hiding a blocking finding.
 pub(crate) async fn posted_inline_fingerprints(
     client: &reqwest::Client,
     headers: &reqwest::header::HeaderMap,

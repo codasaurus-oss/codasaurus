@@ -1,6 +1,4 @@
 //! Readable PR comment markdown for GitHub review threads.
-//!
-//! Guide first: name what to do next, celebrate progress, keep machinery tucked away.
 
 use crate::bot_runtime::BotRuntimeConfig;
 use crate::config::Config;
