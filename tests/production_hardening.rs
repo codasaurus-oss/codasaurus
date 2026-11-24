@@ -242,7 +242,10 @@ async fn review_state_sha_claim_is_exclusive() {
     assert!(!state.try_claim_sha(&repo, 1, "abc123").await.unwrap());
     assert!(state.try_claim_sha(&repo, 1, "def456").await.unwrap());
 
-    state.set_reviewed_sha_async(&repo, 1, "def456").await.unwrap();
+    state
+        .set_reviewed_sha_async(&repo, 1, "def456")
+        .await
+        .unwrap();
     assert!(!state.try_claim_sha(&repo, 1, "def456").await.unwrap());
     assert!(state.force_claim_sha(&repo, 1, "def456").await.unwrap());
     assert!(!state.try_claim_sha(&repo, 1, "def456").await.unwrap());
