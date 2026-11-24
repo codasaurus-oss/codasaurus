@@ -49,11 +49,38 @@ pub async fn enqueue(
     installation_id: Option<i64>,
     action: &str,
 ) -> Result<i64> {
+    let priority = std::env::var("CODASAURUS_QUEUE_DEFAULT_PRIORITY")
+        .ok()
+        .and_then(|v| v.parse::<i16>().ok())
+        .unwrap_or(100)
+        .clamp(-100, 100);
+    enqueue_with_priority(
+        pool,
+        repo,
+        pr_number,
+        head_sha,
+        installation_id,
+        action,
+        priority,
+    )
+    .await
+}
+
+/// Enqueue with an explicit priority (smaller runs first).
+pub async fn enqueue_with_priority(
+    pool: &DbPool,
+    repo: &str,
+    pr_number: i64,
+    head_sha: &str,
+    installation_id: Option<i64>,
+    action: &str,
+    priority: i16,
+) -> Result<i64> {
     let row: (i64,) = db_fetch_one!(
         pool,
         (i64,),
-        "INSERT INTO review_jobs (repo, pr_number, head_sha, installation_id, action, status, attempts, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', 0, NOW(), NOW())
+        "INSERT INTO review_jobs (repo, pr_number, head_sha, installation_id, action, status, attempts, priority, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NOW(), NOW())
          ON CONFLICT(repo, pr_number, head_sha) DO UPDATE SET
            status = CASE
              -- Retry failures only. Do not re-pend a successful or dead job for
@@ -72,7 +99,8 @@ pub async fn enqueue(
         pr_number,
         head_sha,
         installation_id,
-        action
+        action,
+        priority
     )?;
     // Wake-up hint only; polling is the correctness path.
     let _ = sqlx::query("SELECT pg_notify('review_jobs_ready', '')")
@@ -254,6 +282,32 @@ pub async fn mark_failed(
     }
     crate::metrics::record_queue_retry();
     Ok(Outcome::Scheduled { delay_secs })
+}
+
+/// Schedule a review at a future time (cron-like use from the CLI).
+pub async fn schedule_review(
+    pool: &DbPool,
+    repo: &str,
+    pr_number: i64,
+    head_sha: &str,
+    run_at: chrono::DateTime<chrono::Utc>,
+    priority: i16,
+) -> Result<i64> {
+    let row: (i64,) = db_fetch_one!(
+        pool,
+        (i64,),
+        "INSERT INTO review_jobs (repo, pr_number, head_sha, action, status, attempts, priority, run_at, created_at, updated_at)
+         VALUES (?, ?, ?, 'scheduled', 'pending', 0, ?, ?, NOW(), NOW())
+         ON CONFLICT(repo, pr_number, head_sha) DO UPDATE SET
+           run_at = excluded.run_at, priority = excluded.priority, updated_at = NOW()
+         RETURNING id",
+        repo,
+        pr_number,
+        head_sha,
+        priority,
+        run_at
+    )?;
+    Ok(row.0)
 }
 
 /// Put a dead job back in the queue for an operator-driven retry.

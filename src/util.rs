@@ -44,6 +44,23 @@ fn percent_encode(s: &str, keep_slash: bool) -> String {
     out
 }
 
+/// Narrow security-path signal used for related-PR ranking.
+pub fn is_security_sensitive_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("auth")
+        || lower.contains("crypto")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("middleware")
+        || lower.contains("rbac")
+        || lower.contains("permission")
+        || lower.contains("/k8s/")
+        || lower.contains("/kubernetes/")
+        || lower.contains("/helm/")
+        || lower.ends_with(".tf")
+        || lower.ends_with(".tfvars")
+}
+
 /// GitHub API related constants.
 pub mod github {
     /// Number of files to fetch per API page when listing PR files.

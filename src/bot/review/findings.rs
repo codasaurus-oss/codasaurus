@@ -121,13 +121,7 @@ pub(crate) fn merge_vulnerability_findings(
 
 pub(crate) fn is_critical_full_file_path(path: &str) -> bool {
     let lower = path.to_lowercase();
-    lower.contains("auth")
-        || lower.contains("crypto")
-        || lower.contains("secret")
-        || lower.contains("password")
-        || lower.contains("middleware")
-        || lower.contains("rbac")
-        || lower.contains("permission")
+    crate::util::is_security_sensitive_path(path)
         || lower.contains(".github/workflows")
         || lower.ends_with("dockerfile")
         || lower.contains("dockerfile.")
