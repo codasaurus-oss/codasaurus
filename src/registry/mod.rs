@@ -7,9 +7,9 @@
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::LazyLock;
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
@@ -33,7 +33,7 @@ enum PkgCacheVal {
     SoftFail,
 }
 
-static CACHE_TTL: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(3600));
+static CACHE_TTL: AtomicU64 = AtomicU64::new(3600);
 
 static CACHE: LazyLock<RwLock<HashMap<String, (PkgCacheVal, Instant)>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -82,7 +82,7 @@ static ASYNC_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
     {
         Ok(c) => Some(c),
         Err(e) => {
-            eprintln!("Warning: failed to build async registry HTTP client: {e}");
+            tracing::warn!(error = %e, "failed to build async registry HTTP client");
             None
         }
     }
@@ -131,14 +131,52 @@ pub fn async_client() -> Result<&'static reqwest::Client> {
         .ok_or_else(|| anyhow::anyhow!("async registry HTTP client not available"))
 }
 
-pub fn set_cache_ttl(secs: u64) {
-    if let Ok(mut ttl) = CACHE_TTL.lock() {
-        *ttl = secs;
+pub(super) fn registry_url(base: &str, package: &str) -> String {
+    format!("{base}/{}", crate::util::url_encode(package))
+}
+
+pub(super) fn classify_status(status: u16, found: &[u16], missing: &[u16]) -> Option<bool> {
+    if found.contains(&status) {
+        Some(true)
+    } else if missing.contains(&status) {
+        Some(false)
+    } else {
+        None
     }
 }
 
+pub(super) async fn check_status(
+    url: &str,
+    method: reqwest::Method,
+    accept: Option<&str>,
+    found: &[u16],
+    missing: &[u16],
+) -> Result<Option<bool>> {
+    let status = status_code(url, method, accept).await?;
+    Ok(classify_status(status, found, missing))
+}
+
+pub(super) async fn fetch_metadata(
+    url: &str,
+    accept: Option<&str>,
+    package: &str,
+    extract_license: fn(&serde_json::Value) -> Option<String>,
+) -> Result<Option<Metadata>> {
+    let Some(data) = fetch_json(url, accept).await? else {
+        return Ok(None);
+    };
+    Ok(Some(Metadata {
+        name: package.to_string(),
+        license: extract_license(&data),
+    }))
+}
+
+pub fn set_cache_ttl(secs: u64) {
+    CACHE_TTL.store(secs, Ordering::Relaxed);
+}
+
 pub fn get_cache_ttl() -> u64 {
-    CACHE_TTL.lock().map(|t| *t).unwrap_or(3600)
+    CACHE_TTL.load(Ordering::Relaxed)
 }
 
 pub fn init_cache_from_config(config: &crate::config::Config) {
@@ -155,7 +193,7 @@ pub async fn check_package_async(registry: &str, package: &str) -> Result<Option
     let ttl_secs = get_cache_ttl();
     {
         let cache = CACHE.read().unwrap_or_else(|e| {
-            eprintln!("Warning: cache RwLock poisoned");
+            tracing::warn!("registry cache RwLock poisoned; recovering");
             e.into_inner()
         });
         if let Some((result, time)) = cache.get(&cache_key) {
@@ -193,7 +231,7 @@ pub async fn check_package_async(registry: &str, package: &str) -> Result<Option
 
     {
         let mut cache = CACHE.write().unwrap_or_else(|e| {
-            eprintln!("Warning: cache RwLock poisoned");
+            tracing::warn!("registry cache RwLock poisoned; recovering");
             e.into_inner()
         });
         match &result {
@@ -393,7 +431,7 @@ async fn check_osv_async(ecosystem: &str, package: &str) -> Result<Vec<OsvVulner
     let ttl_secs = get_cache_ttl();
     {
         let cache = OSV_CACHE.read().unwrap_or_else(|e| {
-            eprintln!("Warning: OSV cache RwLock poisoned");
+            tracing::warn!("OSV cache RwLock poisoned; recovering");
             e.into_inner()
         });
         if let Some((vulns, time)) = cache.get(&cache_key) {
@@ -446,7 +484,7 @@ async fn check_osv_async(ecosystem: &str, package: &str) -> Result<Vec<OsvVulner
 
     {
         let mut cache = OSV_CACHE.write().unwrap_or_else(|e| {
-            eprintln!("Warning: OSV cache RwLock poisoned");
+            tracing::warn!("OSV cache RwLock poisoned; recovering");
             e.into_inner()
         });
         cache.insert(cache_key, (vulns.clone(), Instant::now()));
@@ -456,15 +494,29 @@ async fn check_osv_async(ecosystem: &str, package: &str) -> Result<Vec<OsvVulner
     Ok(vulns)
 }
 
+fn extract_severity(value: &serde_json::Value) -> String {
+    value
+        .get("database_specific")
+        .and_then(|data| data.get("severity"))
+        .and_then(|severity| severity.as_str())
+        .or_else(|| {
+            value["affected"].as_array().and_then(|affected| {
+                affected.iter().find_map(|entry| {
+                    entry
+                        .get("ecosystem_specific")
+                        .and_then(|data| data.get("severity"))
+                        .and_then(|severity| severity.as_str())
+                })
+            })
+        })
+        .unwrap_or("UNKNOWN")
+        .to_string()
+}
+
 fn extract_osv_vuln(v: &serde_json::Value) -> Option<OsvVulnerability> {
     let id = v["id"].as_str()?.to_string();
     let summary = v["summary"].as_str().unwrap_or("").to_string();
-    let severity = v
-        .get("database_specific")
-        .and_then(|d| d.get("severity"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("UNKNOWN")
-        .to_string();
+    let severity = extract_severity(v);
     let fixed = v["affected"]
         .as_array()
         .and_then(|arr| arr.first())
@@ -496,6 +548,63 @@ pub(crate) fn seed_osv_cache(ecosystem: &str, package: &str, vulns: Vec<OsvVulne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_classification_preserves_registry_semantics() {
+        assert_eq!(
+            classify_status(200, &[200, 301, 302], &[404, 410]),
+            Some(true)
+        );
+        assert_eq!(
+            classify_status(302, &[200, 301, 302], &[404, 410]),
+            Some(true)
+        );
+        assert_eq!(
+            classify_status(404, &[200, 301, 302], &[404, 410]),
+            Some(false)
+        );
+        assert_eq!(classify_status(410, &[200], &[404]), None);
+        assert_eq!(classify_status(503, &[200], &[404]), None);
+    }
+
+    #[test]
+    fn registry_urls_encode_package_path_components() {
+        assert_eq!(
+            registry_url("https://registry.npmjs.org", "@scope/package"),
+            "https://registry.npmjs.org/%40scope%2Fpackage"
+        );
+        assert_eq!(
+            registry_url("https://pypi.org/pypi", "package?x=1"),
+            "https://pypi.org/pypi/package%3Fx%3D1"
+        );
+    }
+
+    #[test]
+    fn registry_metadata_extractors_handle_documented_shapes() {
+        let npm = serde_json::json!({ "license": { "type": "MIT" } });
+        let pypi = serde_json::json!({ "info": { "license": "Apache-2.0" } });
+        let crates = serde_json::json!({ "crate": { "license": "BSD-3-Clause" } });
+
+        assert_eq!(npm::extract_license(&npm).as_deref(), Some("MIT"));
+        assert_eq!(pypi::extract_license(&pypi).as_deref(), Some("Apache-2.0"));
+        assert_eq!(
+            crates_io::extract_license(&crates).as_deref(),
+            Some("BSD-3-Clause")
+        );
+        assert_eq!(crates_io::extract_license(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn osv_severity_uses_database_and_ecosystem_fields() {
+        let database = serde_json::json!({ "database_specific": { "severity": "HIGH" } });
+        let ecosystem = serde_json::json!({
+            "affected": [{ "ecosystem_specific": { "severity": "MODERATE" } }]
+        });
+
+        assert_eq!(extract_severity(&database), "HIGH");
+        assert_eq!(extract_severity(&ecosystem), "MODERATE");
+        assert_eq!(extract_severity(&serde_json::json!({})), "UNKNOWN");
+    }
 
     #[test]
     fn test_cache_ttl_default() {

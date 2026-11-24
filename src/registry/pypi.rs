@@ -1,20 +1,15 @@
 const URL: &str = "https://pypi.org/pypi";
 
 pub async fn check_async(package: &str) -> anyhow::Result<Option<bool>> {
-    match super::status_code(&format!("{URL}/{package}/json"), reqwest::Method::GET, None).await? {
-        200 => Ok(Some(true)),
-        404 => Ok(Some(false)),
-        _ => Ok(None),
-    }
+    let url = format!("{}/json", super::registry_url(URL, package));
+    super::check_status(&url, reqwest::Method::GET, None, &[200], &[404]).await
+}
+
+pub(super) fn extract_license(data: &serde_json::Value) -> Option<String> {
+    data["info"]["license"].as_str().map(str::to_string)
 }
 
 pub async fn metadata_async(package: &str) -> anyhow::Result<Option<super::Metadata>> {
-    let Some(data) = super::fetch_json(&format!("{URL}/{package}/json"), None).await? else {
-        return Ok(None);
-    };
-    let license = data["info"]["license"].as_str().map(str::to_string);
-    Ok(Some(super::Metadata {
-        name: package.to_string(),
-        license,
-    }))
+    let url = format!("{}/json", super::registry_url(URL, package));
+    super::fetch_metadata(&url, None, package, extract_license).await
 }
