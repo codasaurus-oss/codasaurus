@@ -2,7 +2,8 @@
 //! the model's reply deserializes into.
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmReviewOutput {
@@ -41,7 +42,13 @@ fn default_confidence() -> String {
     "medium".to_string()
 }
 
+static REVIEW_SCHEMA: LazyLock<Value> = LazyLock::new(build_review_schema);
+
 pub fn review_schema() -> serde_json::Value {
+    REVIEW_SCHEMA.clone()
+}
+
+fn build_review_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "properties": {

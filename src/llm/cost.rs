@@ -2,8 +2,8 @@
 
 /// Paths that rarely need LLM review (generated / lock / vendor noise).
 pub fn is_low_signal_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase().replace('\\', "/");
-    let file = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    let lower = path.to_ascii_lowercase();
+    let file = lower.rsplit(['/', '\\']).next().unwrap_or(lower.as_str());
 
     // Lockfiles & package metadata churn
     if matches!(

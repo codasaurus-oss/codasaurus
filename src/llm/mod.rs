@@ -22,7 +22,7 @@ pub use schema::{review_schema, JudgeOutcome, LlmIssue, LlmReplacement, LlmRevie
 use anyhow::{Context, Result};
 use client::{chat_body, chat_text, llm_client, post_chat};
 use prompts::truncate_chars;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Bounded tool-calling round-trips per review. Always terminates: the final
 /// allowed round is sent with `tool_choice: "none"` so a parseable structured
@@ -204,8 +204,7 @@ fn extract_first_fenced_block(text: &str) -> Option<String> {
     let after_open = start + 3;
     let body_start = text[after_open..]
         .find('\n')
-        .map(|i| after_open + i + 1)
-        .unwrap_or(after_open);
+        .map_or(after_open, |index| after_open + index + 1);
     let end_rel = text[body_start..].find("```")?;
     let body = text[body_start..body_start + end_rel].trim();
     if body.is_empty() {
@@ -328,39 +327,46 @@ pub async fn judge_findings(
         max_tokens,
     )
     .await?;
-    parse_judge_verdicts(&text)
+    Ok(parse_judge_verdicts(&text))
 }
 
-fn parse_judge_verdicts(text: &str) -> Result<Vec<JudgeOutcome>> {
+fn parse_judge_verdicts(text: &str) -> Vec<JudgeOutcome> {
     let mut outcomes = Vec::new();
     let value: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
+        Ok(value) => value,
         Err(_) => {
             let Some(start) = text.find('{') else {
-                return Ok(Vec::new());
+                return outcomes;
             };
             let Some(end) = text.rfind('}') else {
-                return Ok(Vec::new());
+                return outcomes;
             };
             match serde_json::from_str(&text[start..=end]) {
-                Ok(v) => v,
-                Err(_) => return Ok(Vec::new()),
+                Ok(value) => value,
+                Err(_) => return outcomes,
             }
         }
     };
-    if let Some(verdicts) = value.get("verdicts").and_then(|v| v.as_array()) {
-        for v in verdicts {
-            let index = v["index"].as_u64().unwrap_or(u64::MAX) as usize;
-            let confidence = v["confidence"].as_u64().unwrap_or(0).min(5) as u8;
-            let rationale = v["rationale"].as_str().unwrap_or("").to_string();
+    if let Some(verdicts) = value.get("verdicts").and_then(Value::as_array) {
+        for verdict in verdicts {
+            let Some(index) = verdict["index"]
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+            else {
+                continue;
+            };
+            let confidence = verdict["confidence"].as_u64().unwrap_or(0).min(5) as u8;
             outcomes.push(JudgeOutcome {
                 index,
                 confidence,
-                rationale,
+                rationale: verdict["rationale"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
             });
         }
     }
-    Ok(outcomes)
+    outcomes
 }
 
 #[cfg(test)]
@@ -371,7 +377,7 @@ mod tests {
     #[test]
     fn parses_judge_verdicts_json() {
         let raw = r#"{"verdicts":[{"index":0,"confidence":4,"rationale":"real vuln"},{"index":2,"confidence":1,"rationale":"noise"}]}"#;
-        let v = parse_judge_verdicts(raw).unwrap();
+        let v = parse_judge_verdicts(raw);
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].index, 0);
         assert_eq!(v[0].confidence, 4);
@@ -382,7 +388,7 @@ mod tests {
     #[test]
     fn parses_verdicts_wrapped_in_code_fence() {
         let raw = "```json\n{\"verdicts\":[{\"index\":1,\"confidence\":5,\"rationale\":\"certain\"}]}\n```";
-        let v = parse_judge_verdicts(raw).unwrap();
+        let v = parse_judge_verdicts(raw);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].confidence, 5);
     }
@@ -408,13 +414,13 @@ mod tests {
     #[test]
     fn clamps_confidence_to_5() {
         let raw = r#"{"verdicts":[{"index":0,"confidence":99,"rationale":"overconfident"}]}"#;
-        let v = parse_judge_verdicts(raw).unwrap();
+        let v = parse_judge_verdicts(raw);
         assert_eq!(v[0].confidence, 5);
     }
 
     #[test]
     fn garbage_input_yields_empty() {
-        assert!(parse_judge_verdicts("not json at all").unwrap().is_empty());
+        assert!(parse_judge_verdicts("not json at all").is_empty());
     }
 
     #[tokio::test]
