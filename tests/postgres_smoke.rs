@@ -52,6 +52,54 @@ async fn queue_recovers_null_leases_and_reports_lost_leases() {
 }
 
 #[tokio::test]
+async fn schedule_review_repends_finished_job() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let _ = sqlx::query("DELETE FROM review_jobs")
+        .execute(pool.as_pg())
+        .await;
+
+    let repo = format!("acme/schedule-{}", uuid::Uuid::new_v4().simple());
+    let id = queue::enqueue(&pool, &repo, 5, "sched", None, "opened")
+        .await
+        .expect("enqueue");
+    let job = queue::claim_next(&pool, 600)
+        .await
+        .expect("claim")
+        .expect("job");
+    assert!(queue::mark_done(&pool, id, &job.lease_id)
+        .await
+        .expect("done"));
+
+    let when = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let scheduled = queue::schedule_review(&pool, &repo, 5, "sched", when, 7)
+        .await
+        .expect("schedule");
+    assert_eq!(scheduled, id);
+
+    let (status, priority): (String, i16) =
+        sqlx::query_as("SELECT status, priority FROM review_jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool.as_pg())
+            .await
+            .expect("row");
+    assert_eq!(status, "pending");
+    assert_eq!(priority, 7);
+    assert!(
+        queue::claim_next(&pool, 600)
+            .await
+            .expect("claim")
+            .is_none(),
+        "scheduled job must not run before run_at"
+    );
+
+    let _ = sqlx::query("DELETE FROM review_jobs WHERE repo = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await;
+}
+
+#[tokio::test]
 async fn migration_v27_adds_lease_and_scheduling_columns() {
     let _guard = TEST_SERIAL.lock().await;
     let pool = db::create_pool(&pg_url())
