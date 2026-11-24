@@ -9,7 +9,7 @@ mod reviewers;
 
 pub use github::fetch_pull_request;
 pub(crate) use github::{
-    fetch_pr_files, github_api_headers, github_get, next_github_link, post_or_update_comment,
-    unified_diff_from_files, GITHUB_CLIENT,
+    fetch_pr_files, github_api_headers, github_get, github_post, next_github_link,
+    post_or_update_comment, unified_diff_from_files, GITHUB_CLIENT,
 };
 pub use pipeline::{review_pr_with_options, ReviewOptions};

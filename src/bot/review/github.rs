@@ -1,6 +1,7 @@
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use crate::state::ReviewState;
 use anyhow::Result;
+use reqwest::Method;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -77,11 +78,38 @@ pub(crate) async fn github_get<T: serde::de::DeserializeOwned>(
     op: &'static str,
     retry: &RetryConfig,
 ) -> Result<T> {
+    github_request(Method::GET, client, headers, url, None, op, retry).await
+}
+
+/// POST a JSON body to a GitHub API resource with the shared retry policy.
+/// `body` is `None` for endpoints like the installation-token exchange that
+/// take no parameters.
+pub(crate) async fn github_post<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
+    url: &str,
+    body: Option<&serde_json::Value>,
+    op: &'static str,
+    retry: &RetryConfig,
+) -> Result<T> {
+    github_request(Method::POST, client, headers, url, body, op, retry).await
+}
+
+async fn github_request<T: serde::de::DeserializeOwned>(
+    method: Method,
+    client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
+    url: &str,
+    body: Option<&serde_json::Value>,
+    op: &'static str,
+    retry: &RetryConfig,
+) -> Result<T> {
     retry_async(retry, op, &is_reqwest_error_retryable, || async {
-        client
-            .get(url)
-            .headers(headers.clone())
-            .send()
+        let mut req = client.request(method.clone(), url).headers(headers.clone());
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        req.send()
             .await?
             .error_for_status()?
             .json()

@@ -20,11 +20,44 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/", get(stats))
 }
 
+/// One row of the recent-activity panel.
+#[derive(sqlx::FromRow)]
+struct RecentReview {
+    id: i64,
+    repo_name: String,
+    pr_number: i64,
+    pr_title: Option<String>,
+    status: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct DayCount {
+    day: chrono::NaiveDate,
+    count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct DetectorCount {
+    detector: String,
+    count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct StatusCount {
+    status: String,
+    count: i64,
+}
+
 /// GET /api/stats
 #[utoipa::path(get, path = "/api/stats", tag = "stats", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn stats(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Belt and suspenders: middleware already gates protected routes, but the
+    // handler must stay closed even if served from the unguarded `router()`.
+    super::rbac::require_role(&state.pool, &headers, super::rbac::MinRole::Viewer).await?;
     if let Ok(guard) = STATS_CACHE.lock() {
         if let Some(ref cached) = guard.1 {
             if guard.0.elapsed() < STATS_CACHE_TTL {
@@ -33,30 +66,182 @@ pub(crate) async fn stats(
         }
     }
 
-    let mut core: serde_json::Value = db::reviews::get_stats(&state.pool).await?;
+    // Every rollup below is an independent read — one concurrent wave instead
+    // of ~15 sequential round-trips. Core rollups propagate errors; panels
+    // degrade to empty so one slow table cannot blank the dashboard.
+    let pool = &state.pool;
+    let (
+        core,
+        recent_rows,
+        (),
+        dismissals,
+        tier1,
+        total_findings,
+        reviews_by_day,
+        findings_by_day,
+        findings_by_detector,
+        outcomes_7d,
+        findings_last_7,
+        findings_prev_7,
+        reviews_prev_7,
+        dismissals_prev_7,
+        pass_rate_7d,
+        pass_rate_prev_7d,
+    ) = tokio::join!(
+        db::reviews::get_stats(pool),
+        async {
+            crate::db::db_fetch_all!(
+                pool,
+                RecentReview,
+                "SELECT r.id, COALESCE(repo.full_name, '') AS repo_name, r.pr_number, r.pr_title, r.status, r.created_at
+                 FROM reviews r
+                 LEFT JOIN repos repo ON repo.id = r.repo_id
+                 ORDER BY r.created_at DESC
+                 LIMIT 10"
+            )
+        },
+        async { crate::metrics::refresh_from_db(pool).await },
+        async {
+            crate::db::db_scalar!(pool, i64, "SELECT COUNT(*) FROM dismissed_findings").unwrap_or(0)
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                i64,
+                "SELECT COUNT(*) FROM findings WHERE detector IN ('secrets','vulnerabilities','iac','hallucinated-imports','phantom-deps')
+                 AND review_id IN (SELECT id FROM reviews WHERE created_at >= NOW() - INTERVAL '30 days')"
+            )
+            .unwrap_or(0)
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                i64,
+                "SELECT COUNT(*) FROM findings f
+                 INNER JOIN reviews r ON r.id = f.review_id
+                 WHERE r.created_at >= NOW() - INTERVAL '30 days'"
+            )
+            .unwrap_or(0)
+        },
+        async {
+            crate::db::db_fetch_all!(
+                pool,
+                DayCount,
+                "SELECT (created_at AT TIME ZONE 'UTC')::date AS day, COUNT(*)::bigint AS count
+                 FROM reviews
+                 WHERE created_at >= (NOW() AT TIME ZONE 'UTC')::date - INTERVAL '13 days'
+                 GROUP BY 1
+                 ORDER BY 1 ASC"
+            )
+            .unwrap_or_default()
+        },
+        async {
+            crate::db::db_fetch_all!(
+                pool,
+                DayCount,
+                "SELECT (r.created_at AT TIME ZONE 'UTC')::date AS day, COUNT(*)::bigint AS count
+                 FROM findings f
+                 INNER JOIN reviews r ON r.id = f.review_id
+                 WHERE r.created_at >= (NOW() AT TIME ZONE 'UTC')::date - INTERVAL '13 days'
+                 GROUP BY 1
+                 ORDER BY 1 ASC"
+            )
+            .unwrap_or_default()
+        },
+        async {
+            crate::db::db_fetch_all!(
+                pool,
+                DetectorCount,
+                "SELECT f.detector, COUNT(*)::bigint AS count
+                 FROM findings f
+                 INNER JOIN reviews r ON r.id = f.review_id
+                 WHERE r.created_at >= NOW() - INTERVAL '30 days'
+                 GROUP BY f.detector
+                 ORDER BY count DESC
+                 LIMIT 12"
+            )
+            .unwrap_or_default()
+        },
+        async {
+            crate::db::db_fetch_all!(
+                pool,
+                StatusCount,
+                "SELECT status, COUNT(*)::bigint AS count
+                 FROM reviews
+                 WHERE created_at >= NOW() - INTERVAL '7 days'
+                 GROUP BY status"
+            )
+            .unwrap_or_default()
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                i64,
+                "SELECT COUNT(*) FROM findings f
+                 INNER JOIN reviews r ON r.id = f.review_id
+                 WHERE r.created_at >= NOW() - INTERVAL '7 days'"
+            )
+            .unwrap_or(0)
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                i64,
+                "SELECT COUNT(*) FROM findings f
+                 INNER JOIN reviews r ON r.id = f.review_id
+                 WHERE r.created_at >= NOW() - INTERVAL '14 days'
+                   AND r.created_at < NOW() - INTERVAL '7 days'"
+            )
+            .unwrap_or(0)
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                i64,
+                "SELECT COUNT(*) FROM reviews
+                 WHERE created_at >= NOW() - INTERVAL '14 days'
+                   AND created_at < NOW() - INTERVAL '7 days'"
+            )
+            .unwrap_or(0)
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                i64,
+                "SELECT COUNT(*) FROM dismissed_findings
+                 WHERE dismissed_at >= NOW() - INTERVAL '14 days'
+                   AND dismissed_at < NOW() - INTERVAL '7 days'"
+            )
+            .unwrap_or(0)
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                Option<f64>,
+                "SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
+                 FROM reviews
+                 WHERE created_at >= NOW() - INTERVAL '7 days'"
+            )
+            .ok()
+            .flatten()
+        },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                Option<f64>,
+                "SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
+                 FROM reviews
+                 WHERE created_at >= NOW() - INTERVAL '14 days'
+                   AND created_at < NOW() - INTERVAL '7 days'"
+            )
+            .ok()
+            .flatten()
+        },
+    );
+    let mut core: serde_json::Value = core?;
+    let recent_rows: Vec<RecentReview> = recent_rows?;
 
-    // Recent activity: latest 10 reviews with repo full_name
-    #[derive(sqlx::FromRow)]
-    struct RecentReview {
-        id: i64,
-        repo_name: String,
-        pr_number: i64,
-        pr_title: Option<String>,
-        status: String,
-        created_at: chrono::DateTime<chrono::Utc>,
-    }
-
-    let recent_activity = crate::db::db_fetch_all!(
-        &state.pool,
-        RecentReview,
-        "SELECT r.id, COALESCE(repo.full_name, '') AS repo_name, r.pr_number, r.pr_title, r.status, r.created_at
-         FROM reviews r
-         LEFT JOIN repos repo ON repo.id = r.repo_id
-         ORDER BY r.created_at DESC
-         LIMIT 10"
-    )?;
-
-    let activity: Vec<serde_json::Value> = recent_activity
+    let activity: Vec<serde_json::Value> = recent_rows
         .into_iter()
         .map(|rev| {
             json!({
@@ -75,25 +260,6 @@ pub(crate) async fn stats(
     }
 
     // Trust panel: FP proxy + accept rate from dismissals vs Tier-1 findings.
-    crate::metrics::refresh_from_db(&state.pool).await;
-    let dismissals =
-        crate::db::db_scalar!(&state.pool, i64, "SELECT COUNT(*) FROM dismissed_findings")
-            .unwrap_or(0);
-    let tier1 = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM findings WHERE detector IN ('secrets','vulnerabilities','iac','hallucinated-imports','phantom-deps')
-         AND review_id IN (SELECT id FROM reviews WHERE created_at >= NOW() - INTERVAL '30 days')"
-    )
-    .unwrap_or(0);
-    let total_findings = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM findings f
-         INNER JOIN reviews r ON r.id = f.review_id
-         WHERE r.created_at >= NOW() - INTERVAL '30 days'"
-    )
-    .unwrap_or(0);
     let fp_proxy = if tier1 == 0 {
         0.0
     } else {
@@ -131,124 +297,7 @@ pub(crate) async fn stats(
     }
 
     // Team analytics: daily series, detector hits, weekly digest + prior-week deltas.
-    #[derive(sqlx::FromRow)]
-    struct DayCount {
-        day: chrono::NaiveDate,
-        count: i64,
-    }
-    let reviews_by_day = crate::db::db_fetch_all!(
-        &state.pool,
-        DayCount,
-        "SELECT (created_at AT TIME ZONE 'UTC')::date AS day, COUNT(*)::bigint AS count
-         FROM reviews
-         WHERE created_at >= (NOW() AT TIME ZONE 'UTC')::date - INTERVAL '13 days'
-         GROUP BY 1
-         ORDER BY 1 ASC"
-    )
-    .unwrap_or_default();
-
-    let findings_by_day = crate::db::db_fetch_all!(
-        &state.pool,
-        DayCount,
-        "SELECT (r.created_at AT TIME ZONE 'UTC')::date AS day, COUNT(*)::bigint AS count
-         FROM findings f
-         INNER JOIN reviews r ON r.id = f.review_id
-         WHERE r.created_at >= (NOW() AT TIME ZONE 'UTC')::date - INTERVAL '13 days'
-         GROUP BY 1
-         ORDER BY 1 ASC"
-    )
-    .unwrap_or_default();
-
-    #[derive(sqlx::FromRow)]
-    struct DetectorCount {
-        detector: String,
-        count: i64,
-    }
-    let findings_by_detector = crate::db::db_fetch_all!(
-        &state.pool,
-        DetectorCount,
-        "SELECT f.detector, COUNT(*)::bigint AS count
-         FROM findings f
-         INNER JOIN reviews r ON r.id = f.review_id
-         WHERE r.created_at >= NOW() - INTERVAL '30 days'
-         GROUP BY f.detector
-         ORDER BY count DESC
-         LIMIT 12"
-    )
-    .unwrap_or_default();
-
-    #[derive(sqlx::FromRow)]
-    struct StatusCount {
-        status: String,
-        count: i64,
-    }
-    let outcomes_7d = crate::db::db_fetch_all!(
-        &state.pool,
-        StatusCount,
-        "SELECT status, COUNT(*)::bigint AS count
-         FROM reviews
-         WHERE created_at >= NOW() - INTERVAL '7 days'
-         GROUP BY status"
-    )
-    .unwrap_or_default();
-
-    let findings_last_7: i64 = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM findings f
-         INNER JOIN reviews r ON r.id = f.review_id
-         WHERE r.created_at >= NOW() - INTERVAL '7 days'"
-    )
-    .unwrap_or(0);
-
-    let findings_prev_7: i64 = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM findings f
-         INNER JOIN reviews r ON r.id = f.review_id
-         WHERE r.created_at >= NOW() - INTERVAL '14 days'
-           AND r.created_at < NOW() - INTERVAL '7 days'"
-    )
-    .unwrap_or(0);
-
-    let reviews_prev_7: i64 = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM reviews
-         WHERE created_at >= NOW() - INTERVAL '14 days'
-           AND created_at < NOW() - INTERVAL '7 days'"
-    )
-    .unwrap_or(0);
-
-    let dismissals_prev_7: i64 = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM dismissed_findings
-         WHERE dismissed_at >= NOW() - INTERVAL '14 days'
-           AND dismissed_at < NOW() - INTERVAL '7 days'"
-    )
-    .unwrap_or(0);
-
-    let pass_rate_7d: Option<f64> = crate::db::db_scalar!(
-        &state.pool,
-        Option<f64>,
-        "SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
-         FROM reviews
-         WHERE created_at >= NOW() - INTERVAL '7 days'"
-    )
-    .ok()
-    .flatten();
-
-    let pass_rate_prev_7d: Option<f64> = crate::db::db_scalar!(
-        &state.pool,
-        Option<f64>,
-        "SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
-         FROM reviews
-         WHERE created_at >= NOW() - INTERVAL '14 days'
-           AND created_at < NOW() - INTERVAL '7 days'"
-    )
-    .ok()
-    .flatten();
+    // (All series were fetched in the join! wave above.)
 
     if let Some(obj) = core.as_object_mut() {
         let today = chrono::Utc::now().date_naive();

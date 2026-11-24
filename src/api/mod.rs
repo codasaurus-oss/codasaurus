@@ -28,8 +28,12 @@ use crate::redis::StateStore;
 
 /// Resolve App ID and private key from DB settings, falling back to the environment.
 pub(crate) async fn github_app_credentials(pool: &DbPool) -> Option<(String, String)> {
-    let app_id = crate::db::config::get_config(pool, "github_app_id")
-        .await
+    // Independent lookups — run together instead of two sequential round-trips.
+    let (db_app_id, db_private_key) = tokio::join!(
+        crate::db::config::get_config(pool, "github_app_id"),
+        crate::db::config::get_config(pool, "github_private_key"),
+    );
+    let app_id = db_app_id
         .ok()
         .flatten()
         .filter(|v| !v.trim().is_empty())
@@ -38,8 +42,7 @@ pub(crate) async fn github_app_credentials(pool: &DbPool) -> Option<(String, Str
                 .ok()
                 .filter(|v| !v.trim().is_empty())
         })?;
-    let private_key = crate::db::config::get_config(pool, "github_private_key")
-        .await
+    let private_key = db_private_key
         .ok()
         .flatten()
         .filter(|k| !k.trim().is_empty())

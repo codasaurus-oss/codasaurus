@@ -196,19 +196,20 @@ pub(crate) async fn login(
         .map_err(|_| ApiError::unauthorized("Invalid email or password"))?
         .ok_or_else(|| ApiError::unauthorized("Invalid email or password"))?;
 
-    let cookie = if let Ok(token) = db::sessions::create_session(&state.pool, &user.email).await {
-        db::audit::log_event(
-            &state.pool,
-            "user.login",
-            Some(&user.email),
-            Some("user"),
-            None,
-        )
-        .await;
-        set_cookie(&token)
-    } else {
-        clear_cookie()
-    };
+    // A session row is the login — failing to create one must fail the
+    // request, not return 200 with a cleared cookie that looks logged out.
+    let token = db::sessions::create_session(&state.pool, &user.email)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    db::audit::log_event(
+        &state.pool,
+        "user.login",
+        Some(&user.email),
+        Some("user"),
+        None,
+    )
+    .await;
+    let cookie = set_cookie(&token);
 
     Ok((
         [(header::SET_COOKIE, cookie)],
@@ -278,7 +279,8 @@ pub(crate) async fn logout(
     )
 }
 
-async fn oidc_status() -> Json<serde_json::Value> {
+#[utoipa::path(get, path = "/api/auth/oidc/status", tag = "auth", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn oidc_status() -> Json<serde_json::Value> {
     Json(json!({ "enabled": crate::oidc::OidcConfig::enabled() }))
 }
 
@@ -287,7 +289,10 @@ fn oidc_login_error(err: impl std::fmt::Display) -> ApiError {
     ApiError::bad_request("Unable to start sign-in")
 }
 
-async fn oidc_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+#[utoipa::path(get, path = "/api/auth/oidc/login", tag = "auth", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn oidc_login(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
     let cfg = crate::oidc::OidcConfig::from_env()
         .ok_or_else(|| ApiError::bad_request("OIDC is not configured"))?;
     let (url, _state) = crate::oidc::authorization_url(&cfg, &state.redis)
@@ -297,13 +302,14 @@ async fn oidc_login(State(state): State<AppState>) -> Result<impl IntoResponse, 
 }
 
 #[derive(Deserialize)]
-struct OidcCallbackParams {
+pub(crate) struct OidcCallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
 }
 
-async fn oidc_callback(
+#[utoipa::path(get, path = "/api/auth/oidc/callback", tag = "auth", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn oidc_callback(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<OidcCallbackParams>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -328,20 +334,20 @@ async fn oidc_callback(
     let existing = db::users::get_user_by_email(&state.pool, &email)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let user = if let Some(u) = existing {
-        u
-    } else {
+    // The user row is only needed for its side effect (create on first OIDC
+    // sign-in); the session below keys off the verified email.
+    if existing.is_none() {
         match db::invites::accept_oidc(&state.pool, &email)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
         {
-            Some(u) => u,
+            Some(_) => {}
             None => {
                 let open_join = crate::util::env_flag("OIDC_ALLOW_OPEN_JOIN");
                 if open_join {
                     db::users::upsert_oidc_user(&state.pool, &email, "viewer")
                         .await
-                        .map_err(|e| ApiError::internal(e.to_string()))?
+                        .map_err(|e| ApiError::internal(e.to_string()))?;
                 } else {
                     return Err(ApiError::bad_request(
                         "No invite found for this email. Ask an admin for an invite link.",
@@ -349,11 +355,10 @@ async fn oidc_callback(
                 }
             }
         }
-    };
+    }
     let token = db::sessions::create_session(&state.pool, &email)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let _ = &user.role;
     db::audit::log_event(&state.pool, "user.login", Some(&email), Some("user"), None).await;
     let cookie = set_cookie(&token);
     Ok((
@@ -366,7 +371,8 @@ async fn oidc_callback(
 }
 
 /// GET /api/auth/invite/:token
-async fn invite_info(
+#[utoipa::path(get, path = "/api/auth/invite/{token}", tag = "auth", params(("token" = String, Path, description = "Invite token")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn invite_info(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -382,7 +388,8 @@ async fn invite_info(
 }
 
 /// POST /api/auth/invite/:token/accept
-async fn accept_invite(
+#[utoipa::path(post, path = "/api/auth/invite/{token}/accept", tag = "auth", params(("token" = String, Path, description = "Invite token")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn accept_invite(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,

@@ -41,7 +41,9 @@ fn slug_unknown_body() -> serde_json::Value {
 #[utoipa::path(get, path = "/api/github/install-url", tag = "github", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn install_url(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_role(&state.pool, &headers, super::rbac::MinRole::Viewer).await?;
     if let Some(slug) = ensure_slug(&state).await {
         return Ok(Json(json!({
             "url": format!("https://github.com/apps/{}/installations/new", slug)
@@ -61,7 +63,9 @@ pub(crate) async fn install_url(
 #[utoipa::path(get, path = "/api/github/manage-url", tag = "github", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn manage_url(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_role(&state.pool, &headers, super::rbac::MinRole::Viewer).await?;
     if let Some(slug) = ensure_slug(&state).await {
         let install_id: Option<i64> = crate::db::db_scalar_optional!(
             &state.pool,
@@ -136,7 +140,8 @@ async fn resolve_slug_live(state: &AppState) -> Option<String> {
 
 /// POST /api/github/resolve — re-resolve slug/name from GitHub and persist.
 /// Powers the dashboard "Repair install link" button.
-async fn resolve_slug(
+#[utoipa::path(post, path = "/api/github/resolve", tag = "github", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn resolve_slug(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {

@@ -133,6 +133,39 @@ async fn count_reviews(
     Ok(count)
 }
 
+/// Review row + findings + repo name in one place so the detail, findings,
+/// and SARIF endpoints cannot drift apart on 404s or repo scoping.
+struct ReviewDetail {
+    review: crate::db::models::Review,
+    findings: Vec<crate::db::models::Finding>,
+    repo_full_name: String,
+}
+
+async fn review_detail(
+    pool: &DbPool,
+    review_id: i64,
+    repo_id: i64,
+) -> Result<ReviewDetail, ApiError> {
+    let review = db::reviews::get_review(pool, review_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Review {review_id} not found")))?;
+    let findings = db::reviews::get_findings_for_review(pool, review_id).await?;
+    let repo_full_name: String = crate::db::db_scalar_optional!(
+        pool,
+        String,
+        "SELECT full_name FROM repos WHERE id = ?",
+        repo_id
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    Ok(ReviewDetail {
+        review,
+        findings,
+        repo_full_name,
+    })
+}
+
 /// GET /api/reviews/:id
 #[utoipa::path(get, path = "/api/reviews/{id}", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_review(
@@ -140,21 +173,11 @@ pub(crate) async fn get_review(
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    super::rbac::require_review_read(&state, &headers, id).await?;
-    let review = db::reviews::get_review(&state.pool, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
-
-    let findings = db::reviews::get_findings_for_review(&state.pool, id).await?;
-
-    let repo_full_name: Option<String> = crate::db::db_scalar_optional!(
-        &state.pool,
-        String,
-        "SELECT full_name FROM repos WHERE id = ?",
-        review.repo_id
-    )
-    .ok()
-    .flatten();
+    let (_user, repo_id) = super::rbac::require_review_read(&state, &headers, id).await?;
+    let detail = review_detail(&state.pool, id, repo_id).await?;
+    let review = detail.review;
+    let findings = detail.findings;
+    let repo_full_name = (!detail.repo_full_name.is_empty()).then_some(detail.repo_full_name);
 
     let mut by_severity: std::collections::BTreeMap<String, i64> =
         std::collections::BTreeMap::new();
@@ -231,21 +254,10 @@ pub(crate) async fn get_review_sarif(
     Path(id): Path<i64>,
 ) -> Result<axum::response::Response, ApiError> {
     let (_user, repo_id) = super::rbac::require_review_read(&state, &headers, id).await?;
-    let review = db::reviews::get_review(&state.pool, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
-
-    let findings = db::reviews::get_findings_for_review(&state.pool, id).await?;
-
-    let repo_full_name: String = crate::db::db_scalar_optional!(
-        &state.pool,
-        String,
-        "SELECT full_name FROM repos WHERE id = ?",
-        repo_id
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
+    let detail = review_detail(&state.pool, id, repo_id).await?;
+    let review = detail.review;
+    let findings = detail.findings;
+    let repo_full_name = detail.repo_full_name;
 
     let commit_sha = review.pr_head_sha.clone().unwrap_or_default();
     let sarif =
@@ -260,13 +272,13 @@ pub(crate) async fn get_review_sarif(
 }
 
 /// POST /api/reviews/dismiss — dismiss a finding into the learning store
-async fn dismiss_finding(
+#[utoipa::path(post, path = "/api/reviews/dismiss", tag = "reviews", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn dismiss_finding(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<DismissBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    super::rbac::require_maintainer(&state, &headers).await?;
-    let user = super::rbac::current_user(&state.pool, &headers).await?;
+    let user = super::rbac::require_maintainer(&state, &headers).await?;
     let fp = body.fingerprint.trim();
     if fp.len() < 8 {
         return Err(ApiError::bad_request("fingerprint too short"));
