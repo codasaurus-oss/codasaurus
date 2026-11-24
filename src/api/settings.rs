@@ -221,6 +221,17 @@ fn parse_positive_int(value: &str, key: &str, min: u64, max: u64) -> Result<(), 
     Ok(())
 }
 
+fn parse_nonnegative_int(value: &str, key: &str) -> Result<(), ApiError> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    value
+        .trim()
+        .parse::<usize>()
+        .map(|_| ())
+        .map_err(|_| ApiError::bad_request(format!("{key} must be a non-negative integer")))
+}
+
 fn parse_boolish(value: &str, key: &str) -> Result<(), ApiError> {
     if value.trim().is_empty() {
         return Ok(());
@@ -259,6 +270,7 @@ fn validate_setting(key: &str, value: &str) -> Result<(), ApiError> {
     }
 
     match key {
+        "max_warnings" | "max_blocking" => parse_nonnegative_int(value, key)?,
         "audit_retention_days" => parse_positive_int(value, key, 7, 730)?,
         "queue_workers" => parse_positive_int(value, key, 1, 8)?,
         "max_concurrent_reviews" => parse_positive_int(value, key, 1, 64)?,
@@ -750,6 +762,11 @@ mod tests {
         assert!(validate_setting("review_timeout_secs", "29").is_err());
         assert!(validate_setting("llm_daily_budget_usd", "abc").is_err());
         assert!(validate_setting("llm_daily_budget_usd", "12.5").is_ok());
+
+        assert!(validate_setting("max_warnings", "0").is_ok());
+        assert!(validate_setting("max_warnings", "not-a-number").is_err());
+        assert!(validate_setting("max_blocking", "0").is_ok());
+        assert!(validate_setting("max_blocking", "-1").is_err());
     }
 
     #[test]
