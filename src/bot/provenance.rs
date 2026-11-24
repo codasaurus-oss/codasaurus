@@ -274,8 +274,8 @@ mod tests {
         assert!(kept.is_empty());
     }
 
-    #[test]
-    fn drops_replacement_when_original_not_verbatim() {
+    /// Same unwrap issue for both replacement tests; only the file content differs.
+    fn replacement_issue() -> crate::llm::LlmIssue {
         let mut i = issue(
             "src/a.rs",
             "high",
@@ -287,6 +287,12 @@ mod tests {
             original: "let x = value.unwrap();".into(),
             replacement: "let x = value?;".into(),
         });
+        i
+    }
+
+    #[test]
+    fn drops_replacement_when_original_not_verbatim() {
+        let i = replacement_issue();
         let contents = [("src/a.rs".to_string(), "fn f() { let y = 1; }".to_string())];
         let kept = reverify_llm_issues(&issues_slice(&i), &["src/a.rs".into()], &contents);
         assert_eq!(kept.len(), 1);
@@ -295,17 +301,7 @@ mod tests {
 
     #[test]
     fn keeps_replacement_when_original_matches_verbatim() {
-        let mut i = issue(
-            "src/a.rs",
-            "high",
-            "warning",
-            3,
-            "unwrap on user-controlled option value",
-        );
-        i.replacement = Some(crate::llm::LlmReplacement {
-            original: "let x = value.unwrap();".into(),
-            replacement: "let x = value?;".into(),
-        });
+        let i = replacement_issue();
         let contents = [(
             "src/a.rs".to_string(),
             "fn f() { let x = value.unwrap(); }".to_string(),

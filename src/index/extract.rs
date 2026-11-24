@@ -163,6 +163,24 @@ impl<'a> Collector<'a> {
         true
     }
 
+    /// Record a class plus `extends` edges read from its grammar-specific base field.
+    fn add_class_with_bases(&mut self, name: &str, node: Node, bases_field: &str) -> bool {
+        let qualified = self.add_symbol(name, SYMBOL_CLASS, node);
+        if let Some(bases) = node.child_by_field_name(bases_field) {
+            for child in bases.named_children(&mut bases.walk()) {
+                if let Some(base) = self.text(child) {
+                    self.edges.push(ExtractedEdge {
+                        from_symbol: name.to_string(),
+                        to_symbol: base,
+                        edge_kind: EDGE_EXTENDS.to_string(),
+                    });
+                }
+            }
+        }
+        self.scope.push(qualified);
+        true
+    }
+
     fn walk(&mut self, node: Node) {
         let kind = node.kind();
         let mut pushed = false;
@@ -253,20 +271,7 @@ impl<'a> Collector<'a> {
             }
             "class_definition" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    if let Some(superclasses) = node.child_by_field_name("superclasses") {
-                        for child in superclasses.named_children(&mut superclasses.walk()) {
-                            if let Some(base) = self.text(child) {
-                                self.edges.push(ExtractedEdge {
-                                    from_symbol: name.clone(),
-                                    to_symbol: base,
-                                    edge_kind: EDGE_EXTENDS.to_string(),
-                                });
-                            }
-                        }
-                    }
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_class_with_bases(&name, node, "superclasses");
                 }
             }
             "import_statement" | "import_from_statement" => {
@@ -278,20 +283,7 @@ impl<'a> Collector<'a> {
             // --- JavaScript / TypeScript ---
             "class_declaration" | "interface_declaration" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    if let Some(heritage) = node.child_by_field_name("heritage") {
-                        for child in heritage.named_children(&mut heritage.walk()) {
-                            if let Some(base) = self.text(child) {
-                                self.edges.push(ExtractedEdge {
-                                    from_symbol: name.clone(),
-                                    to_symbol: base,
-                                    edge_kind: EDGE_EXTENDS.to_string(),
-                                });
-                            }
-                        }
-                    }
-                    self.scope.push(qualified);
-                    pushed = true;
+                    pushed = self.add_class_with_bases(&name, node, "heritage");
                 }
             }
             "method_definition" => {

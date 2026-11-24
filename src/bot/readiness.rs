@@ -1,9 +1,10 @@
 //! Merge-readiness score (0-5): hard blockers zero it, weighted soft signals
 //! calibrate it. Fully deterministic and explainable (MergeGuard pattern).
 
+use crate::bot::review::github_get;
 use crate::config::ReadinessConfig;
 use crate::detectors::Finding;
-use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
+use crate::retry::RetryConfig;
 
 pub struct ReadinessSignal {
     pub name: &'static str,
@@ -179,84 +180,55 @@ async fn fetch_github_state(
         let url = format!(
             "https://api.github.com/repos/{repo}/commits/{head_sha}/check-runs?per_page=20"
         );
-        if let Ok(resp) = retry_async(
-            &RetryConfig::quick(),
+        if let Ok(v) = github_get::<serde_json::Value>(
+            client,
+            headers,
+            &url,
             "readiness_check_runs",
-            &is_reqwest_error_retryable,
-            || async {
-                client
-                    .get(&url)
-                    .headers(headers.clone())
-                    .header("User-Agent", crate::bot::USER_AGENT)
-                    .header("Accept", "application/vnd.github+json")
-                    .send()
-                    .await
-                    .map_err(Into::into)
-            },
+            &RetryConfig::quick(),
         )
         .await
         {
-            if resp.status().is_success() {
-                if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    failing_ci = v["check_runs"]
-                        .as_array()
-                        .map(|runs| {
-                            runs.iter().any(|r| {
-                                r["name"].as_str() != Some("Codasaurus")
-                                    && matches!(
-                                        r["conclusion"].as_str(),
-                                        Some(
-                                            "failure"
-                                                | "action_required"
-                                                | "cancelled"
-                                                | "timed_out"
-                                        )
-                                    )
-                            })
-                        })
-                        .unwrap_or(false);
-                }
-            }
+            failing_ci = v["check_runs"]
+                .as_array()
+                .map(|runs| {
+                    runs.iter().any(|r| {
+                        r["name"].as_str() != Some("Codasaurus")
+                            && matches!(
+                                r["conclusion"].as_str(),
+                                Some("failure" | "action_required" | "cancelled" | "timed_out")
+                            )
+                    })
+                })
+                .unwrap_or(false);
         }
     }
 
     let mut approvals = 0usize;
     let mut changes_requested = false;
     let url = format!("https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews?per_page=100");
-    if let Ok(resp) = retry_async(
-        &RetryConfig::quick(),
+    if let Ok(reviews) = github_get::<Vec<serde_json::Value>>(
+        client,
+        headers,
+        &url,
         "readiness_reviews",
-        &is_reqwest_error_retryable,
-        || async {
-            client
-                .get(&url)
-                .headers(headers.clone())
-                .header("User-Agent", crate::bot::USER_AGENT)
-                .header("Accept", "application/vnd.github+json")
-                .send()
-                .await
-                .map_err(Into::into)
-        },
+        &RetryConfig::quick(),
     )
     .await
     {
-        if resp.status().is_success() {
-            if let Ok(reviews) = resp.json::<Vec<serde_json::Value>>().await {
-                let mut approvers = std::collections::HashSet::new();
-                for r in reviews {
-                    match r["state"].as_str() {
-                        Some("APPROVED") => {
-                            if let Some(login) = r["user"]["login"].as_str() {
-                                approvers.insert(login.to_string());
-                            }
-                        }
-                        Some("CHANGES_REQUESTED") => changes_requested = true,
-                        _ => {}
+        let mut approvers = std::collections::HashSet::new();
+        for r in reviews {
+            match r["state"].as_str() {
+                Some("APPROVED") => {
+                    if let Some(login) = r["user"]["login"].as_str() {
+                        approvers.insert(login.to_string());
                     }
                 }
-                approvals = approvers.len();
+                Some("CHANGES_REQUESTED") => changes_requested = true,
+                _ => {}
             }
         }
+        approvals = approvers.len();
     }
 
     (failing_ci, approvals, changes_requested)

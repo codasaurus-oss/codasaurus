@@ -35,25 +35,59 @@ pub async fn fetch_pull_request(
     let client = GITHUB_CLIENT
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("GitHub API client not available (failed to initialize)"))?;
-    let auth_header = format!("Bearer {token}");
-    let headers = github_api_headers(&auth_header)?;
+    let headers = github_api_headers(&format!("Bearer {token}"))?;
     let url = format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}");
-    retry_async(
-        &RetryConfig::api_default(),
+    github_get(
+        client,
+        &headers,
+        &url,
         "fetch_pull_request",
-        &is_reqwest_error_retryable,
-        || async {
-            client
-                .get(&url)
-                .headers(headers.clone())
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(Into::into)
-        },
+        &RetryConfig::api_default(),
     )
+    .await
+}
+
+/// Concatenate the first `max_files` non-empty patches into one bounded diff.
+pub(crate) fn unified_diff_from_files(
+    files: &[serde_json::Value],
+    max_files: usize,
+    max_bytes: usize,
+) -> String {
+    let mut diff = String::new();
+    for f in files.iter().take(max_files) {
+        let name = f["filename"].as_str().unwrap_or("?");
+        let patch = f["patch"].as_str().unwrap_or("");
+        if patch.is_empty() {
+            continue;
+        }
+        use std::fmt::Write as _;
+        let _ = write!(diff, "--- a/{name}\n+++ b/{name}\n{patch}\n");
+        if diff.len() > max_bytes {
+            break;
+        }
+    }
+    diff
+}
+
+/// GET a GitHub API resource with the shared retry policy.
+pub(crate) async fn github_get<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
+    url: &str,
+    op: &'static str,
+    retry: &RetryConfig,
+) -> Result<T> {
+    retry_async(retry, op, &is_reqwest_error_retryable, || async {
+        client
+            .get(url)
+            .headers(headers.clone())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(Into::into)
+    })
     .await
 }
 
@@ -86,27 +120,18 @@ pub(crate) async fn fetch_pr_files(
     pr_number: i64,
     auth_header: &str,
 ) -> Result<Vec<serde_json::Value>> {
+    let headers = github_api_headers(auth_header)?;
     let mut all_files = Vec::new();
     for page_number in 1..=MAX_PR_FILE_PAGES {
         let url = format!(
             "https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page={PER_PAGE}&page={page_number}"
         );
-        let page: Vec<serde_json::Value> = retry_async(
-            &RetryConfig::api_default(),
+        let page: Vec<serde_json::Value> = github_get(
+            client,
+            &headers,
+            &url,
             "fetch_pr_files_page",
-            &is_reqwest_error_retryable,
-            || async {
-                let headers = github_api_headers(auth_header)?;
-                client
-                    .get(&url)
-                    .headers(headers)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await
-                    .map_err(Into::into)
-            },
+            &RetryConfig::api_default(),
         )
         .await?;
         let is_last_page = page.len() < PER_PAGE;
@@ -142,21 +167,12 @@ pub(crate) async fn posted_inline_fingerprints(
         let url = format!(
             "https://api.github.com/repos/{repo_name}/pulls/{pr_number}/comments?per_page={PER_PAGE}&page={page}"
         );
-        let fetched = retry_async(
-            &RetryConfig::api_default(),
+        let fetched = github_get::<Vec<serde_json::Value>>(
+            client,
+            headers,
+            &url,
             "list_review_comments",
-            &is_reqwest_error_retryable,
-            || async {
-                client
-                    .get(&url)
-                    .headers(headers.clone())
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Vec<serde_json::Value>>()
-                    .await
-                    .map_err(Into::into)
-            },
+            &RetryConfig::api_default(),
         )
         .await;
         let Ok(comments) = fetched else {
@@ -348,22 +364,13 @@ pub(crate) async fn review_exists(
     }
     let url =
         format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews?per_page=100");
-    let reviews: Vec<serde_json::Value> = retry_async(
-        &RetryConfig::quick(),
+    let headers = github_api_headers(auth_header)?;
+    let reviews: Vec<serde_json::Value> = github_get(
+        client,
+        &headers,
+        &url,
         "list_pr_reviews",
-        &is_reqwest_error_retryable,
-        || async {
-            let headers = github_api_headers(auth_header)?;
-            client
-                .get(&url)
-                .headers(headers)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(Into::into)
-        },
+        &RetryConfig::quick(),
     )
     .await?;
     Ok(reviews.iter().any(|r| {

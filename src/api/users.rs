@@ -36,6 +36,20 @@ fn invite_url(raw_token: &str) -> String {
     format!("{}/#/invite/{}", public_base_url(), raw_token)
 }
 
+/// Public user fields; never the password hash.
+fn user_json(u: &db::User) -> serde_json::Value {
+    json!({
+        "id": u.id,
+        "email": u.email,
+        "role": u.role,
+        "is_bootstrap": u.is_bootstrap,
+    })
+}
+
+async fn audit_user(pool: &db::DbPool, event: &str, actor: &str, id: i64) {
+    db::audit::log_event(pool, event, Some(actor), Some("user"), Some(id)).await;
+}
+
 #[derive(Deserialize)]
 pub struct CreateInviteBody {
     pub email: Option<String>,
@@ -79,17 +93,20 @@ pub(crate) async fn list_users(
 }
 
 /// POST /api/users/invites
+/// Owner role check shared by invite and role-change handlers.
+fn require_valid_role(role: &str) -> Result<(), ApiError> {
+    is_valid_role(role)
+        .then_some(())
+        .ok_or_else(|| ApiError::bad_request("role must be owner, maintainer, or viewer"))
+}
+
 async fn create_invite(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<CreateInviteBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = rbac::require_owner(&state, &headers).await?;
-    if !is_valid_role(&body.role) {
-        return Err(ApiError::bad_request(
-            "role must be owner, maintainer, or viewer",
-        ));
-    }
+    require_valid_role(&body.role)?;
     let email = body
         .email
         .as_ref()
@@ -186,11 +203,7 @@ async fn update_user(
     Json(body): Json<UpdateUserBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = rbac::require_owner(&state, &headers).await?;
-    if !is_valid_role(&body.role) {
-        return Err(ApiError::bad_request(
-            "role must be owner, maintainer, or viewer",
-        ));
-    }
+    require_valid_role(&body.role)?;
     let target = db::users::get_user_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("User not found"))?;
@@ -208,20 +221,8 @@ async fn update_user(
         }
     }
     let updated = db::users::update_user_role(&state.pool, id, &body.role).await?;
-    db::audit::log_event(
-        &state.pool,
-        "user.role_change",
-        Some(&actor.email),
-        Some("user"),
-        Some(id),
-    )
-    .await;
-    Ok(Json(json!({
-        "id": updated.id,
-        "email": updated.email,
-        "role": updated.role,
-        "is_bootstrap": updated.is_bootstrap,
-    })))
+    audit_user(&state.pool, "user.role_change", &actor.email, id).await;
+    Ok(Json(user_json(&updated)))
 }
 
 /// DELETE /api/users/:id
@@ -250,14 +251,7 @@ async fn remove_user(
     if !ok {
         return Err(ApiError::not_found("User not found"));
     }
-    db::audit::log_event(
-        &state.pool,
-        "user.remove",
-        Some(&actor.email),
-        Some("user"),
-        Some(id),
-    )
-    .await;
+    audit_user(&state.pool, "user.remove", &actor.email, id).await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -288,20 +282,8 @@ async fn transfer_bootstrap(
         ));
     }
     let updated = db::users::transfer_bootstrap(&state.pool, id).await?;
-    db::audit::log_event(
-        &state.pool,
-        "user.bootstrap_transfer",
-        Some(&actor.email),
-        Some("user"),
-        Some(id),
-    )
-    .await;
-    Ok(Json(json!({
-        "id": updated.id,
-        "email": updated.email,
-        "role": updated.role,
-        "is_bootstrap": updated.is_bootstrap,
-    })))
+    audit_user(&state.pool, "user.bootstrap_transfer", &actor.email, id).await;
+    Ok(Json(user_json(&updated)))
 }
 
 /// POST /api/users/me/password

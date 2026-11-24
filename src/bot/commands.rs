@@ -161,34 +161,52 @@ fn extract_ask_question(body: &str) -> Option<String> {
     None
 }
 
-fn extract_ignore_fingerprint(body: &str) -> Option<String> {
-    for prefix in [
-        "codasaurus ignore ",
-        "codasaurus-bot ignore ",
-        "codasaurus dismiss ",
-        "codasaurus-bot dismiss ",
-        "@codasaurus ignore ",
-        "@codasaurus-bot ignore ",
-        "@codasaurus dismiss ",
-        "@codasaurus-bot dismiss ",
-    ] {
+/// First argument after any of `prefixes`, matched case-insensitively.
+/// `min_len` filters short tokens; `reject_placeholder` skips `<sha>` hints.
+fn extract_arg(
+    body: &str,
+    prefixes: &[&str],
+    min_len: usize,
+    reject_placeholder: bool,
+) -> Option<String> {
+    fn take(rest: &str, min_len: usize, reject_placeholder: bool) -> Option<String> {
+        let arg = rest.split_whitespace().next().unwrap_or("").trim();
+        (arg.len() >= min_len && !(reject_placeholder && arg.starts_with('<')))
+            .then(|| arg.to_string())
+    }
+    for prefix in prefixes {
         if let Some(rest) = body.split(prefix).nth(1) {
-            let fp = rest.split_whitespace().next().unwrap_or("").trim();
-            if !fp.is_empty() && fp.len() >= 8 {
-                return Some(fp.to_string());
+            if let Some(arg) = take(rest, min_len, reject_placeholder) {
+                return Some(arg);
             }
         }
         let lower = body.to_ascii_lowercase();
         let p = prefix.to_ascii_lowercase();
         if let Some(idx) = lower.find(&p) {
-            let rest = &body[idx + prefix.len()..];
-            let fp = rest.split_whitespace().next().unwrap_or("").trim();
-            if !fp.is_empty() && fp.len() >= 8 {
-                return Some(fp.to_string());
+            if let Some(arg) = take(&body[idx + prefix.len()..], min_len, reject_placeholder) {
+                return Some(arg);
             }
         }
     }
     None
+}
+
+fn extract_ignore_fingerprint(body: &str) -> Option<String> {
+    extract_arg(
+        body,
+        &[
+            "codasaurus ignore ",
+            "codasaurus-bot ignore ",
+            "codasaurus dismiss ",
+            "codasaurus-bot dismiss ",
+            "@codasaurus ignore ",
+            "@codasaurus-bot ignore ",
+            "@codasaurus dismiss ",
+            "@codasaurus-bot dismiss ",
+        ],
+        8,
+        false,
+    )
 }
 
 fn extract_rule_id(body: &str) -> Option<String> {
@@ -208,29 +226,17 @@ fn extract_rule_id(body: &str) -> Option<String> {
 }
 
 fn extract_fix_fingerprint(body: &str) -> Option<String> {
-    for prefix in [
-        "@codasaurus fix ",
-        "@codasaurus-bot fix ",
-        "@codasaurus autofix ",
-        "@codasaurus apply_fix ",
-    ] {
-        if let Some(rest) = body.split(prefix).nth(1) {
-            let fp = rest.split_whitespace().next().unwrap_or("").trim();
-            if !fp.is_empty() && fp.len() >= 8 && !fp.starts_with('<') {
-                return Some(fp.to_string());
-            }
-        }
-        let lower = body.to_ascii_lowercase();
-        let p = prefix.to_ascii_lowercase();
-        if let Some(idx) = lower.find(&p) {
-            let rest = &body[idx + prefix.len()..];
-            let fp = rest.split_whitespace().next().unwrap_or("").trim();
-            if !fp.is_empty() && fp.len() >= 8 && !fp.starts_with('<') {
-                return Some(fp.to_string());
-            }
-        }
-    }
-    None
+    extract_arg(
+        body,
+        &[
+            "@codasaurus fix ",
+            "@codasaurus-bot fix ",
+            "@codasaurus autofix ",
+            "@codasaurus apply_fix ",
+        ],
+        8,
+        true,
+    )
 }
 
 pub(crate) async fn handle_bot_command(
@@ -390,21 +396,18 @@ async fn spawn_approve_rule(ctx: WebhookContext, pr_number: i64, id: Option<Stri
 }
 
 async fn spawn_describe(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
-        let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
-        let title = pr["title"].as_str().unwrap_or("");
-        let body = pr["body"].as_str().unwrap_or("");
+    let _ = run_command(timeout_secs, async move {
+        let PrText {
+            token,
+            title,
+            body,
+        } = fetch_pr_text(&ctx, pr_number).await?;
         let pool = bot_db_pool();
         let files_hint = fetch_changed_paths_hint(&token, &ctx.repo_full_name, pr_number)
             .await
             .unwrap_or_default();
         let text = if let Some(llm) = crate::llm::LlmConfig::from_db_or_env(pool).await {
-            match crate::llm::describe_pr(title, body, &files_hint, &llm).await {
+            match crate::llm::describe_pr(&title, &body, &files_hint, &llm).await {
                 Ok(s) => format!(
                     "### Codasaurus describe\n\n{s}\n\n---\n{}",
                     crate::bot::markdown::commands_details()
@@ -470,13 +473,8 @@ async fn spawn_improve(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
         return;
     };
 
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-
     let ctx_fallback = ctx.clone();
-    let result = timeout(Duration::from_secs(timeout_secs), async move {
+    let result = run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
         let title = pr["title"].as_str().unwrap_or("").to_string();
@@ -485,21 +483,7 @@ async fn spawn_improve(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
 
         let files = fetch_pr_files_for(&token, &ctx.repo_full_name, pr_number).await?;
 
-        let mut diff = String::new();
-        for f in files.iter().take(40) {
-            let name = f["filename"].as_str().unwrap_or("?");
-            let patch = f["patch"].as_str().unwrap_or("");
-            if patch.is_empty() {
-                continue;
-            }
-            let _ = std::fmt::Write::write_fmt(
-                &mut diff,
-                format_args!("--- a/{name}\n+++ b/{name}\n{patch}\n"),
-            );
-            if diff.len() > 24_000 {
-                break;
-            }
-        }
+        let diff = crate::bot::review::unified_diff_from_files(&files, 40, 24_000);
         if diff.is_empty() {
             post_issue_comment_kind(
                 &token,
@@ -595,32 +579,24 @@ async fn spawn_improve(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
     .await;
 
     match result {
-        Ok(Ok(())) => tracing::info!(pr = pr_number, "improve completed"),
-        Ok(Err(e)) => {
+        Ok(()) => tracing::info!(pr = pr_number, "improve completed"),
+        Err(CommandError::Failed(e)) => {
             tracing::warn!(pr = pr_number, error = %e, "improve failed; falling back to review");
-            drop(_permit);
             spawn_review(ctx_fallback, pr_number, timeout_secs).await;
         }
-        Err(_) => tracing::error!(pr = pr_number, "improve timed out"),
+        Err(CommandError::TimedOut) => tracing::error!(pr = pr_number, "improve timed out"),
     }
 }
 
 async fn spawn_ask(ctx: WebhookContext, pr_number: i64, question: String, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
-        let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
-        let title = pr["title"].as_str().unwrap_or("");
-        let body = pr["body"].as_str().unwrap_or("");
+    let _ = run_command(timeout_secs, async move {
+        let PrText { token, title, body } = fetch_pr_text(&ctx, pr_number).await?;
         let pool = bot_db_pool();
         let files_hint = fetch_changed_paths_hint(&token, &ctx.repo_full_name, pr_number)
             .await
             .unwrap_or_default();
         let answer = if let Some(llm) = crate::llm::LlmConfig::from_db_or_env(pool).await {
-            crate::llm::ask_about_pr(title, body, &question, &files_hint, &llm)
+            crate::llm::ask_about_pr(&title, &body, &question, &files_hint, &llm)
                 .await
                 .unwrap_or_else(|e| format!("Could not answer: {e}"))
         } else {
@@ -654,6 +630,47 @@ async fn fetch_pr_files_for(
     fetch_pr_files(github_client()?, repo, pr_number, &auth).await
 }
 
+/// Why a command body did not finish successfully.
+enum CommandError {
+    Failed(anyhow::Error),
+    TimedOut,
+}
+
+/// Run a slash-command body under the shared review permit and review timeout.
+/// Releasing the permit before returning lets a fallback command acquire it.
+async fn run_command<F>(timeout_secs: u64, body: F) -> Result<(), CommandError>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
+        tracing::error!("review semaphore closed");
+        return Err(CommandError::Failed(anyhow::anyhow!(
+            "review semaphore closed"
+        )));
+    };
+    timeout(Duration::from_secs(timeout_secs), body)
+        .await
+        .map_err(|_| CommandError::TimedOut)?
+        .map_err(CommandError::Failed)
+}
+
+/// Installation token plus the PR fields LLM command prompts use.
+struct PrText {
+    token: String,
+    title: String,
+    body: String,
+}
+
+async fn fetch_pr_text(ctx: &WebhookContext, pr_number: i64) -> anyhow::Result<PrText> {
+    let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
+    let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
+    Ok(PrText {
+        token,
+        title: pr["title"].as_str().unwrap_or("").to_string(),
+        body: pr["body"].as_str().unwrap_or("").to_string(),
+    })
+}
+
 /// Lightweight changed-file list for ask/describe prompts (no full patches).
 async fn fetch_changed_paths_hint(
     token: &str,
@@ -671,20 +688,17 @@ async fn fetch_changed_paths_hint(
 }
 
 async fn spawn_summarize(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
-        let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
-        let title = pr["title"].as_str().unwrap_or("");
-        let body = pr["body"].as_str().unwrap_or("");
+    let _ = run_command(timeout_secs, async move {
+        let PrText {
+            token,
+            title,
+            body,
+        } = fetch_pr_text(&ctx, pr_number).await?;
         let pool = bot_db_pool();
         let text = if let Some(llm) = crate::llm::LlmConfig::from_db_or_env(pool).await {
             match crate::llm::summarize_pr(
-                title,
-                body,
+                &title,
+                &body,
                 "Write a 3-5 sentence executive summary of this PR. No markdown tables.",
                 &llm,
             )
@@ -711,11 +725,7 @@ async fn spawn_summarize(ctx: WebhookContext, pr_number: i64, timeout_secs: u64)
 }
 
 async fn spawn_labels(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
+    let _ = run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         let client = github_client()?;
         let auth = format!("Bearer {token}");
@@ -753,11 +763,7 @@ async fn spawn_labels(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
 }
 
 async fn spawn_changelog(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
+    let _ = run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
         let title = pr["title"].as_str().unwrap_or("Update").to_string();
@@ -860,15 +866,12 @@ fn heuristic_changelog(title: &str, file_list: &str) -> String {
 }
 
 async fn spawn_add_docs(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
-        let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
-        let title = pr["title"].as_str().unwrap_or("");
-        let body = pr["body"].as_str().unwrap_or("");
+    let _ = run_command(timeout_secs, async move {
+        let PrText {
+            token,
+            title,
+            body,
+        } = fetch_pr_text(&ctx, pr_number).await?;
         let files_hint = fetch_changed_paths_hint(&token, &ctx.repo_full_name, pr_number)
             .await
             .unwrap_or_default();
@@ -878,7 +881,7 @@ async fn spawn_add_docs(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) 
                 "Changed files:\n{files_hint}\n\nSuggest documentation updates (README / docs/) \
                  for public APIs or behavior changes. Output markdown stubs only — do not claim files were committed."
             );
-            match crate::llm::describe_pr(title, body, &ctx_text, &llm).await {
+            match crate::llm::describe_pr(&title, &body, &ctx_text, &llm).await {
                 Ok(s) => format!(
                     "### Codasaurus add_docs\n\n{s}\n\n> Suggestions only — not auto-committed.\n"
                 ),
@@ -926,11 +929,7 @@ async fn spawn_generate_tests(ctx: WebhookContext, pr_number: i64, timeout_secs:
         return;
     };
 
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
+    let _ = run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
         let head_sha = pr["head"]["sha"].as_str().unwrap_or("").to_string();
@@ -1029,11 +1028,7 @@ async fn spawn_generate_tests(ctx: WebhookContext, pr_number: i64, timeout_secs:
 }
 
 async fn spawn_security(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
+    let _ = run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         let files = fetch_pr_files_for(&token, &ctx.repo_full_name, pr_number).await?;
 
@@ -1125,17 +1120,13 @@ async fn spawn_security(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) 
 }
 
 async fn spawn_review(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
     let repo_name = ctx.repo_full_name.clone();
     let lock = pr_lock(&repo_name, pr_number).await;
     let _guard = lock.lock().await;
 
     let head_sha_holder = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
     let head_sha_slot = head_sha_holder.clone();
-    match timeout(Duration::from_secs(timeout_secs), async move {
+    match run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         if pr_number <= 0 || ctx.repo_full_name == "unknown" {
             anyhow::bail!("invalid repository or PR number");
@@ -1160,13 +1151,13 @@ async fn spawn_review(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
     })
     .await
     {
-        Ok(Ok(())) => tracing::info!(pr = pr_number, "comment-triggered review completed"),
-        Ok(Err(e)) => {
+        Ok(()) => tracing::info!(pr = pr_number, "comment-triggered review completed"),
+        Err(CommandError::Failed(e)) => {
             tracing::error!(pr = pr_number, error = %e, "comment-triggered review failed");
             let sha = head_sha_holder.lock().await.clone();
             release_claim_best_effort(&repo_name, pr_number, &sha).await;
         }
-        Err(_) => {
+        Err(CommandError::TimedOut) => {
             tracing::error!(pr = pr_number, "comment-triggered review timed out");
             let sha = head_sha_holder.lock().await.clone();
             release_claim_best_effort(&repo_name, pr_number, &sha).await;
@@ -1290,11 +1281,7 @@ async fn spawn_digest(ctx: WebhookContext, pr_number: i64) {
 }
 
 async fn spawn_impact(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    match timeout(Duration::from_secs(timeout_secs), async move {
+    match run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         let files = fetch_pr_files_for(&token, &ctx.repo_full_name, pr_number)
             .await
@@ -1358,18 +1345,16 @@ async fn spawn_impact(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
     })
     .await
     {
-        Ok(Ok(())) => tracing::info!(pr = pr_number, "impact completed"),
-        Ok(Err(e)) => tracing::error!(pr = pr_number, error = %e, "impact failed"),
-        Err(_) => tracing::error!(pr = pr_number, "impact timed out"),
+        Ok(()) => tracing::info!(pr = pr_number, "impact completed"),
+        Err(CommandError::Failed(e)) => {
+            tracing::error!(pr = pr_number, error = %e, "impact failed")
+        }
+        Err(CommandError::TimedOut) => tracing::error!(pr = pr_number, "impact timed out"),
     }
 }
 
 async fn spawn_similar(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
+    let _ = run_command(timeout_secs, async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
         let client = github_client()?;
         let headers = github_api_headers(&format!("Bearer {token}"))?;
@@ -1427,11 +1412,7 @@ async fn spawn_fix(
     fingerprint: Option<String>,
     timeout_secs: u64,
 ) {
-    let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
-        tracing::error!("review semaphore closed");
-        return;
-    };
-    let _ = timeout(Duration::from_secs(timeout_secs), async move {
+    let _ = run_command(timeout_secs, async move {
         let pool = bot_db_pool();
         let mut allowed = false;
         if let Some(pool) = pool {
