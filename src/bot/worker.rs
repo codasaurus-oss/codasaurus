@@ -103,79 +103,16 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                 match queue::claim_batch(&pool, stale_secs, batch_size).await {
                     Ok(jobs) if !jobs.is_empty() => {
                         idle_ticks = 0;
+                        // Run the batch concurrently: processing sequentially would
+                        // let later jobs' leases expire while earlier ones run.
+                        let mut set = tokio::task::JoinSet::new();
                         for job in jobs {
-                            let heartbeat = bot_db_pool().map(|pool| {
-                                let lease = job.lease_id.clone();
-                                let id = job.id;
-                                tokio::spawn(async move {
-                                    loop {
-                                        tokio::time::sleep(Duration::from_secs(10)).await;
-                                        match queue::heartbeat(pool, id, &lease).await {
-                                            Ok(true) => {}
-                                            Ok(false) => break,
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "queue heartbeat failed")
-                                            }
-                                        }
-                                    }
-                                })
-                            });
-                            let Some(cfg) = current_bot_config() else {
-                                if let Some(task) = heartbeat {
-                                    task.abort();
-                                }
-                                tracing::warn!(
-                                    job_id = job.id,
-                                    "no bot config; requeueing after delay"
-                                );
-                                let _ = queue::mark_failed(
-                                    &pool,
-                                    job.id,
-                                    &job.lease_id,
-                                    "bot config not configured",
-                                    job.attempts,
-                                    job.max_attempts,
-                                )
-                                .await;
-                                tokio::time::sleep(Duration::from_secs(5)).await;
-                                continue;
-                            };
-                            if cfg.app_id.is_empty() || cfg.private_key.is_empty() {
-                                if let Some(task) = heartbeat {
-                                    task.abort();
-                                }
-                                tracing::warn!(
-                                    job_id = job.id,
-                                    "incomplete GitHub App credentials; delaying job"
-                                );
-                                let _ = queue::mark_failed(
-                                    &pool,
-                                    job.id,
-                                    &job.lease_id,
-                                    "github app credentials incomplete",
-                                    job.attempts,
-                                    job.max_attempts,
-                                )
-                                .await;
-                                tokio::time::sleep(Duration::from_secs(10)).await;
-                                continue;
-                            }
-                            process_queued_review(
-                                &cfg,
-                                job.id,
-                                &job.repo,
-                                job.pr_number,
-                                &job.head_sha,
-                                job.installation_id,
-                                &job.action,
-                                job.attempts,
-                                job.max_attempts,
-                                &job.lease_id,
-                                heartbeat,
-                                timeout_secs,
-                            )
-                            .await;
+                            let pool = pool.clone();
+                            set.spawn(
+                                async move { process_claimed_job(pool, job, timeout_secs).await },
+                            );
                         }
+                        while set.join_next().await.is_some() {}
                     }
                     Ok(_) => {
                         idle_ticks = idle_ticks.saturating_add(1);
@@ -196,6 +133,76 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
             }
         });
     }
+}
+
+/// Process one claimed job in its own task, with a lease heartbeat.
+async fn process_claimed_job(pool: crate::db::DbPool, job: queue::ReviewJob, timeout_secs: u64) {
+    let heartbeat = bot_db_pool().map(|pool| {
+        let lease = job.lease_id.clone();
+        let id = job.id;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                match queue::heartbeat(pool, id, &lease).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => tracing::warn!(error = %e, "queue heartbeat failed"),
+                }
+            }
+        })
+    });
+    let Some(cfg) = current_bot_config() else {
+        if let Some(task) = heartbeat {
+            task.abort();
+        }
+        tracing::warn!(job_id = job.id, "no bot config; requeueing after delay");
+        let _ = queue::mark_failed(
+            &pool,
+            job.id,
+            &job.lease_id,
+            "bot config not configured",
+            job.attempts,
+            job.max_attempts,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        return;
+    };
+    if cfg.app_id.is_empty() || cfg.private_key.is_empty() {
+        if let Some(task) = heartbeat {
+            task.abort();
+        }
+        tracing::warn!(
+            job_id = job.id,
+            "incomplete GitHub App credentials; delaying job"
+        );
+        let _ = queue::mark_failed(
+            &pool,
+            job.id,
+            &job.lease_id,
+            "github app credentials incomplete",
+            job.attempts,
+            job.max_attempts,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        return;
+    }
+    process_queued_review(
+        &cfg,
+        job.id,
+        &job.repo,
+        job.pr_number,
+        &job.head_sha,
+        job.installation_id,
+        &job.action,
+        job.attempts,
+        job.max_attempts,
+        &job.lease_id,
+        heartbeat,
+        timeout_secs,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
