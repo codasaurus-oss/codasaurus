@@ -26,18 +26,16 @@ pub async fn promote_dismissal_to_rule(
     if detector.is_empty() || detector == "manual" || detector == "reaction" {
         return Ok(());
     }
-    let maintainer_hit = store
-        .count_maintainer_dismissals_for_detector(detector, repo_full_name)
-        .await?;
-    let distinct_prs = store
-        .count_distinct_prs_for_detector(detector, repo_full_name)
-        .await?;
+    let (maintainer_hit, distinct_prs, active_rule) = tokio::join!(
+        store.count_maintainer_dismissals_for_detector(detector, repo_full_name),
+        store.count_distinct_prs_for_detector(detector, repo_full_name),
+        store.find_approved_rule_for_detector(detector, file, repo_full_name),
+    );
+    let maintainer_hit = maintainer_hit?;
+    let distinct_prs = distinct_prs?;
 
     // Decay: a dismissal that matches an active rule weakens it → archive.
-    if let Some(id) = store
-        .find_approved_rule_for_detector(detector, file, repo_full_name)
-        .await?
-    {
+    if let Some(id) = active_rule? {
         store.archive_rule(&id).await?;
         return Ok(());
     }
@@ -258,17 +256,20 @@ async fn fetch_comment_bodies(
 ///
 /// Matches longest-name-first so `dependency-vulns` isn't shadowed by a shorter
 /// name that happens to be a substring of it.
-fn extract_detector_mention(lower: &str) -> Option<String> {
-    let mut names: Vec<&str> = crate::detectors::DETECTOR_REGISTRY
+static DETECTOR_NAMES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+    let mut names: Vec<&'static str> = crate::detectors::DETECTOR_REGISTRY
         .iter()
-        .map(|d| d.name)
+        .map(|detector| detector.name)
         .collect();
-    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    names.sort_unstable_by_key(|name| std::cmp::Reverse(name.len()));
     names
-        .into_iter()
-        .find(|d| lower.contains(d))
-        .map(str::to_string)
-    // `fingerprint: abc` near false-positive → generic ignore via dismissal path only.
+});
+
+fn extract_detector_mention(lower: &str) -> Option<String> {
+    DETECTOR_NAMES
+        .iter()
+        .find(|name| lower.contains(**name))
+        .map(|name| (*name).to_string())
 }
 
 #[cfg(test)]

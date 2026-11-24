@@ -2,7 +2,7 @@ use crate::db::{db_execute, db_fetch_all, db_scalar, DbPool};
 use crate::util::block_on;
 use anyhow::Result;
 
-use crate::detectors::Finding;
+use crate::detectors::{is_excluded_prepared, prepare_exclude_patterns, Finding, PreparedExclude};
 
 /// Learning scope keys that apply to `repo_full_name`, broadest first:
 /// global (`""`), org (`"owner/"`), repo (`"owner/repo"`).
@@ -25,42 +25,31 @@ pub fn scope_chain(repo_full_name: Option<&str>) -> Vec<String> {
     chain
 }
 
-/// Does `path` fall under a learned rule's `file_pattern`?
-///
-/// The old matcher was a plain `path.contains(pattern)`, which was neither
-/// anchored nor segment-aware: a rule learned for `src/api` also silently
-/// suppressed findings in `vendor/src/api-v2/` — files nobody ever dismissed.
-///
-/// Replacing it outright would have broken every hand-written rule already in
-/// production (`migrations`, `node_modules`, `.generated.ts` all stop matching
-/// under a strictly anchored rule), so this accepts the union of:
-///
-/// 1. a repo-rooted path prefix — `src/api` covers `src/api/auth.rs`, which is
-///    the shape `mine::file_pattern_from_path` writes; and
-/// 2. the same glob syntax as `checks.exclude_patterns`, so hand-written
-///    suffix (`.generated.ts`), star (`*.rs`) and directory (`node_modules/`)
-///    patterns keep working and users only learn one pattern language.
-///
-/// Form 2 is tried both as written and as a directory, so a bare `migrations`
-/// still matches `db/migrations/x.sql` by whole path segment. What it no longer
-/// does is match a *partial* segment, which is the bug above.
-fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+/// Precompile a rule's repo-root prefix and shared exclude-glob forms.
+/// Empty patterns impose no file restriction.
+fn prepare_path_pattern(pattern: &str) -> Vec<PreparedExclude> {
     let trimmed = pattern.trim_end_matches('/');
     if trimmed.is_empty() {
-        return true;
+        return Vec::new();
     }
-    // Form 1: anchored at the repo root, on a segment boundary.
-    if path == trimmed
+    prepare_exclude_patterns(&[pattern.to_string(), format!("{trimmed}/")])
+}
+
+fn path_matches_prepared(path: &str, prepared: &[PreparedExclude]) -> bool {
+    let Some(first) = prepared.first() else {
+        return true;
+    };
+    let trimmed = first.pattern.trim_end_matches('/');
+    path == trimmed
         || path
             .strip_prefix(trimmed)
             .is_some_and(|rest| rest.starts_with('/'))
-    {
-        return true;
-    }
-    // Form 2: the shared exclude-pattern syntax, as written and as a directory.
-    let prepared =
-        crate::detectors::prepare_exclude_patterns(&[pattern.to_string(), format!("{trimmed}/")]);
-    crate::detectors::is_excluded_prepared(path, &prepared)
+        || is_excluded_prepared(path, prepared)
+}
+
+#[cfg(test)]
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    path_matches_prepared(path, &prepare_path_pattern(pattern))
 }
 
 /// Persistent store for feedback learning (shared Postgres pool).
@@ -109,14 +98,17 @@ impl LearningStore {
             is_maintainer
         )?;
         crate::metrics::record_dismissal();
-        let _ = crate::learning::mine::promote_dismissal_to_rule(
+        if let Err(error) = crate::learning::mine::promote_dismissal_to_rule(
             self,
             detector,
             file,
             message,
             repo_full_name,
         )
-        .await;
+        .await
+        {
+            tracing::warn!(error = %error, detector, "learned-rule promotion failed");
+        }
         Ok(())
     }
 
@@ -152,7 +144,7 @@ impl LearningStore {
             i64,
             "SELECT COUNT(DISTINCT pr_number) FROM dismissed_findings
              WHERE detector = ? AND pr_number IS NOT NULL
-               AND COALESCE(repo_full_name, '') = ?",
+               AND repo_full_name = ?",
             detector,
             repo
         )?)
@@ -169,7 +161,7 @@ impl LearningStore {
             i64,
             "SELECT COUNT(*) FROM dismissed_findings
              WHERE detector = ? AND is_maintainer = TRUE
-               AND COALESCE(repo_full_name, '') = ANY(?)",
+               AND repo_full_name = ANY(?)",
             detector,
             &scopes
         )?)
@@ -225,17 +217,8 @@ impl LearningStore {
         Ok(n > 0)
     }
 
-    /// The rule `filter_findings_async` would apply to `file` (decay check).
-    ///
-    /// Decay *archives* the rule it returns, so it must pick the same one the
-    /// filter applied. The path match therefore runs through
-    /// `path_matches_pattern` in Rust rather than being re-expressed in SQL:
-    /// the SQL version silently disagreed with the filter (it had no `*`-glob
-    /// branch, and a `%` or `_` inside a stored pattern became a LIKE wildcard
-    /// that matched everything), so decay could archive a rule that had never
-    /// fired while leaving the one that did suppressing findings.
-    ///
-    /// Ordering matches the filter's precedence for the same reason.
+    /// Return the highest-precedence approved rule matching `file`.
+    /// Path matching stays in Rust so decay and suppression use identical semantics.
     pub async fn find_approved_rule_for_detector(
         &self,
         detector: &str,
@@ -255,10 +238,11 @@ impl LearningStore {
         )?;
         Ok(candidates
             .into_iter()
+            .map(|(id, pattern)| (id, pattern.map(|pattern| prepare_path_pattern(&pattern))))
             .find(|(_, pattern)| {
                 pattern
                     .as_deref()
-                    .is_none_or(|pat| path_matches_pattern(file, pat))
+                    .is_none_or(|prepared| path_matches_prepared(file, prepared))
             })
             .map(|(id, _)| id))
     }
@@ -311,16 +295,8 @@ impl LearningStore {
         Ok(n > 0)
     }
 
-    /// Recent maintainer dismissals in scope, as `(detector, message)`.
-    ///
-    /// Fed to the LLM as "this team has already rejected these" so it stops
-    /// re-raising them. `filter_findings_async` only suppresses *detector*
-    /// findings, so without this the LLM keeps paying tokens to rediscover
-    /// judgement calls the maintainers already made.
-    ///
-    /// Maintainer-only on purpose: anyone with a 👎 can record a dismissal, and
-    /// a non-maintainer must not be able to steer the model away from a class of
-    /// finding. Capped because this goes into every prompt.
+    /// Recent maintainer dismissals in scope, newest distinct detector/message first.
+    /// Non-maintainer reactions must not steer the model.
     pub async fn recent_maintainer_dismissals(
         &self,
         repo_full_name: Option<&str>,
@@ -330,13 +306,16 @@ impl LearningStore {
         Ok(db_fetch_all!(
             &self.pool,
             (String, String),
-            "SELECT DISTINCT ON (detector, message) detector, message
-               FROM dismissed_findings
-              WHERE is_maintainer = TRUE
-                AND message <> ''
-                AND COALESCE(repo_full_name, '') = ANY(?)
-              ORDER BY detector, message
-              LIMIT ?",
+            "SELECT detector, message FROM (
+                SELECT DISTINCT ON (detector, message) detector, message, dismissed_at
+                  FROM dismissed_findings
+                 WHERE is_maintainer = TRUE
+                   AND message <> ''
+                   AND repo_full_name = ANY(?)
+                 ORDER BY detector, message, dismissed_at DESC
+             ) recent
+             ORDER BY dismissed_at DESC
+             LIMIT ?",
             &scopes,
             limit
         )?)
@@ -374,77 +353,75 @@ impl LearningStore {
         // for the lookup, the prefix check, and the final filter.
         let fingerprints: Vec<String> = findings.iter().map(|f| f.fingerprint()).collect();
 
-        // One array-bound query instead of chunked dynamically-built `IN (?,?,…)`.
-        let dismissed_set: std::collections::HashSet<String> = db_fetch_all!(
-            &self.pool,
-            (String,),
-            "SELECT fingerprint FROM dismissed_findings
-             WHERE fingerprint = ANY(?) AND COALESCE(repo_full_name, '') = ANY(?)",
-            &fingerprints,
-            &scopes
-        )?
-        .into_iter()
-        .map(|(fp,)| fp)
-        .collect();
-
         struct Rule {
             id: String,
-            file_pattern: Option<String>,
+            file_pattern: Option<Vec<PreparedExclude>>,
             message_pattern: Option<String>,
             action: String,
         }
-        // Bucket rules by detector: the scan skipped on detector mismatch, so every
-        // finding walked every rule in the scope.
-        //
-        // Precedence is decided here, in SQL, so it can't vary with row order:
-        // scope specificity first, then how much evidence backs the rule, then id
-        // as a final tiebreak.
-        //
-        // Scope length is the specificity measure: each scope is a strict prefix of
-        // the next, and unlike a string sort it does not depend on DB collation,
-        // which may ignore punctuation such as `/` at the primary level.
+        const MIN_PREFIX_LEN: i64 = 12;
+        let max_prefix_len = Finding::FINGERPRINT_LEN as i64 - 1;
+
+        let (dismissed_rows, rule_rows, prefix_rows) = tokio::join!(
+            async {
+                db_fetch_all!(
+                    &self.pool,
+                    (String,),
+                    "SELECT fingerprint FROM dismissed_findings
+                     WHERE fingerprint = ANY(?) AND repo_full_name = ANY(?)",
+                    &fingerprints,
+                    &scopes
+                )
+            },
+            async {
+                db_fetch_all!(
+                    &self.pool,
+                    (String, String, Option<String>, Option<String>, String),
+                    "SELECT id, detector, file_pattern, message_pattern, action FROM learned_rules
+                     WHERE status = 'approved'
+                       AND COALESCE(repo_full_name, '') = ANY(?)
+                     ORDER BY length(COALESCE(repo_full_name, '')) DESC, source_count DESC, id",
+                    &scopes
+                )
+            },
+            async {
+                db_fetch_all!(
+                    &self.pool,
+                    (String,),
+                    "SELECT fingerprint FROM dismissed_findings
+                     WHERE length(fingerprint) BETWEEN ? AND ?
+                       AND repo_full_name = ANY(?)",
+                    MIN_PREFIX_LEN,
+                    max_prefix_len,
+                    &scopes
+                )
+            },
+        );
+
+        let dismissed_set: std::collections::HashSet<String> = dismissed_rows?
+            .into_iter()
+            .map(|(fingerprint,)| fingerprint)
+            .collect();
         let mut rules_by_detector: std::collections::HashMap<String, Vec<Rule>> =
             std::collections::HashMap::new();
-        for (id, detector, file_pattern, message_pattern, action) in db_fetch_all!(
-            &self.pool,
-            (String, String, Option<String>, Option<String>, String),
-            "SELECT id, detector, file_pattern, message_pattern, action FROM learned_rules
-             WHERE status = 'approved'
-               AND COALESCE(repo_full_name, '') = ANY(?)
-             ORDER BY length(COALESCE(repo_full_name, '')) DESC, source_count DESC, id",
-            &scopes
-        )? {
+        for (id, detector, file_pattern, message_pattern, action) in rule_rows? {
             rules_by_detector.entry(detector).or_default().push(Rule {
                 id,
-                file_pattern,
+                file_pattern: file_pattern.map(|pattern: String| prepare_path_pattern(&pattern)),
                 message_pattern,
                 action,
             });
         }
 
-        // Truncated fingerprints stored by hand match any full fingerprint they
-        // prefix. Bucketing by length turns the per-finding scan over every prefix
-        // into one hash lookup per distinct prefix length (a handful, not hundreds).
         let mut prefixes_by_len: std::collections::HashMap<
             usize,
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
-        // Bounds are the fingerprint format, not a tuning knob: below the lower
-        // bound a prefix is short enough to collide across unrelated findings;
-        // at full length it is an exact fingerprint, already handled above.
-        const MIN_PREFIX_LEN: i64 = 12;
-        let max_prefix_len = Finding::FINGERPRINT_LEN as i64 - 1;
-        for (fp,) in db_fetch_all!(
-            &self.pool,
-            (String,),
-            "SELECT fingerprint FROM dismissed_findings
-             WHERE length(fingerprint) BETWEEN ? AND ?
-               AND COALESCE(repo_full_name, '') = ANY(?)",
-            MIN_PREFIX_LEN,
-            max_prefix_len,
-            &scopes
-        )? {
-            prefixes_by_len.entry(fp.len()).or_default().insert(fp);
+        for (fingerprint,) in prefix_rows? {
+            prefixes_by_len
+                .entry(fingerprint.len())
+                .or_default()
+                .insert(fingerprint);
         }
 
         // Which rules actually fired this review. Recorded so a rule that stopped
@@ -475,7 +452,7 @@ impl LearningStore {
                     .filter(|rule| {
                         rule.file_pattern
                             .as_deref()
-                            .is_none_or(|pat| path_matches_pattern(&f.file, pat))
+                            .is_none_or(|prepared| path_matches_prepared(&f.file, prepared))
                             && rule
                                 .message_pattern
                                 .as_deref()
