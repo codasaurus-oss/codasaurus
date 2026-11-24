@@ -68,14 +68,7 @@ fn confidence_rank(conf: &str) -> u8 {
     }
 }
 
-/// Drop LLM issues that fail path / evidence / confidence gates before auto-post.
-///
-/// Keeps false positives out of PR threads:
-/// - unknown path → drop
-/// - `confidence=low` or missing → drop
-/// - empty/short rationale → drop
-/// - non-info without a line citation → drop
-/// - `critical`/`blocking` at medium confidence → downgrade to `warning`
+/// Drop ungrounded LLM issues and downgrade medium-confidence blocking claims.
 pub fn reverify_llm_issues(
     issues: &[crate::llm::LlmIssue],
     known_paths: &[String],

@@ -87,9 +87,7 @@ pub(crate) async fn save_review_to_db(
         })
         .collect();
     if let Err(e) = crate::db::reviews::replace_findings(pool, review.id, &batch).await {
-        // Not fatal to the review that is being posted, but it costs the *next*
-        // one its still-open/newly-fixed delta, so it needs to reach the operator's
-        // log rather than stdout.
+        // The next review loses its still-open/newly-fixed delta if this write fails.
         tracing::error!(
             error = %e,
             findings = batch.len(),
@@ -114,7 +112,7 @@ pub(crate) async fn save_review_to_db(
     )
     .await
     {
-        eprintln!("Warning: failed to update review status: {e}");
+        tracing::error!(error = %e, "failed to update review status");
     }
     crate::db::audit::log_event(
         pool,

@@ -1,8 +1,4 @@
-//! Deterministic high-confidence PR title proposals (no LLM).
-//!
-//! Titles follow common PR / conventional-commit practices:
-//! imperative mood, lowercase description, no trailing punctuation,
-//! single line, ~72 char soft cap (100 hard), grounded in commits/paths.
+//! Deterministic high-confidence PR title proposals grounded in commits and paths.
 
 use std::sync::LazyLock;
 

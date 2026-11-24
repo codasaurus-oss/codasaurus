@@ -68,14 +68,9 @@ fn start_queue_listener() {
     });
 }
 
-/// Background workers that drain durable review_jobs (crash recovery).
-///
-/// Spawns `N` independent claim/process loops. `N` comes from
-/// `CODASAURUS_QUEUE_WORKERS` (1..=8), defaulting to
-/// `REVIEW_PERMITS.available_permits().clamp(1, 4)`.
-///
-/// Credentials are read from `current_bot_config` per job so wizard updates
-/// and key rotations take effect without restarting the process.
+/// Start durable review workers, bounded by `CODASAURUS_QUEUE_WORKERS` or the
+/// available review permits. Credentials are read per job so wizard updates and
+/// key rotations take effect without a restart.
 pub fn start_review_worker(pool: crate::db::DbPool) {
     start_queue_listener();
     let default_n = REVIEW_PERMITS.available_permits().clamp(1, 4);

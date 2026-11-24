@@ -1,13 +1,4 @@
-//! Related PR discovery via path history (budgeted GitHub calls).
-//!
-//! Algorithm (kept within a small GitHub API budget):
-//! 1. **Score** changed paths — prefer source / critical files; deprioritize
-//!    meta churn (`CHANGELOG.md`, docs, lockfiles, root markdown).
-//! 2. **Sample** up to [`MAX_PATHS`] with root diversity (not raw API order).
-//! 3. For each path: recent commits → linked PRs (GitHub's practical approach
-//!    when PR search isn't path-indexed).
-//! 4. **Rank** by overlap strength (how many sampled paths hit the PR), then
-//!    path weight, then newer PR number — not "first path wins."
+//! Related PR discovery through bounded, ranked path-history lookups.
 
 use crate::llm::is_low_signal_path;
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
