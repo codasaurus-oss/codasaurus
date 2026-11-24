@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -9,10 +9,10 @@ fn main() {
     }
 
     let svelte_dir = Path::new("svelte-dashboard");
-    if !svelte_dir.exists() {
-        println!("cargo:warning=svelte-dashboard/ not found, skipping frontend build");
+    let Some(manifest) = frontend_manifest(svelte_dir) else {
+        println!("cargo:warning=svelte-dashboard/package.json not found, skipping frontend build");
         return;
-    }
+    };
 
     let node_check = Command::new("node").arg("--version").output();
     if node_check.is_err() {
@@ -40,9 +40,25 @@ fn main() {
     assert!(status.success(), "Svelte build failed");
 
     println!("cargo:rerun-if-changed=svelte-dashboard/src/");
-    println!("cargo:rerun-if-changed=svelte-dashboard/package.json");
+    println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed=svelte-dashboard/package-lock.json");
 
     let dist = svelte_dir.join("dist");
     assert!(dist.exists(), "Svelte build did not produce dist/ output");
+}
+
+fn frontend_manifest(svelte_dir: &Path) -> Option<PathBuf> {
+    let manifest = svelte_dir.join("package.json");
+    manifest.is_file().then_some(manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_frontend_checkout_has_no_manifest() {
+        let dir = Path::new("/definitely/missing/svelte-dashboard");
+        assert!(frontend_manifest(dir).is_none());
+    }
 }

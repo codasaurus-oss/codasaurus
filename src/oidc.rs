@@ -15,18 +15,32 @@ use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt;
 use std::time::Duration;
 use uuid::Uuid;
 
 use crate::redis::StateStore;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OidcConfig {
     pub issuer: String,
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
     pub scopes: String,
+}
+
+impl fmt::Debug for OidcConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OidcConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 impl OidcConfig {
@@ -81,7 +95,13 @@ struct Discovery {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     id_token: Option<String>,
-    access_token: Option<String>,
+}
+
+fn id_token_from_response(response: TokenResponse) -> Result<String> {
+    response
+        .id_token
+        .filter(|token| !token.is_empty())
+        .context("OIDC token response missing id_token")
 }
 
 /// The claims this code reads. `iss` and `aud` are deliberately absent: they are
@@ -169,10 +189,7 @@ pub async fn exchange_code(cfg: &OidcConfig, code: &str, code_verifier: &str) ->
         .error_for_status()?
         .json::<TokenResponse>()
         .await?;
-    let id_token = resp
-        .id_token
-        .or(resp.access_token)
-        .context("OIDC token response missing id_token")?;
+    let id_token = id_token_from_response(resp)?;
     email_from_verified_jwt(cfg, &id_token, jwks_uri).await
 }
 
@@ -244,4 +261,46 @@ fn email_from_claims(claims: &IdClaims) -> Result<String> {
         }
     }
     bail!("OIDC token has no email claim")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> OidcConfig {
+        OidcConfig {
+            issuer: "https://id.example.test".into(),
+            client_id: "client".into(),
+            client_secret: "super-secret".into(),
+            redirect_uri: "https://app.example.test/callback".into(),
+            scopes: "openid email".into(),
+        }
+    }
+
+    #[test]
+    fn debug_output_redacts_client_secret() {
+        let debug = format!("{:?}", config());
+
+        assert!(!debug.contains("super-secret"), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+    }
+
+    #[test]
+    fn token_exchange_requires_an_id_token() {
+        let response: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"access-only"}"#).unwrap();
+        let error = id_token_from_response(response).unwrap_err();
+
+        assert!(error.to_string().contains("id_token"), "{error}");
+    }
+
+    #[test]
+    fn token_exchange_prefers_the_id_token() {
+        let response: TokenResponse =
+            serde_json::from_str(r#"{"id_token":"id-token","access_token":"access-token"}"#)
+                .unwrap();
+        let token = id_token_from_response(response).unwrap();
+
+        assert_eq!(token, "id-token");
+    }
 }

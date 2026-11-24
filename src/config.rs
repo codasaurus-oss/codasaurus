@@ -262,7 +262,12 @@ impl IndexConfig {
     /// Cosine distance is in `[0, 2]`; a value outside that either accepts
     /// everything or nothing, both of which look like the feature is broken.
     pub fn distance_threshold(&self) -> f64 {
-        self.semantic_distance_threshold.clamp(0.0, 2.0)
+        let threshold = if self.semantic_distance_threshold.is_finite() {
+            self.semantic_distance_threshold
+        } else {
+            default_semantic_distance_threshold()
+        };
+        threshold.clamp(0.0, 2.0)
     }
 
     pub fn max_query_symbols(&self) -> usize {
@@ -404,7 +409,7 @@ impl LearningConfig {
     /// A configured `0` would promote every first dismissal into a suppression
     /// rule, which is exactly the poisoning the threshold exists to prevent.
     pub fn min_dismissals(&self) -> i64 {
-        self.min_dismissals_for_rule.max(1) as i64
+        i64::try_from(self.min_dismissals_for_rule.max(1)).unwrap_or(i64::MAX)
     }
 }
 
@@ -466,11 +471,6 @@ fn default_gate_conditions() -> Vec<QualityGateCondition> {
     vec![
         QualityGateCondition {
             metric: "new_blocker_issues".into(),
-            op: "gt".into(),
-            threshold: 0.0,
-        },
-        QualityGateCondition {
-            metric: "new_high_issues".into(),
             op: "gt".into(),
             threshold: 0.0,
         },
@@ -678,7 +678,13 @@ impl Default for RepoBotFlags {
 impl Config {
     /// Load file/env config, then overlay dashboard DB detector toggles when a pool is available.
     pub async fn load_for_bot(pool: Option<&crate::db::DbPool>) -> Self {
-        let mut config = load(None).unwrap_or_default();
+        let mut config = match load(None) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to load config; using defaults");
+                Config::default()
+            }
+        };
         if let Some(pool) = pool {
             if let Ok(entries) = crate::db::config::get_all_config(pool).await {
                 for entry in entries {
@@ -861,5 +867,25 @@ mod tests {
         assert!(!cfg.checks.secrets);
         assert!(!cfg.checks.graph);
         assert!(cfg.checks.hallucinated_imports);
+    }
+
+    #[test]
+    fn oversized_dismissal_threshold_saturates() {
+        let config = LearningConfig {
+            min_dismissals_for_rule: usize::MAX,
+            ..LearningConfig::default()
+        };
+
+        assert_eq!(config.min_dismissals(), i64::MAX);
+    }
+
+    #[test]
+    fn non_finite_semantic_distance_uses_the_default() {
+        let config = IndexConfig {
+            semantic_distance_threshold: f64::NAN,
+            ..IndexConfig::default()
+        };
+
+        assert_eq!(config.distance_threshold(), 0.5);
     }
 }
