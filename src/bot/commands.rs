@@ -6,10 +6,11 @@ use tokio::time::timeout;
 use super::auth::get_installation_token;
 use super::github_extra;
 use super::markdown;
-use super::review::{fetch_pull_request, review_pr_with_options, ReviewOptions};
+use super::review::{fetch_pr_files, fetch_pull_request, review_pr_with_options, ReviewOptions};
 use super::worker::release_claim_best_effort;
 use super::{
-    bot_db_pool, pr_lock, prune_pr_lock, WebhookContext, WebhookPayload, REVIEW_PERMITS, USER_AGENT,
+    bot_db_pool, github_api_headers, pr_lock, prune_pr_lock, WebhookContext, WebhookPayload,
+    GITHUB_CLIENT, REVIEW_PERMITS, USER_AGENT,
 };
 use crate::learning::store::LearningStore;
 
@@ -275,21 +276,15 @@ async fn post_issue_comment_kind(
 ) -> anyhow::Result<()> {
     if let Some(kind) = kind {
         if let Some(pool) = bot_db_pool() {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()?;
+            let client = github_client()?;
             let state = Some(crate::state::ReviewState::from_pool(pool));
             let auth = format!("Bearer {token}");
-            crate::bot::review::post_or_update_comment(
-                &client, &auth, repo, pr, body, &state, kind,
-            )
-            .await?;
+            crate::bot::review::post_or_update_comment(client, &auth, repo, pr, body, &state, kind)
+                .await?;
             return Ok(());
         }
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = github_client()?;
     let url = format!("https://api.github.com/repos/{repo}/issues/{pr}/comments");
     crate::retry::github_request(
         &crate::retry::RetryConfig::api_default(),
@@ -453,20 +448,10 @@ async fn spawn_describe(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) 
 }
 
 async fn patch_pr_body(token: &str, repo: &str, pr_number: i64, body: &str) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))?,
-    );
-    headers.insert(
-        reqwest::header::ACCEPT,
-        reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
-    );
+    let client = github_client()?;
+    let headers = github_api_headers(&format!("Bearer {token}"))?;
     let _ = crate::bot::github_extra::patch_pull_request(
-        &client,
+        client,
         &headers,
         repo,
         pr_number,
@@ -498,24 +483,7 @@ async fn spawn_improve(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
         let body = pr["body"].as_str().unwrap_or("").to_string();
         let head_ref = pr["head"]["ref"].as_str().unwrap_or("").to_string();
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()?;
-        let auth = format!("Bearer {token}");
-        let files_url = format!(
-            "https://api.github.com/repos/{}/pulls/{}/files?per_page=100",
-            ctx.repo_full_name, pr_number
-        );
-        let files: Vec<serde_json::Value> = client
-            .get(&files_url)
-            .header("Authorization", &auth)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", USER_AGENT)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let files = fetch_pr_files_for(&token, &ctx.repo_full_name, pr_number).await?;
 
         let mut diff = String::new();
         for f in files.iter().take(40) {
@@ -669,28 +637,30 @@ async fn spawn_ask(ctx: WebhookContext, pr_number: i64, question: String, timeou
     .await;
 }
 
+fn github_client() -> anyhow::Result<&'static reqwest::Client> {
+    GITHUB_CLIENT
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("GitHub API client unavailable"))
+}
+
+/// Fetch PR files through the shared client so every command paginates,
+/// retries, and reuses connections like the review pipeline.
+async fn fetch_pr_files_for(
+    token: &str,
+    repo: &str,
+    pr_number: i64,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let auth = format!("Bearer {token}");
+    fetch_pr_files(github_client()?, repo, pr_number, &auth).await
+}
+
 /// Lightweight changed-file list for ask/describe prompts (no full patches).
 async fn fetch_changed_paths_hint(
     token: &str,
     repo: &str,
     pr_number: i64,
 ) -> anyhow::Result<String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let auth = format!("Bearer {token}");
-    let files_url =
-        format!("https://api.github.com/repos/{repo}/pulls/{pr_number}/files?per_page=100");
-    let files: Vec<serde_json::Value> = client
-        .get(&files_url)
-        .header("Authorization", &auth)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", USER_AGENT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let files = fetch_pr_files_for(token, repo, pr_number).await?;
     let mut out = String::new();
     for f in files.iter().take(60) {
         let name = f["filename"].as_str().unwrap_or("?");
@@ -747,39 +717,16 @@ async fn spawn_labels(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
     };
     let _ = timeout(Duration::from_secs(timeout_secs), async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let client = github_client()?;
         let auth = format!("Bearer {token}");
-        let files_url = format!(
-            "https://api.github.com/repos/{}/pulls/{}/files?per_page=100",
-            ctx.repo_full_name, pr_number
-        );
-        let files: Vec<serde_json::Value> = client
-            .get(&files_url)
-            .header("Authorization", &auth)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", USER_AGENT)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let headers = github_api_headers(&auth)?;
+        let files = fetch_pr_files(client, &ctx.repo_full_name, pr_number, &auth).await?;
         let paths: Vec<String> = files
             .iter()
             .filter_map(|f| f["filename"].as_str().map(str::to_string))
             .collect();
         let labels = github_extra::suggest_labels(&paths, &[]);
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            auth.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
-        );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            "application/vnd.github+json".parse().unwrap(),
-        );
-        github_extra::apply_labels(&client, &headers, &ctx.repo_full_name, pr_number, &labels)
+        github_extra::apply_labels(client, &headers, &ctx.repo_full_name, pr_number, &labels)
             .await?;
         let text = format!(
             "### Codasaurus labels\n\n**Applied**\n\n{}\n\n<sub>Suggested from changed paths.</sub>",
@@ -815,23 +762,9 @@ async fn spawn_changelog(ctx: WebhookContext, pr_number: i64, timeout_secs: u64)
         let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
         let title = pr["title"].as_str().unwrap_or("Update").to_string();
         let body = pr["body"].as_str().unwrap_or("").to_string();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let client = github_client()?;
         let auth = format!("Bearer {token}");
-        let files_url = format!(
-            "https://api.github.com/repos/{}/pulls/{}/files?per_page=100",
-            ctx.repo_full_name, pr_number
-        );
-        let files: Vec<serde_json::Value> = client
-            .get(&files_url)
-            .header("Authorization", &auth)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", USER_AGENT)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let files = fetch_pr_files(client, &ctx.repo_full_name, pr_number, &auth)
             .await
             .unwrap_or_default();
         let file_list: String = files
@@ -844,21 +777,10 @@ async fn spawn_changelog(ctx: WebhookContext, pr_number: i64, timeout_secs: u64)
 
         let pool = bot_db_pool();
         let existing = {
-            let mut headers = reqwest::header::HeaderMap::new();
-            if let Ok(v) = reqwest::header::HeaderValue::from_str(&auth) {
-                headers.insert(reqwest::header::AUTHORIZATION, v);
-            }
-            headers.insert(
-                reqwest::header::ACCEPT,
-                reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
-            );
-            headers.insert(
-                reqwest::header::USER_AGENT,
-                reqwest::header::HeaderValue::from_static(USER_AGENT),
-            );
+            let headers = github_api_headers(&auth)?;
             let head = pr["head"]["sha"].as_str().unwrap_or("HEAD");
             match crate::bot::github_files::fetch_first_existing(
-                &client,
+                client,
                 &headers,
                 &ctx.repo_full_name,
                 &["CHANGELOG.md", "CHANGELOG", "docs/CHANGELOG.md"],
@@ -1013,43 +935,14 @@ async fn spawn_generate_tests(ctx: WebhookContext, pr_number: i64, timeout_secs:
         let pr = fetch_pull_request(&token, &ctx.repo_full_name, pr_number).await?;
         let head_sha = pr["head"]["sha"].as_str().unwrap_or("").to_string();
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()?;
-        let auth = format!("Bearer {token}");
-        let files_url = format!(
-            "https://api.github.com/repos/{}/pulls/{}/files?per_page=100",
-            ctx.repo_full_name, pr_number
-        );
-        let files: Vec<serde_json::Value> = client
-            .get(&files_url)
-            .header("Authorization", &auth)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", USER_AGENT)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let files = fetch_pr_files_for(&token, &ctx.repo_full_name, pr_number).await?;
+        let client = github_client()?;
 
         let changed_paths: std::collections::HashSet<String> = files
             .iter()
             .filter_map(|f| f["filename"].as_str().map(str::to_string))
             .collect();
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&auth)?,
-        );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
-        );
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            reqwest::header::HeaderValue::from_static(USER_AGENT),
-        );
+        let headers = github_api_headers(&format!("Bearer {token}"))?;
 
         let mut sections: Vec<String> = Vec::new();
         for f in files.iter().take(20) {
@@ -1078,16 +971,21 @@ async fn spawn_generate_tests(ctx: WebhookContext, pr_number: i64, timeout_secs:
                 continue;
             }
 
-            let Ok(Some(source)) =
-                crate::bot::github_files::fetch_repo_file(&client, &headers, &ctx.repo_full_name, path, &head_sha)
-                    .await
+            let Ok(Some(source)) = crate::bot::github_files::fetch_repo_file(
+                client,
+                &headers,
+                &ctx.repo_full_name,
+                path,
+                &head_sha,
+            )
+            .await
             else {
                 continue;
             };
             let mut existing_test = None;
             for cand in &candidates {
                 if let Ok(Some(t)) = crate::bot::github_files::fetch_repo_file(
-                    &client,
+                    client,
                     &headers,
                     &ctx.repo_full_name,
                     cand,
@@ -1137,24 +1035,7 @@ async fn spawn_security(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) 
     };
     let _ = timeout(Duration::from_secs(timeout_secs), async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()?;
-        let auth = format!("Bearer {token}");
-        let files_url = format!(
-            "https://api.github.com/repos/{}/pulls/{}/files?per_page=100",
-            ctx.repo_full_name, pr_number
-        );
-        let files: Vec<serde_json::Value> = client
-            .get(&files_url)
-            .header("Authorization", &auth)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", USER_AGENT)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let files = fetch_pr_files_for(&token, &ctx.repo_full_name, pr_number).await?;
 
         let mut parsed = Vec::new();
         for f in files.iter().take(80) {
@@ -1263,21 +1144,7 @@ async fn spawn_review(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
         if let Some(sha) = pr_data["head"]["sha"].as_str() {
             *head_sha_slot.lock().await = sha.to_string();
         }
-        let wrapped = WebhookPayload {
-            action: String::new(),
-            pull_request: Some(pr_data),
-            repo: None,
-            installation: None,
-            comment: None,
-            issue: None,
-            reaction: None,
-            thread: None,
-            sender: None,
-            repositories: None,
-            repositories_added: None,
-            after: None,
-            commits: None,
-        };
+        let wrapped = WebhookPayload::for_pull_request(Some(pr_data));
         review_pr_with_options(
             &token,
             &ctx.repo_full_name,
@@ -1313,10 +1180,7 @@ async fn spawn_review(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
 async fn spawn_ignore_comment(ctx: WebhookContext, pr_number: i64, fingerprint: Option<String>) {
     match timeout(Duration::from_secs(120), async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
+        let client = github_client()?;
 
         let body = if let Some(ref fp) = fingerprint {
             if let Some(pool) = bot_db_pool() {
@@ -1432,34 +1296,7 @@ async fn spawn_impact(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
     };
     match timeout(Duration::from_secs(timeout_secs), async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(45))
-            .build()?;
-        let auth = format!("Bearer {token}");
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&auth)?,
-        );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
-        );
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            reqwest::header::HeaderValue::from_static(USER_AGENT),
-        );
-        let url = format!(
-            "https://api.github.com/repos/{}/pulls/{pr_number}/files?per_page=100",
-            ctx.repo_full_name
-        );
-        let files: Vec<serde_json::Value> = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let files = fetch_pr_files_for(&token, &ctx.repo_full_name, pr_number)
             .await
             .unwrap_or_default();
         let changed_paths: Vec<String> = files
@@ -1534,26 +1371,11 @@ async fn spawn_similar(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
     };
     let _ = timeout(Duration::from_secs(timeout_secs), async move {
         let token = get_installation_token(&ctx.cfg, ctx.inst_id).await?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(45))
-            .build()?;
-        let auth = format!("Bearer {token}");
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&auth)?,
-        );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
-        );
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            reqwest::header::HeaderValue::from_static(USER_AGENT),
-        );
+        let client = github_client()?;
+        let headers = github_api_headers(&format!("Bearer {token}"))?;
         let paths = fetch_changed_paths_list(&token, &ctx.repo_full_name, pr_number).await?;
         let related = crate::bot::related_prs::find_related_prs(
-            &client,
+            client,
             &headers,
             &ctx.repo_full_name,
             &paths,
@@ -1592,21 +1414,7 @@ async fn fetch_changed_paths_list(
     repo: &str,
     pr_number: i64,
 ) -> anyhow::Result<Vec<String>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let url = format!("https://api.github.com/repos/{repo}/pulls/{pr_number}/files?per_page=100");
-    let files: Vec<serde_json::Value> = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", USER_AGENT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
-        .unwrap_or_default();
+    let files = fetch_pr_files_for(token, repo, pr_number).await?;
     Ok(files
         .iter()
         .filter_map(|f| f["filename"].as_str().map(str::to_string))
@@ -1649,35 +1457,10 @@ async fn spawn_fix(
             anyhow::bail!("missing head ref");
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()?;
+        let client = github_client()?;
         let auth = format!("Bearer {token}");
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&auth)?,
-        );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
-        );
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            reqwest::header::HeaderValue::from_static(USER_AGENT),
-        );
-
-        let files_url = format!(
-            "https://api.github.com/repos/{}/pulls/{}/files?per_page=100",
-            ctx.repo_full_name, pr_number
-        );
-        let files: Vec<serde_json::Value> = client
-            .get(&files_url)
-            .headers(headers.clone())
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let headers = github_api_headers(&auth)?;
+        let files = fetch_pr_files(client, &ctx.repo_full_name, pr_number, &auth)
             .await
             .unwrap_or_default();
 
@@ -1739,7 +1522,7 @@ async fn spawn_fix(
 
         for (path, findings) in by_file {
             let Some((content, sha)) = crate::bot::github_files::fetch_repo_file_with_sha(
-                &client,
+                client,
                 &headers,
                 &ctx.repo_full_name,
                 &path,
@@ -1772,7 +1555,7 @@ async fn spawn_fix(
                 lines.join("\n")
             };
             crate::bot::github_files::put_repo_file(
-                &client,
+                client,
                 &headers,
                 &ctx.repo_full_name,
                 &path,

@@ -233,21 +233,7 @@ async fn process_queued_review(
     let result = timeout(Duration::from_secs(timeout_secs), async {
         let token = get_installation_token(cfg, inst_id).await?;
         let pr_data = fetch_pull_request(&token, repo, pr_number).await?;
-        let wrapped = WebhookPayload {
-            action: String::new(),
-            pull_request: Some(pr_data),
-            repo: None,
-            installation: None,
-            comment: None,
-            issue: None,
-            reaction: None,
-            thread: None,
-            sender: None,
-            repositories: None,
-            repositories_added: None,
-            after: None,
-            commits: None,
-        };
+        let wrapped = WebhookPayload::for_pull_request(Some(pr_data));
         review_pr_with_options(&token, repo, &wrapped, opts).await
     })
     .await;
@@ -343,21 +329,7 @@ pub(crate) async fn run_webhook_review_inline(
     let sha_for_claim = head_sha.clone();
     match timeout(Duration::from_secs(timeout_secs), async move {
         let token = get_installation_token(&cfg, inst_id).await?;
-        let wrapped = WebhookPayload {
-            action: String::new(),
-            pull_request: pr,
-            repo: None,
-            installation: None,
-            comment: None,
-            issue: None,
-            reaction: None,
-            thread: None,
-            sender: None,
-            repositories: None,
-            repositories_added: None,
-            after: None,
-            commits: None,
-        };
+        let wrapped = WebhookPayload::for_pull_request(pr);
         review_pr_with_options(&token, &repo_full_name, &wrapped, opts).await
     })
     .await

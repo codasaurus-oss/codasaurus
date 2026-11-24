@@ -961,26 +961,13 @@ pub async fn review_pr_with_options(
                     ),
                     "event": "APPROVE",
                 });
-                let review_url =
-                    format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews");
-                match retry_async(
-                    &RetryConfig::api_default(),
+                match post_pr_review(
+                    client,
+                    &auth_header,
+                    repo_name,
+                    pr_number,
+                    &review_body,
                     "post_pr_approve",
-                    &is_reqwest_error_retryable,
-                    || async {
-                        client
-                            .post(&review_url)
-                            .header("Authorization", &auth_header)
-                            .header("Accept", "application/vnd.github+json")
-                            .header(
-                                "User-Agent",
-                                concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-                            )
-                            .json(&review_body)
-                            .send()
-                            .await
-                            .map_err(Into::into)
-                    },
                 )
                 .await
                 {
@@ -1112,8 +1099,6 @@ pub async fn review_pr_with_options(
             "comments": review_comments,
         });
 
-        let review_url =
-            format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews");
         let already_posted = super::github::review_exists(
             client,
             &auth_header,
@@ -1132,24 +1117,13 @@ pub async fn review_pr_with_options(
                 "PR review already exists for commit; skipping duplicate POST"
             );
         } else {
-            let resp = retry_async(
-                &RetryConfig::api_default(),
+            let resp = post_pr_review(
+                client,
+                &auth_header,
+                repo_name,
+                pr_number,
+                &review_body,
                 "post_pr_review",
-                &is_reqwest_error_retryable,
-                || async {
-                    client
-                        .post(&review_url)
-                        .header("Authorization", &auth_header)
-                        .header("Accept", "application/vnd.github+json")
-                        .header(
-                            "User-Agent",
-                            concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-                        )
-                        .json(&review_body)
-                        .send()
-                        .await
-                        .map_err(Into::into)
-                },
             )
             .await?;
 
@@ -1386,6 +1360,38 @@ pub async fn review_pr_with_options(
 
     // Walkthrough already covers open/push; slash `describe` is the LLM path.
     Ok(())
+}
+
+/// POST a pull-request review with the shared retry policy and headers.
+async fn post_pr_review(
+    client: &reqwest::Client,
+    auth_header: &str,
+    repo_name: &str,
+    pr_number: i64,
+    body: &serde_json::Value,
+    op: &'static str,
+) -> Result<reqwest::Response> {
+    let url = format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews");
+    retry_async(
+        &RetryConfig::api_default(),
+        op,
+        &is_reqwest_error_retryable,
+        || async {
+            client
+                .post(&url)
+                .header("Authorization", auth_header)
+                .header("Accept", "application/vnd.github+json")
+                .header(
+                    "User-Agent",
+                    concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
+                )
+                .json(body)
+                .send()
+                .await
+                .map_err(Into::into)
+        },
+    )
+    .await
 }
 
 /// Diff current findings against the previous completed review for this PR.
