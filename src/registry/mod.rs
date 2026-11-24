@@ -6,18 +6,21 @@
 
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::LazyLock;
-use std::sync::RwLock;
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 pub(crate) use crate::util::block_on;
 
 const CACHE_MAX_SIZE: usize = 10_000;
 /// Bound concurrent registry/OSV fan-out when warming caches for large PRs.
 const PREFETCH_CONCURRENCY: usize = 12;
+const MAX_PREFETCH_PACKAGES: usize = 200;
+const OSV_DETAIL_CONCURRENCY: usize = 8;
+const OSV_API_URL: &str = "https://api.osv.dev";
 /// Short TTL for transient failures so we don't stampede npm/OSV on outages.
 const SOFT_FAIL_TTL_SECS: u64 = 120;
 
@@ -309,26 +312,33 @@ pub async fn query_osv_batch(
     if queries.is_empty() || offline_mode() {
         return Ok(vec![Vec::new(); queries.len()]);
     }
+    query_osv_batch_at(OSV_API_URL, queries).await
+}
+
+async fn query_osv_batch_at(
+    base_url: &str,
+    queries: &[(String, String, Option<String>)],
+) -> Result<Vec<Vec<OsvVulnerability>>> {
     let client = async_client()?;
     let body = serde_json::json!({
         "queries": queries.iter().map(|(ecosystem, name, version)| {
-            let mut q = serde_json::json!({
+            let mut query = serde_json::json!({
                 "package": { "name": name, "ecosystem": ecosystem }
             });
-            if let Some(v) = version {
-                q["version"] = serde_json::Value::String(v.clone());
+            if let Some(version) = version {
+                query["version"] = serde_json::Value::String(version.clone());
             }
-            q
+            query
         }).collect::<Vec<_>>()
     });
-
+    let endpoint = format!("{}/v1/querybatch", base_url.trim_end_matches('/'));
     let data: serde_json::Value = retry_async(
         &RetryConfig::api_default(),
         "osv_querybatch",
         &is_reqwest_error_retryable,
         || async {
             client
-                .post("https://api.osv.dev/v1/querybatch")
+                .post(&endpoint)
                 .json(&body)
                 .send()
                 .await?
@@ -340,15 +350,124 @@ pub async fn query_osv_batch(
     )
     .await?;
 
-    let results = data["results"].as_array().cloned().unwrap_or_default();
-    Ok(results
-        .into_iter()
-        .map(|r| {
-            r["vulns"].as_array().map_or_else(Vec::new, |arr| {
-                arr.iter().filter_map(extract_osv_vuln).collect()
-            })
+    let ids_by_query = parse_osv_batch(&data, queries.len())?;
+    let unique_ids = ids_by_query
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let details = fetch_osv_details(client, base_url, &unique_ids).await;
+    Ok(ids_by_query
+        .iter()
+        .map(|ids| {
+            ids.iter()
+                .map(|id| {
+                    details
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| id_only_vulnerability(id))
+                })
+                .collect()
         })
         .collect())
+}
+
+fn parse_osv_batch(data: &serde_json::Value, expected: usize) -> Result<Vec<Vec<String>>> {
+    let results = data
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .context("OSV querybatch response is missing results")?;
+    if results.len() != expected {
+        anyhow::bail!(
+            "OSV querybatch result count {} did not match {expected} queries",
+            results.len()
+        );
+    }
+    Ok(results
+        .iter()
+        .map(|result| {
+            result["vulns"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|vuln| vuln["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .collect())
+}
+
+async fn fetch_osv_details(
+    client: &reqwest::Client,
+    base_url: &str,
+    ids: &HashSet<&str>,
+) -> HashMap<String, OsvVulnerability> {
+    let semaphore = Arc::new(Semaphore::new(OSV_DETAIL_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+    for id in ids {
+        let id = (*id).to_string();
+        let url = format!(
+            "{}/v1/vulns/{}",
+            base_url.trim_end_matches('/'),
+            crate::util::url_encode(&id)
+        );
+        let client = client.clone();
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let Ok(_permit) = semaphore.acquire().await else {
+                return None;
+            };
+            let result = retry_async(
+                &RetryConfig::api_default(),
+                "osv_vuln_detail",
+                &is_reqwest_error_retryable,
+                || async {
+                    client
+                        .get(&url)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .map_err(Into::into)
+                },
+            )
+            .await;
+            match result {
+                Ok(data) => match extract_osv_vuln(&data) {
+                    Some(vuln) => Some((id, vuln)),
+                    None => {
+                        tracing::warn!(%id, "OSV vulnerability detail is missing an id");
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%id, error = %error, "OSV vulnerability detail lookup failed");
+                    None
+                }
+            }
+        });
+    }
+
+    let mut details = HashMap::with_capacity(ids.len());
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Some((id, vuln))) => {
+                details.insert(id, vuln);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = %error, "OSV vulnerability detail task failed"),
+        }
+    }
+    details
+}
+
+fn id_only_vulnerability(id: &str) -> OsvVulnerability {
+    OsvVulnerability {
+        id: id.to_string(),
+        summary: String::new(),
+        severity: "UNKNOWN".to_string(),
+        fixed_version: None,
+    }
 }
 
 /// Concurrently warm package-existence + OSV caches for a large PR (org-scale).
@@ -356,23 +475,44 @@ pub async fn prefetch_packages(pairs: &[(String, String)]) {
     if pairs.is_empty() || offline_mode() {
         return;
     }
-    let sem = std::sync::Arc::new(Semaphore::new(PREFETCH_CONCURRENCY));
-    let mut handles = Vec::with_capacity(pairs.len().min(200));
-    for (registry, package) in pairs.iter().take(200) {
+    let pairs = unique_prefetch_pairs(pairs, MAX_PREFETCH_PACKAGES);
+    let semaphore = Arc::new(Semaphore::new(PREFETCH_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+    for (registry, package) in pairs {
         let registry = registry.clone();
         let package = package.clone();
-        let sem = sem.clone();
-        handles.push(tokio::spawn(async move {
-            let Ok(_permit) = sem.acquire().await else {
-                return;
-            };
-            let _ = check_package_async(&registry, &package).await;
-            let _ = check_vulnerabilities_async(&registry, &package).await;
-        }));
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let ((), ()) = tokio::join!(
+                async {
+                    let Ok(_permit) = semaphore.acquire().await else {
+                        return;
+                    };
+                    let _ = check_package_async(&registry, &package).await;
+                },
+                async {
+                    let Ok(_permit) = semaphore.acquire().await else {
+                        return;
+                    };
+                    let _ = check_vulnerabilities_async(&registry, &package).await;
+                }
+            );
+        });
     }
-    for h in handles {
-        let _ = h.await;
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::warn!(error = %error, "registry prefetch task failed");
+        }
     }
+}
+
+fn unique_prefetch_pairs(pairs: &[(String, String)], limit: usize) -> Vec<&(String, String)> {
+    let mut seen = HashSet::with_capacity(pairs.len().min(limit));
+    pairs
+        .iter()
+        .filter(|(registry, package)| seen.insert((registry.as_str(), package.as_str())))
+        .take(limit)
+        .collect()
 }
 
 /// Drop expired entries and then the oldest half when a simple cache is full.
@@ -548,6 +688,148 @@ pub(crate) fn seed_osv_cache(ecosystem: &str, package: &str, vulns: Vec<OsvVulne
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct OsvMockState {
+        batch_calls: Arc<AtomicUsize>,
+        detail_calls: Arc<Mutex<HashMap<String, usize>>>,
+    }
+
+    async fn start_osv_mock() -> (String, OsvMockState, tokio::task::JoinHandle<()>) {
+        let state = OsvMockState {
+            batch_calls: Arc::new(AtomicUsize::new(0)),
+            detail_calls: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let app = Router::new()
+            .route(
+                "/v1/querybatch",
+                post(|State(state): State<OsvMockState>, Json(_): Json<serde_json::Value>| async move {
+                    state.batch_calls.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "results": [
+                            { "vulns": [{ "id": "GHSA-1" }, { "id": "GHSA-2" }] },
+                            { "vulns": [{ "id": "GHSA-1" }] },
+                            { "vulns": [{ "id": "GHSA-missing" }] }
+                        ]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/vulns/{id}",
+                get(|State(state): State<OsvMockState>, Path(id): Path<String>| async move {
+                    *state
+                        .detail_calls
+                        .lock()
+                        .unwrap()
+                        .entry(id.clone())
+                        .or_default() += 1;
+                    if id == "GHSA-missing" {
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    let severity = if id == "GHSA-1" {
+                        json!({ "database_specific": { "severity": "HIGH" } })
+                    } else {
+                        json!({
+                            "affected": [{ "ecosystem_specific": { "severity": "MODERATE" } }]
+                        })
+                    };
+                    let mut record = json!({
+                        "id": id,
+                        "summary": format!("summary-{id}"),
+                        "affected": [{ "ranges": [{ "events": [{ "fixed": "2.0.0" }] }] }]
+                    });
+                    if id == "GHSA-1" {
+                        record["database_specific"] = severity["database_specific"].clone();
+                    } else {
+                        record["affected"][0]["ecosystem_specific"] =
+                            severity["affected"][0]["ecosystem_specific"].clone();
+                    }
+                    Json(record).into_response()
+                }),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), state, server)
+    }
+
+    #[tokio::test]
+    async fn osv_batch_hydrates_unique_ids_and_keeps_fallbacks() {
+        let (base_url, state, server) = start_osv_mock().await;
+        let queries = vec![
+            (
+                "npm".to_string(),
+                "one".to_string(),
+                Some("1.0.0".to_string()),
+            ),
+            (
+                "npm".to_string(),
+                "two".to_string(),
+                Some("1.0.0".to_string()),
+            ),
+            (
+                "pypi".to_string(),
+                "missing".to_string(),
+                Some("1.0.0".to_string()),
+            ),
+        ];
+
+        let results = query_osv_batch_at(&base_url, &queries).await.unwrap();
+        server.abort();
+
+        assert_eq!(state.batch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].len(), 2);
+        assert_eq!(results[0][0].id, "GHSA-1");
+        assert_eq!(results[0][0].summary, "summary-GHSA-1");
+        assert_eq!(results[0][0].severity, "HIGH");
+        assert_eq!(results[0][0].fixed_version.as_deref(), Some("2.0.0"));
+        assert_eq!(results[0][1].severity, "MODERATE");
+        assert_eq!(results[1][0].id, "GHSA-1");
+        assert_eq!(results[2][0].id, "GHSA-missing");
+        assert_eq!(results[2][0].severity, "UNKNOWN");
+        let calls = state.detail_calls.lock().unwrap();
+        assert_eq!(calls.get("GHSA-1"), Some(&1));
+        assert_eq!(calls.get("GHSA-2"), Some(&1));
+        assert_eq!(calls.get("GHSA-missing"), Some(&1));
+    }
+
+    #[test]
+    fn malformed_osv_batch_result_count_is_an_error() {
+        let data = json!({ "results": [{ "vulns": [] }] });
+        let error = parse_osv_batch(&data, 2).unwrap_err();
+
+        assert!(error.to_string().contains("result count"), "{error}");
+    }
+
+    #[test]
+    fn prefetch_pairs_are_deduplicated_in_first_seen_order() {
+        let pairs = vec![
+            ("npm".to_string(), "one".to_string()),
+            ("npm".to_string(), "one".to_string()),
+            ("pypi".to_string(), "two".to_string()),
+            ("npm".to_string(), "three".to_string()),
+        ];
+
+        let unique = unique_prefetch_pairs(&pairs, 3);
+
+        assert_eq!(
+            unique
+                .iter()
+                .map(|(registry, package)| (registry.as_str(), package.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("npm", "one"), ("pypi", "two"), ("npm", "three")]
+        );
+    }
 
     #[test]
     fn status_classification_preserves_registry_semantics() {
