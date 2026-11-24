@@ -47,7 +47,9 @@ impl DbPool {
 /// Trim paste noise (quotes, whitespace) from Render/Neon env values.
 pub fn trim_database_url(raw: &str) -> String {
     let t = raw.trim();
-    if (t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')) {
+    if t.len() >= 2
+        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
+    {
         t[1..t.len() - 1].trim().to_string()
     } else {
         t.to_string()
@@ -260,8 +262,12 @@ pub async fn create_pool(database_url: &str) -> Result<DbPool, sqlx::Error> {
             .after_connect(|conn, _meta| {
                 Box::pin(async move {
                     use sqlx::Executor;
-                    let _ = conn.execute("SET application_name = 'codasaurus'").await;
-                    let _ = conn.execute("SET statement_timeout = '60s'").await;
+                    if let Err(error) = conn.execute("SET application_name = 'codasaurus'").await {
+                        tracing::warn!(error = %error, "failed to set PostgreSQL application_name");
+                    }
+                    if let Err(error) = conn.execute("SET statement_timeout = '60s'").await {
+                        tracing::warn!(error = %error, "failed to set PostgreSQL statement_timeout");
+                    }
                     Ok(())
                 })
             })
@@ -358,6 +364,7 @@ mod tests {
             trim_database_url("  \"postgres://u:p@h/db\"  "),
             "postgres://u:p@h/db"
         );
+        assert_eq!(trim_database_url("'"), "'");
     }
 
     #[test]

@@ -391,6 +391,29 @@ async fn bulk_installation_upsert_activates_new_repos() {
 }
 
 #[tokio::test]
+async fn config_snapshot_reads_only_requested_keys() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let suffix = uuid::Uuid::new_v4().simple();
+    let first = format!("test_config_first_{suffix}");
+    let second = format!("test_config_second_{suffix}");
+    db::config::set_configs(&pool, &[(&first, "one"), (&second, "two")])
+        .await
+        .expect("set configs");
+
+    let values = db::config::get_configs(&pool, &[&first, &second])
+        .await
+        .expect("read configs");
+    assert_eq!(values.get(&first).map(String::as_str), Some("one"));
+    assert_eq!(values.get(&second).map(String::as_str), Some("two"));
+    assert_eq!(values.len(), 2);
+
+    db::config::delete_configs(&pool, &[&first, &second])
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
 async fn baseline_batch_persists_all_changed_files() {
     let _guard = TEST_SERIAL.lock().await;
     let pool = db::create_pool(&pg_url()).await.expect("pool");
@@ -574,8 +597,8 @@ async fn latest_completed_findings_ignore_newer_pending_reviews() {
         code_snippet: None,
         context: None,
         category: None,
-        confidence: None,
-        judge_rationale: None,
+        confidence: Some(4),
+        judge_rationale: Some("grounded".into()),
     };
     db::reviews::create_findings_batch(
         &pool,
@@ -592,6 +615,8 @@ async fn latest_completed_findings_ignore_newer_pending_reviews() {
         .expect("prior findings");
     assert_eq!(prior.len(), 1);
     assert_eq!(prior[0].message, "completed");
+    assert_eq!(prior[0].confidence, Some(4));
+    assert_eq!(prior[0].judge_rationale.as_deref(), Some("grounded"));
     db::repos::delete_repo(&pool, repo.id)
         .await
         .expect("cleanup");

@@ -1,5 +1,6 @@
 use crate::db::models::*;
-use crate::db::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, DbPool};
+use crate::db::{db_fetch_all, db_fetch_one, db_fetch_optional, DbPool};
+use sqlx::FromRow;
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct ReviewWithRepo {
@@ -15,55 +16,33 @@ pub async fn list_reviews(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<ReviewWithRepo>, sqlx::Error> {
-    match (repo_id, status) {
-        (Some(rid), Some(st)) => db_fetch_all!(
-            pool,
-            ReviewWithRepo,
-            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
-             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
-             WHERE r.repo_id = ? AND r.status = ?
-             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
-            rid,
-            st,
-            limit,
-            offset
-        ),
-        (Some(rid), None) => db_fetch_all!(
-            pool,
-            ReviewWithRepo,
-            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
-             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
-             WHERE r.repo_id = ?
-             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
-            rid,
-            limit,
-            offset
-        ),
-        (None, Some(st)) => db_fetch_all!(
-            pool,
-            ReviewWithRepo,
-            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
-             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
-             WHERE r.status = ?
-             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
-            st,
-            limit,
-            offset
-        ),
-        (None, None) => db_fetch_all!(
-            pool,
-            ReviewWithRepo,
-            "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
-             FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id
-             ORDER BY r.created_at DESC LIMIT ? OFFSET ?",
-            limit,
-            offset
-        ),
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
+         FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id",
+    );
+    let mut filtered = false;
+    if let Some(repo_id) = repo_id {
+        query.push(" WHERE r.repo_id = ").push_bind(repo_id);
+        filtered = true;
     }
-}
-
-pub async fn get_review(pool: &DbPool, id: i64) -> Result<Option<Review>, sqlx::Error> {
-    db_fetch_optional!(pool, Review, "SELECT * FROM reviews WHERE id = ?", id)
+    if let Some(status) = status {
+        query
+            .push(if filtered {
+                " AND r.status = "
+            } else {
+                " WHERE r.status = "
+            })
+            .push_bind(status);
+    }
+    query
+        .push(" ORDER BY r.created_at DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = query.build().fetch_all(pool.as_pg()).await?;
+    rows.into_iter()
+        .map(|row| ReviewWithRepo::from_row(&row))
+        .collect()
 }
 
 pub async fn get_review_with_repo(
@@ -81,7 +60,6 @@ pub async fn get_review_with_repo(
 }
 
 pub async fn create_review(pool: &DbPool, review: &ReviewCreate) -> Result<Review, sqlx::Error> {
-    let sha = review.pr_head_sha.clone().unwrap_or_default();
     db_fetch_one!(
         pool,
         Review,
@@ -103,7 +81,7 @@ pub async fn create_review(pool: &DbPool, review: &ReviewCreate) -> Result<Revie
         &review.pr_author,
         &review.pr_base_branch,
         &review.pr_head_branch,
-        &sha
+        review.pr_head_sha.as_deref().unwrap_or("")
     )
 }
 
@@ -135,74 +113,38 @@ pub async fn update_review(
     id: i64,
     update: &ReviewUpdate,
 ) -> Result<(), sqlx::Error> {
-    match (
-        update.status.as_deref(),
-        update.summary_json.as_deref(),
-        update.completed_at,
-    ) {
-        (Some(status), Some(sj), Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ?, summary_json = ?, completed_at = ? WHERE id = ?",
-                status,
-                sj,
-                ca,
-                id
-            )?;
-        }
-        (Some(status), Some(sj), None) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ?, summary_json = ? WHERE id = ?",
-                status,
-                sj,
-                id
-            )?;
-        }
-        (Some(status), None, Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ?, completed_at = ? WHERE id = ?",
-                status,
-                ca,
-                id
-            )?;
-        }
-        (Some(status), None, None) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ? WHERE id = ?",
-                status,
-                id
-            )?;
-        }
-        (None, Some(sj), Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET summary_json = ?, completed_at = ? WHERE id = ?",
-                sj,
-                ca,
-                id
-            )?;
-        }
-        (None, Some(sj), None) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET summary_json = ? WHERE id = ?",
-                sj,
-                id
-            )?;
-        }
-        (None, None, Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET completed_at = ? WHERE id = ?",
-                ca,
-                id
-            )?;
-        }
-        (None, None, None) => {}
+    if update.status.is_none() && update.summary_json.is_none() && update.completed_at.is_none() {
+        return Ok(());
     }
+    let mut query = sqlx::QueryBuilder::new("UPDATE reviews SET ");
+    let mut first = true;
+    if let Some(status) = update.status.as_deref() {
+        query
+            .push(if first { "status = " } else { ", status = " })
+            .push_bind(status);
+        first = false;
+    }
+    if let Some(summary) = update.summary_json.as_deref() {
+        query
+            .push(if first {
+                "summary_json = "
+            } else {
+                ", summary_json = "
+            })
+            .push_bind(summary);
+        first = false;
+    }
+    if let Some(completed_at) = update.completed_at {
+        query
+            .push(if first {
+                "completed_at = "
+            } else {
+                ", completed_at = "
+            })
+            .push_bind(completed_at);
+    }
+    query.push(" WHERE id = ").push_bind(id);
+    query.build().execute(pool.as_pg()).await?;
     Ok(())
 }
 
@@ -273,6 +215,8 @@ async fn insert_findings_on(
     let mut code_snippets: Vec<Option<String>> = Vec::with_capacity(findings.len());
     let mut contexts: Vec<Option<String>> = Vec::with_capacity(findings.len());
     let mut categories: Vec<Option<String>> = Vec::with_capacity(findings.len());
+    let mut confidences: Vec<Option<i32>> = Vec::with_capacity(findings.len());
+    let mut judge_rationales: Vec<Option<String>> = Vec::with_capacity(findings.len());
 
     for f in findings {
         review_ids.push(f.review_id);
@@ -290,18 +234,22 @@ async fn insert_findings_on(
         code_snippets.push(f.code_snippet.clone());
         contexts.push(f.context.clone());
         categories.push(f.category.clone());
+        confidences.push(f.confidence);
+        judge_rationales.push(f.judge_rationale.clone());
     }
 
     sqlx::query(
         "INSERT INTO findings (
             review_id, fingerprint, file_path, line_start, line_end,
             column_start, column_end, severity, detector, rule_id,
-            message, suggested_fix, code_snippet, context, category
+            message, suggested_fix, code_snippet, context, category,
+            confidence, judge_rationale
          )
          SELECT * FROM UNNEST(
             $1::bigint[], $2::text[], $3::text[], $4::int4[], $5::int4[],
             $6::int4[], $7::int4[], $8::text[], $9::text[], $10::text[],
-            $11::text[], $12::text[], $13::text[], $14::text[], $15::text[]
+            $11::text[], $12::text[], $13::text[], $14::text[], $15::text[],
+            $16::int4[], $17::text[]
          )
          ON CONFLICT DO NOTHING",
     )
@@ -320,6 +268,8 @@ async fn insert_findings_on(
     .bind(&code_snippets)
     .bind(&contexts)
     .bind(&categories)
+    .bind(&confidences)
+    .bind(&judge_rationales)
     .execute(&mut *conn)
     .await?;
 
