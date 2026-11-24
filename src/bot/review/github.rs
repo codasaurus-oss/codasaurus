@@ -332,13 +332,16 @@ pub(crate) fn next_github_link(headers: &reqwest::header::HeaderMap) -> Option<S
     None
 }
 
-/// True when GitHub already has a pull-request review for `head_sha` (idempotent retry guard).
-pub(crate) async fn review_exists_for_commit(
+/// True when GitHub already has a review for `head_sha`. When `marker` is set,
+/// only reviews whose body contains it are considered, so an independent review
+/// can be posted for the same commit without colliding with idempotency checks.
+pub(crate) async fn review_exists(
     client: &reqwest::Client,
     auth_header: &str,
     repo_name: &str,
     pr_number: i64,
     head_sha: &str,
+    marker: Option<&str>,
 ) -> Result<bool> {
     if head_sha.is_empty() {
         return Ok(false);
@@ -364,53 +367,16 @@ pub(crate) async fn review_exists_for_commit(
     )
     .await?;
     Ok(reviews.iter().any(|r| {
-        r.get("commit_id")
+        let sha_matches = r
+            .get("commit_id")
             .and_then(|v| v.as_str())
-            .is_some_and(|sha| sha == head_sha)
-    }))
-}
-
-/// Like [`review_exists_for_commit`] but scoped to reviews whose body contains `marker` —
-/// lets a second, independent review (e.g. LLM auto-fix suggestions) be posted for the
-/// same commit without colliding with the Tier-1 review's own idempotency check.
-pub(crate) async fn review_exists_with_marker(
-    client: &reqwest::Client,
-    auth_header: &str,
-    repo_name: &str,
-    pr_number: i64,
-    head_sha: &str,
-    marker: &str,
-) -> Result<bool> {
-    if head_sha.is_empty() {
-        return Ok(false);
-    }
-    let url =
-        format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews?per_page=100");
-    let reviews: Vec<serde_json::Value> = retry_async(
-        &RetryConfig::quick(),
-        "list_pr_reviews",
-        &is_reqwest_error_retryable,
-        || async {
-            let headers = github_api_headers(auth_header)?;
-            client
-                .get(&url)
-                .headers(headers)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(Into::into)
-        },
-    )
-    .await?;
-    Ok(reviews.iter().any(|r| {
-        r.get("commit_id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|sha| sha == head_sha)
-            && r.get("body")
-                .and_then(|v| v.as_str())
-                .is_some_and(|b| b.contains(marker))
+            .is_some_and(|sha| sha == head_sha);
+        sha_matches
+            && marker.is_none_or(|m| {
+                r.get("body")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|body| body.contains(m))
+            })
     }))
 }
 

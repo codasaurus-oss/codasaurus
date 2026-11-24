@@ -1,40 +1,24 @@
-use anyhow::{Context, Result};
+const URL: &str = "https://registry.npmjs.org";
+const ACCEPT: &str = "application/vnd.npm.install-v1+json";
 
-pub async fn check_async(package: &str) -> Result<Option<bool>> {
-    let url = format!("https://registry.npmjs.org/{package}");
-    let client = super::async_client().context("registry HTTP client not available")?;
-    let resp = client
-        .head(&url)
-        .header("Accept", "application/vnd.npm.install-v1+json")
-        .header(
-            "User-Agent",
-            concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .await?;
-    match resp.status().as_u16() {
+pub async fn check_async(package: &str) -> anyhow::Result<Option<bool>> {
+    match super::status_code(
+        &format!("{URL}/{package}"),
+        reqwest::Method::HEAD,
+        Some(ACCEPT),
+    )
+    .await?
+    {
         200 | 301 | 302 => Ok(Some(true)),
         404 | 410 => Ok(Some(false)),
         _ => Ok(None),
     }
 }
 
-pub async fn metadata_async(package: &str) -> Result<Option<super::Metadata>> {
-    let url = format!("https://registry.npmjs.org/{package}");
-    let client = super::async_client().context("registry HTTP client not available")?;
-    let resp = client
-        .get(&url)
-        .header("Accept", "application/vnd.npm.install-v1+json")
-        .header(
-            "User-Agent",
-            concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .await?;
-    if resp.status().as_u16() != 200 {
+pub async fn metadata_async(package: &str) -> anyhow::Result<Option<super::Metadata>> {
+    let Some(data) = super::fetch_json(&format!("{URL}/{package}"), Some(ACCEPT)).await? else {
         return Ok(None);
-    }
-    let data: serde_json::Value = resp.json().await?;
+    };
     let license = data["license"]
         .as_str()
         .or_else(|| data["license"].get("type").and_then(|v| v.as_str()))

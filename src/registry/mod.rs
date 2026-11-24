@@ -5,7 +5,7 @@
 //! `spawn_blocking`, so sync wrappers there are safe.
 
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
@@ -87,6 +87,43 @@ static ASYNC_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
         }
     }
 });
+
+/// Shared registry GET with the user agent Codasaurus uses for every registry.
+pub(super) async fn fetch_json(
+    url: &str,
+    accept: Option<&str>,
+) -> Result<Option<serde_json::Value>> {
+    let client = async_client().context("registry HTTP client not available")?;
+    let mut request = client.get(url).header(
+        "User-Agent",
+        concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
+    );
+    if let Some(accept) = accept {
+        request = request.header("Accept", accept);
+    }
+    let response = request.send().await?;
+    if response.status().as_u16() != 200 {
+        return Ok(None);
+    }
+    Ok(Some(response.json().await?))
+}
+
+/// Status-only registry probe; the caller maps codes to exists/missing/soft-fail.
+pub(super) async fn status_code(
+    url: &str,
+    method: reqwest::Method,
+    accept: Option<&str>,
+) -> Result<u16> {
+    let client = async_client().context("registry HTTP client not available")?;
+    let mut request = client.request(method, url).header(
+        "User-Agent",
+        concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
+    );
+    if let Some(accept) = accept {
+        request = request.header("Accept", accept);
+    }
+    Ok(request.send().await?.status().as_u16())
+}
 
 pub fn async_client() -> Result<&'static reqwest::Client> {
     ASYNC_CLIENT
@@ -206,19 +243,7 @@ pub async fn get_metadata_async(registry: &str, package: &str) -> Result<Option<
     if let Ok(ref m) = meta {
         let mut cache = METADATA_CACHE.write().unwrap_or_else(|e| e.into_inner());
         cache.insert(cache_key, (m.clone(), Instant::now()));
-        if cache.len() > CACHE_MAX_SIZE {
-            let now = Instant::now();
-            cache.retain(|_, (_, time)| now.duration_since(*time) < Duration::from_secs(ttl_secs));
-            if cache.len() > CACHE_MAX_SIZE {
-                let target = CACHE_MAX_SIZE / 2;
-                let mut keys: Vec<(String, Instant)> =
-                    cache.iter().map(|(k, (_, t))| (k.clone(), *t)).collect();
-                keys.sort_unstable_by_key(|(_, t)| *t);
-                for (k, _) in keys.into_iter().take(cache.len().saturating_sub(target)) {
-                    cache.remove(&k);
-                }
-            }
-        }
+        evict_oldest(&mut cache, ttl_secs);
     }
     meta
 }
@@ -310,6 +335,26 @@ pub async fn prefetch_packages(pairs: &[(String, String)]) {
     }
     for h in handles {
         let _ = h.await;
+    }
+}
+
+/// Drop expired entries and then the oldest half when a simple cache is full.
+fn evict_oldest<V>(cache: &mut HashMap<String, (V, Instant)>, ttl_secs: u64) {
+    if cache.len() <= CACHE_MAX_SIZE {
+        return;
+    }
+    let ttl = Duration::from_secs(ttl_secs);
+    let now = Instant::now();
+    cache.retain(|_, (_, time)| now.duration_since(*time) < ttl);
+    if cache.len() <= CACHE_MAX_SIZE {
+        return;
+    }
+    let target = CACHE_MAX_SIZE / 2;
+    let mut keys: Vec<(String, Instant)> =
+        cache.iter().map(|(k, (_, t))| (k.clone(), *t)).collect();
+    keys.sort_unstable_by_key(|(_, t)| *t);
+    for (k, _) in keys.into_iter().take(cache.len().saturating_sub(target)) {
+        cache.remove(&k);
     }
 }
 
@@ -406,20 +451,7 @@ async fn check_osv_async(ecosystem: &str, package: &str) -> Result<Vec<OsvVulner
             e.into_inner()
         });
         cache.insert(cache_key, (vulns.clone(), Instant::now()));
-        if cache.len() > CACHE_MAX_SIZE {
-            let ttl = Duration::from_secs(ttl_secs);
-            let now = Instant::now();
-            cache.retain(|_, (_, time)| now.duration_since(*time) < ttl);
-            if cache.len() > CACHE_MAX_SIZE {
-                let target = CACHE_MAX_SIZE / 2;
-                let mut keys: Vec<(String, Instant)> =
-                    cache.iter().map(|(k, (_, t))| (k.clone(), *t)).collect();
-                keys.sort_unstable_by_key(|(_, t)| *t);
-                for (k, _) in keys.into_iter().take(cache.len().saturating_sub(target)) {
-                    cache.remove(&k);
-                }
-            }
-        }
+        evict_oldest(&mut cache, ttl_secs);
     }
 
     Ok(vulns)

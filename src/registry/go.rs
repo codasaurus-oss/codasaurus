@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 pub async fn metadata_async(_package: &str) -> Result<Option<super::Metadata>> {
     Ok(None)
@@ -13,17 +13,9 @@ pub async fn check_async(package: &str) -> Result<Option<bool>> {
     // Encode module path per Go proxy conventions: '@latest' is a literal suffix.
     let encoded = percent_encode(package);
     let url = format!("https://proxy.golang.org/{encoded}/@latest");
-    let client = super::async_client().context("registry HTTP client not available")?;
-    let resp = client
-        .get(&url)
-        .header(
-            "User-Agent",
-            concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .await?;
+    let status = super::status_code(&url, reqwest::Method::GET, None).await?;
 
-    match resp.status().as_u16() {
+    match status {
         200 => Ok(Some(true)),
         404 | 410 => Ok(Some(false)),
         _ => Ok(None),
