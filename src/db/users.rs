@@ -156,12 +156,18 @@ pub async fn verify_password(
         Some(u) if u.password_hash.is_empty() => {
             return Ok(None); // OIDC-only user
         }
-        Some(u) => (
-            u.password_hash.clone(),
+        Some(User {
+            email,
+            role,
+            is_bootstrap,
+            password_hash,
+            ..
+        }) => (
+            password_hash,
             Some(UserView {
-                email: u.email,
-                role: u.role,
-                is_bootstrap: u.is_bootstrap,
+                email,
+                role,
+                is_bootstrap,
             }),
         ),
         None => (DUMMY_PASSWORD_HASH.clone(), None),
@@ -176,12 +182,11 @@ pub async fn verify_password(
 }
 
 pub async fn owner_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    let count: i64 = db_scalar!(
+    db_scalar!(
         pool,
-        i64,
-        "SELECT COUNT(*) FROM users WHERE role IN ('owner', 'admin')"
-    )?;
-    Ok(count > 0)
+        bool,
+        "SELECT EXISTS(SELECT 1 FROM users WHERE role IN ('owner', 'admin'))"
+    )
 }
 
 pub async fn owner_count(pool: &DbPool) -> Result<i64, sqlx::Error> {
@@ -220,18 +225,16 @@ pub async fn update_user_role(pool: &DbPool, id: i64, role: &str) -> Result<User
 
 /// Move the bootstrap flag to another user (must already be an owner).
 pub async fn transfer_bootstrap(pool: &DbPool, to_user_id: i64) -> Result<User, sqlx::Error> {
-    let mut tx = pool.as_pg().begin().await?;
-    sqlx::query("UPDATE users SET is_bootstrap = FALSE WHERE is_bootstrap = TRUE")
-        .execute(&mut *tx)
-        .await?;
-    let user: User = sqlx::query_as(
-        "UPDATE users SET is_bootstrap = TRUE, role = 'owner' WHERE id = $1 RETURNING *",
+    sqlx::query_as(
+        "WITH cleared AS (
+           UPDATE users SET is_bootstrap = FALSE WHERE is_bootstrap = TRUE
+         )
+         UPDATE users SET is_bootstrap = TRUE, role = 'owner'
+         WHERE id = $1 RETURNING *",
     )
     .bind(to_user_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(user)
+    .fetch_one(pool.as_pg())
+    .await
 }
 
 pub async fn delete_user(pool: &DbPool, id: i64) -> Result<bool, sqlx::Error> {

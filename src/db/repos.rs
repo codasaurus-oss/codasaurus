@@ -25,14 +25,6 @@ pub async fn create_repo(pool: &DbPool, repo: &RepoCreate) -> Result<Repo, sqlx:
     create_repo_with_active(pool, repo, false).await
 }
 
-/// Register a repo from an installation webhook with reviews enabled by default.
-pub async fn create_repo_from_installation(
-    pool: &DbPool,
-    repo: &RepoCreate,
-) -> Result<Repo, sqlx::Error> {
-    create_repo_with_active(pool, repo, true).await
-}
-
 async fn create_repo_with_active(
     pool: &DbPool,
     repo: &RepoCreate,

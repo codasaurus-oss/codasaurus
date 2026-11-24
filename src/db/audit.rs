@@ -44,7 +44,7 @@ pub async fn log_event(
     target_type: Option<&str>,
     target_id: Option<i64>,
 ) {
-    match db_execute!(
+    if let Err(error) = db_execute!(
         pool,
         "INSERT INTO audit_log (event_type, actor, target_type, target_id) VALUES (?, ?, ?, ?)",
         event_type,
@@ -52,8 +52,7 @@ pub async fn log_event(
         target_type,
         target_id
     ) {
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, event_type, "failed to write audit log"),
+        tracing::warn!(error = %error, event_type, "failed to write audit log");
     }
 }
 
