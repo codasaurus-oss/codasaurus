@@ -163,27 +163,25 @@ pub(crate) fn bot_db_pool() -> Option<&'static crate::db::DbPool> {
     CONFIG_POOL.get()
 }
 
-/// An opt-in boolean feature gate: org-wide DB config, overridden by the repo's
-/// own `config_json` when it names the key.
-///
-/// Both layers are settable from the dashboard (Settings and Repository detail),
-/// so a gate that consults only one silently ignores half the UI. Defaults to
-/// `false`: every caller is an opt-in that writes to the user's repo.
+/// Opt-in org flag, overridden by an explicit repo `config_json` value.
 pub(crate) async fn repo_or_global_flag(
     pool: &crate::db::DbPool,
     repo_full_name: &str,
     key: &str,
 ) -> bool {
-    let mut enabled = crate::db::config::get_config(pool, key)
-        .await
+    let (global, repo) = tokio::join!(
+        crate::db::config::get_config(pool, key),
+        crate::db::repos::get_repo_by_full_name(pool, repo_full_name),
+    );
+    let mut enabled = global
         .ok()
         .flatten()
-        .is_some_and(|v| crate::util::flag_truthy(&v));
-    if let Ok(Some(repo)) = crate::db::repos::get_repo_by_full_name(pool, repo_full_name).await {
-        if let Some(cfg) = repo.config_json.as_deref() {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(cfg) {
-                if let Some(b) = val.get(key).and_then(|v| v.as_bool()) {
-                    enabled = b;
+        .is_some_and(|value| crate::util::flag_truthy(&value));
+    if let Ok(Some(repo)) = repo {
+        if let Some(config) = repo.config_json.as_deref() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(config) {
+                if let Some(flag) = value.get(key).and_then(serde_json::Value::as_bool) {
+                    enabled = flag;
                 }
             }
         }
@@ -193,20 +191,18 @@ pub(crate) async fn repo_or_global_flag(
 
 async fn reload_bot_config() -> Option<BotConfig> {
     let pool = CONFIG_POOL.get()?;
-    let app_id = db::config::get_config(pool, "github_app_id")
-        .await
-        .ok()
-        .flatten()?;
-    let private_key = db::config::get_config(pool, "github_private_key")
-        .await
-        .ok()
-        .flatten()
-        .filter(|k| !k.trim().is_empty())
+    let entries = db::config::get_all_config(pool).await.ok()?;
+    let value = |key: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.value.clone())
+    };
+    let app_id = value("github_app_id")?;
+    let private_key = value("github_private_key")
+        .filter(|key| !key.trim().is_empty())
         .or_else(crate::github_jwt::resolve_private_key_from_env)?;
-    let webhook_secret = db::config::get_config(pool, "github_webhook_secret")
-        .await
-        .ok()
-        .flatten()
+    let webhook_secret = value("github_webhook_secret")
         .or_else(|| std::env::var("GITHUB_WEBHOOK_SECRET").ok())
         .unwrap_or_default();
     Some(BotConfig {
@@ -691,21 +687,19 @@ pub(crate) async fn handle_webhook(
                 else {
                     return;
                 };
-                for path in &changed {
-                    if let Err(e) = crate::index::reindex_file(
-                        pool,
-                        client,
-                        &headers,
-                        &repo_full_name,
-                        &after_sha,
-                        path,
-                        &index_cfg,
-                        llm_cfg.as_ref(),
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %e, path, "incremental index failed");
-                    }
+                if let Err(e) = crate::index::reindex_files(
+                    pool,
+                    client,
+                    &headers,
+                    &repo_full_name,
+                    &after_sha,
+                    &changed,
+                    &index_cfg,
+                    llm_cfg.as_ref(),
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, paths = changed.len(), "incremental index failed");
                 }
             });
         }
@@ -876,37 +870,24 @@ async fn sync_installation_repos(
     inst_id: i64,
     repos: &[serde_json::Value],
 ) {
-    for repo in repos {
-        let github_id = repo["id"].as_i64();
-        let full_name = match repo["full_name"].as_str() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let parts: Vec<&str> = full_name.splitn(2, '/').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let owner = parts[0].to_string();
-        let name = parts[1].to_string();
-        let default_branch = repo["default_branch"].as_str().map(|s| s.to_string());
-        let private = repo["private"].as_bool().unwrap_or(false);
-
-        if let Err(e) = db::repos::create_repo_from_installation(
-            pool,
-            &RepoCreate {
-                github_id,
-                full_name,
-                owner,
-                name,
-                default_branch,
+    let creates: Vec<RepoCreate> = repos
+        .iter()
+        .filter_map(|repo| {
+            let full_name = repo["full_name"].as_str()?;
+            let (owner, name) = full_name.split_once('/')?;
+            Some(RepoCreate {
+                github_id: repo["id"].as_i64(),
+                full_name: full_name.to_string(),
+                owner: owner.to_string(),
+                name: name.to_string(),
+                default_branch: repo["default_branch"].as_str().map(str::to_string),
                 installation_id: inst_id,
-                private,
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %e, "failed to save repo");
-        }
+                private: repo["private"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect();
+    if let Err(error) = db::repos::upsert_repos_from_installation(pool, &creates).await {
+        tracing::error!(error = %error, repos = creates.len(), "failed to sync repos");
     }
 }
 

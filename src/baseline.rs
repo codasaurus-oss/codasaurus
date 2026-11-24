@@ -46,31 +46,35 @@ fn parse_hunk_start_count(s: &str) -> (usize, usize) {
     }
 }
 
-/// Persist the new-code line numbers for a PR so that the baseline filter can
-/// query them during review. Batched: one statement per file, not per line.
-pub async fn save_pr_diff_lines(
+/// Persist all changed-line rows for a PR in one statement.
+pub async fn save_pr_diff_lines_batch(
     pool: &DbPool,
     repo_full_name: &str,
     pr_number: i64,
-    file_path: &str,
-    changed_lines: &HashSet<usize>,
+    files: &[(&str, &HashSet<usize>)],
 ) -> Result<()> {
-    if changed_lines.is_empty() {
+    let total = files.iter().map(|(_, lines)| lines.len()).sum();
+    if total == 0 {
         return Ok(());
     }
-    let repo = repo_full_name;
-    let pr = pr_number;
-    let file = file_path;
-    let lines: Vec<i64> = changed_lines.iter().map(|&l| l as i64).collect();
+    let mut paths = Vec::with_capacity(total);
+    let mut changed = Vec::with_capacity(total);
+    for (path, lines) in files {
+        for line in *lines {
+            paths.push(*path);
+            changed.push(*line as i64);
+        }
+    }
     sqlx::query(
         "INSERT INTO pr_diff_lines (repo_full_name, pr_number, file_path, line)
-         SELECT $1, $2, $3, unnest($4::bigint[])
+         SELECT $1, $2, file_path, line
+         FROM UNNEST($3::text[], $4::bigint[]) AS t(file_path, line)
          ON CONFLICT (repo_full_name, pr_number, file_path, line) DO NOTHING",
     )
-    .bind(repo)
-    .bind(pr)
-    .bind(file)
-    .bind(lines)
+    .bind(repo_full_name)
+    .bind(pr_number)
+    .bind(paths)
+    .bind(changed)
     .execute(pool.as_pg())
     .await?;
     Ok(())
@@ -106,26 +110,25 @@ pub async fn filter_new_code_findings(
 ) -> Result<Vec<Finding>> {
     use std::collections::HashMap;
 
-    let new_by_file: HashMap<String, HashSet<i32>> = sqlx::query_as::<_, (String, i32)>(
-        "SELECT file_path, line FROM pr_diff_lines WHERE repo_full_name = $1 AND pr_number = $2",
-    )
-    .bind(repo_full_name)
-    .bind(pr_number)
-    .fetch_all(pool.as_pg())
-    .await?
-    .into_iter()
-    .fold(HashMap::new(), |mut acc, (file, line)| {
-        acc.entry(file).or_default().insert(line);
-        acc
-    });
-
-    let mut baseline: HashSet<String> =
+    let (new_rows, baseline_rows) = tokio::join!(
+        sqlx::query_as::<_, (String, i32)>(
+            "SELECT file_path, line FROM pr_diff_lines WHERE repo_full_name = $1 AND pr_number = $2",
+        )
+        .bind(repo_full_name)
+        .bind(pr_number)
+        .fetch_all(pool.as_pg()),
         sqlx::query_scalar("SELECT fingerprint FROM finding_baseline WHERE repo_full_name = $1")
             .bind(repo_full_name)
-            .fetch_all(pool.as_pg())
-            .await?
+            .fetch_all(pool.as_pg()),
+    );
+    let new_by_file: HashMap<String, HashSet<i32>> =
+        new_rows?
             .into_iter()
-            .collect();
+            .fold(HashMap::new(), |mut acc, (file, line)| {
+                acc.entry(file).or_default().insert(line);
+                acc
+            });
+    let mut baseline: HashSet<String> = baseline_rows?.into_iter().collect();
 
     let mut out = Vec::new();
     let mut new_baselines: Vec<String> = Vec::new();

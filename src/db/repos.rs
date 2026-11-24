@@ -67,6 +67,22 @@ async fn create_repo_with_active(
 /// Falls back to per-row writes only if a batch fails, preserving the old
 /// best-effort behavior for malformed or conflicting GitHub rows.
 pub async fn upsert_repos(pool: &DbPool, repos: &[RepoCreate]) -> Result<u64, sqlx::Error> {
+    upsert_repos_with_active(pool, repos, false).await
+}
+
+/// Bulk registration for installation webhooks, which activate repos by default.
+pub async fn upsert_repos_from_installation(
+    pool: &DbPool,
+    repos: &[RepoCreate],
+) -> Result<u64, sqlx::Error> {
+    upsert_repos_with_active(pool, repos, true).await
+}
+
+async fn upsert_repos_with_active(
+    pool: &DbPool,
+    repos: &[RepoCreate],
+    active: bool,
+) -> Result<u64, sqlx::Error> {
     let mut total = 0u64;
     for chunk in repos.chunks(500) {
         let mut query = sqlx::QueryBuilder::new(
@@ -80,7 +96,7 @@ pub async fn upsert_repos(pool: &DbPool, repos: &[RepoCreate]) -> Result<u64, sq
                 .push_bind(&repo.default_branch)
                 .push_bind(repo.installation_id)
                 .push_bind(repo.private)
-                .push_bind(false);
+                .push_bind(active);
         });
         query.push(
             " ON CONFLICT(full_name) DO UPDATE SET
@@ -96,7 +112,7 @@ pub async fn upsert_repos(pool: &DbPool, repos: &[RepoCreate]) -> Result<u64, sq
             Err(error) => {
                 tracing::warn!(error = %error, "bulk repo upsert failed; retrying rows");
                 for repo in chunk {
-                    if create_repo(pool, repo).await.is_ok() {
+                    if create_repo_with_active(pool, repo, active).await.is_ok() {
                         total += 1;
                     }
                 }

@@ -357,3 +357,242 @@ async fn bulk_repo_upsert_preserves_local_config_and_active_state() {
         .await
         .expect("cleanup");
 }
+
+#[tokio::test]
+async fn bulk_installation_upsert_activates_new_repos() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let suffix = uuid::Uuid::new_v4().simple();
+    let full_name = format!("acme/installed-{suffix}");
+    let affected = db::repos::upsert_repos_from_installation(
+        &pool,
+        &[db::models::RepoCreate {
+            github_id: Some((uuid::Uuid::new_v4().as_u128() & 0x7fff_ffff_ffff_ffff) as i64),
+            full_name: full_name.clone(),
+            owner: "acme".into(),
+            name: format!("installed-{suffix}"),
+            default_branch: Some("main".into()),
+            installation_id: 7,
+            private: false,
+        }],
+    )
+    .await
+    .expect("installation upsert");
+    assert_eq!(affected, 1);
+
+    let repo = db::repos::get_repo_by_full_name(&pool, &full_name)
+        .await
+        .expect("lookup repo")
+        .expect("repo");
+    assert!(repo.active);
+    db::repos::delete_repo(&pool, repo.id)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+async fn baseline_batch_persists_all_changed_files() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let repo = format!("acme/baseline-{}", uuid::Uuid::new_v4().simple());
+    let pr_number = 42;
+    let first = std::collections::HashSet::from([1usize, 3]);
+    let second = std::collections::HashSet::from([2usize]);
+
+    codasaurus::baseline::save_pr_diff_lines_batch(
+        &pool,
+        &repo,
+        pr_number,
+        &[("src/first.rs", &first), ("src/second.rs", &second)],
+    )
+    .await
+    .expect("save baseline batch");
+
+    let rows: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT file_path, line FROM pr_diff_lines
+         WHERE repo_full_name = $1 AND pr_number = $2
+         ORDER BY file_path, line",
+    )
+    .bind(&repo)
+    .bind(pr_number)
+    .fetch_all(pool.as_pg())
+    .await
+    .expect("baseline rows");
+    assert_eq!(
+        rows,
+        vec![
+            ("src/first.rs".into(), 1),
+            ("src/first.rs".into(), 3),
+            ("src/second.rs".into(), 2),
+        ]
+    );
+    codasaurus::baseline::clear_pr_diff_lines(&pool, &repo, pr_number)
+        .await
+        .expect("clear baseline");
+}
+
+#[tokio::test]
+async fn index_batch_replaces_files_and_removes_stale_edges() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let repo = format!("acme/index-{}", uuid::Uuid::new_v4().simple());
+    use codasaurus::index::extract::{ExtractedEdge, ExtractedSymbol, FileIndex};
+    use codasaurus::index::store;
+
+    let files = vec![
+        FileIndex {
+            file_path: "src/a.rs".into(),
+            symbols: vec![ExtractedSymbol {
+                name: "old".into(),
+                kind: "function".into(),
+                signature: None,
+                line: 1,
+            }],
+            edges: vec![ExtractedEdge {
+                from_symbol: "old".into(),
+                to_symbol: "entry".into(),
+                edge_kind: "CALLS".into(),
+            }],
+        },
+        FileIndex {
+            file_path: "src/b.rs".into(),
+            symbols: vec![ExtractedSymbol {
+                name: "entry".into(),
+                kind: "function".into(),
+                signature: None,
+                line: 2,
+            }],
+            edges: vec![],
+        },
+    ];
+    store::replace_files_index(&pool, &repo, &files)
+        .await
+        .expect("replace index batch");
+
+    let symbols = store::symbols_in_files(&pool, &repo, &["src/a.rs".into(), "src/b.rs".into()])
+        .await
+        .expect("symbols batch");
+    assert_eq!(symbols.len(), 2);
+    let callers = store::callers_of_many(&pool, &repo, &["entry".to_string()])
+        .await
+        .expect("callers batch");
+    assert_eq!(callers.len(), 1);
+    assert_eq!(callers[0].0, "old");
+
+    store::replace_files_index(
+        &pool,
+        &repo,
+        &[FileIndex {
+            file_path: "src/a.rs".into(),
+            symbols: vec![],
+            edges: vec![],
+        }],
+    )
+    .await
+    .expect("replace emptied file");
+    let callers = store::callers_of_many(&pool, &repo, &["entry".to_string()])
+        .await
+        .expect("callers after replacement");
+    assert!(callers.is_empty());
+
+    sqlx::query("DELETE FROM repo_symbols WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup symbols");
+    sqlx::query("DELETE FROM repo_edges WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup edges");
+    sqlx::query("DELETE FROM index_status WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup status");
+}
+
+#[tokio::test]
+async fn latest_completed_findings_ignore_newer_pending_reviews() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let suffix = uuid::Uuid::new_v4().simple();
+    let full_name = format!("acme/prior-{suffix}");
+    let repo = db::repos::create_repo(
+        &pool,
+        &db::models::RepoCreate {
+            github_id: Some((uuid::Uuid::new_v4().as_u128() & 0x7fff_ffff_ffff_ffff) as i64),
+            full_name: full_name.clone(),
+            owner: "acme".into(),
+            name: format!("prior-{suffix}"),
+            default_branch: Some("main".into()),
+            installation_id: 1,
+            private: false,
+        },
+    )
+    .await
+    .expect("repo");
+    let create_review = |sha: String| db::models::ReviewCreate {
+        repo_id: repo.id,
+        pr_number: 9,
+        pr_title: None,
+        pr_author: None,
+        pr_base_branch: None,
+        pr_head_branch: None,
+        pr_head_sha: Some(sha),
+    };
+    let completed = db::reviews::create_review(&pool, &create_review(format!("done-{suffix}")))
+        .await
+        .expect("completed review");
+    db::reviews::update_review(
+        &pool,
+        completed.id,
+        &db::models::ReviewUpdate {
+            status: Some("passed".into()),
+            summary_json: None,
+            completed_at: Some(chrono::Utc::now()),
+        },
+    )
+    .await
+    .expect("complete review");
+    let pending = db::reviews::create_review(&pool, &create_review(format!("pending-{suffix}")))
+        .await
+        .expect("pending review");
+    let finding = |review_id: i64, message: &str| db::models::FindingCreate {
+        review_id,
+        fingerprint: Some(format!("{review_id}:{message}")),
+        file_path: "src/main.rs".into(),
+        line_start: None,
+        line_end: None,
+        column_start: None,
+        column_end: None,
+        severity: "warning".into(),
+        detector: "test".into(),
+        rule_id: None,
+        message: message.into(),
+        suggested_fix: None,
+        code_snippet: None,
+        context: None,
+        category: None,
+        confidence: None,
+        judge_rationale: None,
+    };
+    db::reviews::create_findings_batch(
+        &pool,
+        &[
+            finding(completed.id, "completed"),
+            finding(pending.id, "pending"),
+        ],
+    )
+    .await
+    .expect("findings");
+
+    let prior = db::reviews::get_latest_completed_findings_for_pr(&pool, repo.id, 9)
+        .await
+        .expect("prior findings");
+    assert_eq!(prior.len(), 1);
+    assert_eq!(prior[0].message, "completed");
+    db::repos::delete_repo(&pool, repo.id)
+        .await
+        .expect("cleanup");
+}

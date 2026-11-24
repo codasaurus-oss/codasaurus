@@ -277,20 +277,23 @@ pub async fn review_pr_with_options(
         if let Err(e) = crate::baseline::clear_pr_diff_lines(pool, repo_name, pr_number).await {
             tracing::warn!(error = %e, "clear pr_diff_lines failed");
         }
-        for file in &files {
-            let path = file["filename"].as_str().unwrap_or("");
-            let patch = file["patch"].as_str().unwrap_or("");
-            let changed = crate::baseline::parse_patch_changed_lines(patch);
-            if changed.is_empty() {
-                continue;
-            }
-            if let Err(e) =
-                crate::baseline::save_pr_diff_lines(pool, repo_name, pr_number, path, &changed)
-                    .await
-            {
-                tracing::warn!(error = %e, "save pr_diff_lines failed");
-                break;
-            }
+        let changed_lines: Vec<(&str, std::collections::HashSet<usize>)> = files
+            .iter()
+            .filter_map(|file| {
+                let path = file["filename"].as_str()?;
+                let patch = file["patch"].as_str().unwrap_or("");
+                let changed = crate::baseline::parse_patch_changed_lines(patch);
+                (!changed.is_empty()).then_some((path, changed))
+            })
+            .collect();
+        let batch: Vec<(&str, &std::collections::HashSet<usize>)> = changed_lines
+            .iter()
+            .map(|(path, lines)| (*path, lines))
+            .collect();
+        if let Err(e) =
+            crate::baseline::save_pr_diff_lines_batch(pool, repo_name, pr_number, &batch).await
+        {
+            tracing::warn!(error = %e, "save pr_diff_lines failed");
         }
     }
 
@@ -799,15 +802,22 @@ pub async fn review_pr_with_options(
         &pr_body,
     );
     review_ctx.related_prs = related_prs.clone();
+    let mut prior_findings = Vec::new();
     if let Some(pool) = pool {
-        if let Ok(Some(instr)) = crate::db::config::get_config(pool, "custom_instructions").await {
-            if !instr.trim().is_empty() {
-                let existing = review_ctx.repo_context.take().unwrap_or_default();
-                review_ctx.repo_context =
-                    Some(format!("Org custom instructions:\n{instr}\n\n{existing}"));
-            }
+        let store = crate::learning::store::LearningStore::from_pool(pool);
+        let (instructions, prior, dismissed) = tokio::join!(
+            crate::db::config::get_config(pool, "custom_instructions"),
+            load_prior_findings(pool, db_repo.as_ref().map(|repo| repo.id), pr_number),
+            store.recent_maintainer_dismissals(Some(repo_name), 25),
+        );
+        prior_findings = prior;
+        if let Some(instructions) = instructions.ok().flatten().filter(|v| !v.trim().is_empty()) {
+            let existing = review_ctx.repo_context.take().unwrap_or_default();
+            review_ctx.repo_context = Some(format!(
+                "Org custom instructions:\n{instructions}\n\n{existing}"
+            ));
         }
-        if let Some(memory) = prior_review_memory(pool, repo_name, pr_number).await {
+        if let Some(memory) = prior_review_memory(&prior_findings, &dismissed.unwrap_or_default()) {
             let existing = review_ctx.repo_context.take().unwrap_or_default();
             review_ctx.repo_context = Some(format!("{memory}\n\n{existing}"));
         }
@@ -840,7 +850,6 @@ pub async fn review_pr_with_options(
     // One package with 9 CVEs → one inline comment, not nine.
     let display_findings = merge_vulnerability_findings(&findings.findings);
 
-    // Sort by severity: blocking first, then warning, then info
     let mut prioritized: Vec<&Finding> = display_findings.iter().collect();
     prioritized.sort_by_key(|f| match f.severity {
         "blocking" => 0,
@@ -868,7 +877,6 @@ pub async fn review_pr_with_options(
             continue;
         }
 
-        // Already commented on in an earlier push of this PR.
         if already_commented.contains(&crate::bot::markdown::short_fp(f)) {
             continue;
         }
@@ -883,8 +891,7 @@ pub async fn review_pr_with_options(
         review_comments.push(comment);
     }
 
-    // Load prior findings before save_review_to_db so same-SHA re-reviews can delta.
-    let progress = load_finding_progress(repo_name, pr_number, &findings).await;
+    let progress = finding_progress(&prior_findings, &findings);
     let advisory_draft = crate::bot::concern::is_advisory_draft(&findings.findings, has_blocking);
 
     let title_fix_note = maybe_fix_pr_title(
@@ -1250,7 +1257,6 @@ pub async fn review_pr_with_options(
         }
     }
 
-    // Generate and post LLM summary if enabled for this repo and an API key is available
     if repo_llm_enabled && !low_signal_only {
         if let Some(llm_cfg) = crate::llm::LlmConfig::from_db_or_env(pool).await {
             if let Err(e) = generate_and_post_summary(
@@ -1397,116 +1403,85 @@ async fn post_pr_review(
     .await
 }
 
-/// Diff current findings against the previous completed review for this PR.
-/// What earlier reviews of this PR (and this repo) already concluded, as prompt text.
-///
-/// Two things the model otherwise rediscovers on every push, at full token cost:
-/// findings it already reported on this PR, and findings maintainers have
-/// explicitly dismissed. The learned-rule engine suppresses neither for LLM
-/// findings — it only filters the deterministic detectors — so this is the only
-/// place prior review outcomes reach the model.
-///
-/// Phrased as context, not as a ban: a dismissed class of finding can become a
-/// real problem in a later diff, and silently forbidding it would hide that.
-/// Bounded so a long-lived PR can't crowd the diff out of the prompt.
-async fn prior_review_memory(
+async fn load_prior_findings(
     pool: &crate::db::DbPool,
-    repo_name: &str,
+    repo_id: Option<i64>,
     pr_number: i64,
-) -> Option<String> {
-    const MAX_PRIOR_FINDINGS: usize = 25;
-    const MAX_DISMISSALS: i64 = 25;
-
-    let mut sections: Vec<String> = Vec::new();
-
-    if let Ok(Some(repo)) = crate::db::repos::get_repo_by_full_name(pool, repo_name).await {
-        if let Ok(Some(prior)) =
-            crate::db::reviews::get_latest_completed_review_for_pr(pool, repo.id, pr_number).await
-        {
-            if let Ok(rows) = crate::db::reviews::get_findings_for_review(pool, prior.id).await {
-                let lines: Vec<String> = rows
-                    .iter()
-                    .take(MAX_PRIOR_FINDINGS)
-                    .map(|f| {
-                        format!(
-                            "- [{}] {}:{} {}",
-                            f.detector,
-                            f.file_path,
-                            f.line_start.unwrap_or(0),
-                            f.message
-                        )
-                    })
-                    .collect();
-                if !lines.is_empty() {
-                    sections.push(format!(
-                        "Already reported on this PR by an earlier review. Don't repeat one \
-                         unless the new diff changed it; do say if a fix is wrong or incomplete:\n{}",
-                        lines.join("\n")
-                    ));
-                }
-            }
-        }
-    }
-
-    let store = crate::learning::store::LearningStore::from_pool(pool);
-    if let Ok(dismissed) = store
-        .recent_maintainer_dismissals(Some(repo_name), MAX_DISMISSALS)
+) -> Vec<crate::db::models::Finding> {
+    let Some(repo_id) = repo_id else {
+        return Vec::new();
+    };
+    crate::db::reviews::get_latest_completed_findings_for_pr(pool, repo_id, pr_number)
         .await
-    {
-        let lines: Vec<String> = dismissed
-            .iter()
-            .map(|(detector, message)| format!("- [{detector}] {message}"))
-            .collect();
-        if !lines.is_empty() {
-            sections.push(format!(
-                "Maintainers of this repo explicitly dismissed these findings. Treat them as \
-                 settled team preference and raise something of this shape only if this diff \
-                 makes it materially worse:\n{}",
-                lines.join("\n")
-            ));
-        }
-    }
-
-    if sections.is_empty() {
-        return None;
-    }
-    Some(format!("Prior review memory:\n\n{}", sections.join("\n\n")))
+        .unwrap_or_default()
 }
 
-async fn load_finding_progress(
-    repo_name: &str,
-    pr_number: i64,
-    findings: &detectors::Findings,
-) -> Option<crate::bot::markdown::FindingProgress> {
-    let pool = crate::bot::CONFIG_POOL.get()?;
-    let repo = crate::db::repos::get_repo_by_full_name(pool, repo_name)
-        .await
-        .ok()
-        .flatten()?;
-    let prior = crate::db::reviews::get_latest_completed_review_for_pr(pool, repo.id, pr_number)
-        .await
-        .ok()
-        .flatten()?;
-    let prior_rows = crate::db::reviews::get_findings_for_review(pool, prior.id)
-        .await
-        .ok()?;
-    if prior_rows.is_empty() && findings.is_empty() {
-        return None;
-    }
-    let prior: Vec<(String, String, String)> = prior_rows
-        .into_iter()
-        .map(|f| {
-            let fp = f.fingerprint.unwrap_or_default();
-            let label = crate::bot::markdown::guide_label_parts(
-                &f.detector,
-                &f.message,
-                &f.file_path,
-                f.line_start,
-            );
-            (fp, label, f.severity)
+/// Prior findings and maintainer dismissals are context, not permanent bans.
+fn prior_review_memory(
+    prior: &[crate::db::models::Finding],
+    dismissed: &[(String, String)],
+) -> Option<String> {
+    const MAX_PRIOR_FINDINGS: usize = 25;
+    let mut sections = Vec::new();
+    let lines: Vec<String> = prior
+        .iter()
+        .take(MAX_PRIOR_FINDINGS)
+        .map(|finding| {
+            format!(
+                "- [{}] {}:{} {}",
+                finding.detector,
+                finding.file_path,
+                finding.line_start.unwrap_or(0),
+                finding.message
+            )
         })
         .collect();
-    crate::bot::markdown::compute_finding_progress(&findings.findings, &prior)
+    if !lines.is_empty() {
+        sections.push(format!(
+            "Already reported on this PR by an earlier review. Don't repeat one \
+             unless the new diff changed it; do say if a fix is wrong or incomplete:\n{}",
+            lines.join("\n")
+        ));
+    }
+    if !dismissed.is_empty() {
+        let lines = dismissed
+            .iter()
+            .map(|(detector, message)| format!("- [{detector}] {message}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!(
+            "Maintainers of this repo explicitly dismissed these findings. Treat them as \
+             settled team preference and raise something of this shape only if this diff \
+             makes it materially worse:\n{lines}"
+        ));
+    }
+    (!sections.is_empty()).then(|| format!("Prior review memory:\n\n{}", sections.join("\n\n")))
+}
+
+fn finding_progress(
+    prior: &[crate::db::models::Finding],
+    findings: &detectors::Findings,
+) -> Option<crate::bot::markdown::FindingProgress> {
+    if prior.is_empty() && findings.is_empty() {
+        return None;
+    }
+    let prior_rows: Vec<(String, String, String)> = prior
+        .iter()
+        .map(|finding| {
+            let label = crate::bot::markdown::guide_label_parts(
+                &finding.detector,
+                &finding.message,
+                &finding.file_path,
+                finding.line_start,
+            );
+            (
+                finding.fingerprint.clone().unwrap_or_default(),
+                label,
+                finding.severity.clone(),
+            )
+        })
+        .collect();
+    crate::bot::markdown::compute_finding_progress(&findings.findings, &prior_rows)
 }
 
 async fn maybe_sequence_diagram(
