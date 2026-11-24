@@ -536,6 +536,147 @@ async fn index_batch_replaces_files_and_removes_stale_edges() {
 }
 
 #[tokio::test]
+async fn index_replacement_removes_incoming_edges_to_removed_symbols() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let repo = format!("acme/index-incoming-{}", uuid::Uuid::new_v4().simple());
+    use codasaurus::index::extract::{ExtractedEdge, ExtractedSymbol, FileIndex};
+    use codasaurus::index::store;
+
+    let files = vec![
+        FileIndex {
+            file_path: "src/a.rs".into(),
+            symbols: vec![ExtractedSymbol {
+                name: "entry".into(),
+                kind: "function".into(),
+                signature: None,
+                line: 1,
+            }],
+            edges: vec![],
+        },
+        FileIndex {
+            file_path: "src/b.rs".into(),
+            symbols: vec![ExtractedSymbol {
+                name: "caller".into(),
+                kind: "function".into(),
+                signature: None,
+                line: 1,
+            }],
+            edges: vec![ExtractedEdge {
+                from_symbol: "caller".into(),
+                to_symbol: "entry".into(),
+                edge_kind: "CALLS".into(),
+            }],
+        },
+    ];
+    store::replace_files_index(&pool, &repo, &files)
+        .await
+        .expect("replace index batch");
+    assert_eq!(
+        store::callers_of_many(&pool, &repo, &["entry".to_string()])
+            .await
+            .expect("callers before replacement")
+            .len(),
+        1
+    );
+
+    store::replace_files_index(
+        &pool,
+        &repo,
+        &[FileIndex {
+            file_path: "src/a.rs".into(),
+            symbols: vec![],
+            edges: vec![],
+        }],
+    )
+    .await
+    .expect("replace removed symbol");
+    assert!(store::callers_of_many(&pool, &repo, &["entry".to_string()])
+        .await
+        .expect("callers after replacement")
+        .is_empty());
+
+    sqlx::query("DELETE FROM repo_symbols WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup symbols");
+    sqlx::query("DELETE FROM repo_edges WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup edges");
+    sqlx::query("DELETE FROM index_status WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup status");
+}
+
+#[tokio::test]
+async fn semantic_reindex_removes_embeddings_for_removed_symbols() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let has_embeddings: bool =
+        sqlx::query_scalar("SELECT to_regclass('repo_symbol_embeddings') IS NOT NULL")
+            .fetch_one(pool.as_pg())
+            .await
+            .expect("embedding table probe");
+    if !has_embeddings {
+        tracing::warn!("pgvector unavailable; semantic embedding cleanup test not applicable");
+        return;
+    }
+
+    let repo = format!("acme/index-embedding-{}", uuid::Uuid::new_v4().simple());
+    let file_path = "src/removed.py";
+    sqlx::query(
+        "INSERT INTO repo_symbol_embeddings
+            (repo_full_name, file_path, symbol_name, line, content_hash, embedding, model)
+         VALUES ($1, $2, 'removed', 1, 'hash', array_fill(0::real, ARRAY[1536])::vector, 'test')",
+    )
+    .bind(&repo)
+    .bind(file_path)
+    .execute(pool.as_pg())
+    .await
+    .expect("insert stale embedding");
+
+    let llm_cfg = codasaurus::llm::LlmConfig {
+        api_key: String::new(),
+        model: String::new(),
+        text_model: String::new(),
+        max_tokens: 0,
+        temperature: 0.0,
+        base_url: String::new(),
+        embedding_model: String::new(),
+    };
+    let files = vec![codasaurus::index::extract::FileIndex {
+        file_path: file_path.into(),
+        symbols: vec![],
+        edges: vec![],
+    }];
+    codasaurus::index::semantic::reindex_repo_embeddings(&pool, &llm_cfg, &repo, &files)
+        .await
+        .expect("semantic reindex");
+
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM repo_symbol_embeddings
+         WHERE repo_full_name = $1 AND file_path = $2",
+    )
+    .bind(&repo)
+    .bind(file_path)
+    .fetch_one(pool.as_pg())
+    .await
+    .expect("remaining embeddings");
+    assert_eq!(remaining, 0);
+
+    sqlx::query("DELETE FROM repo_symbol_embeddings WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup embeddings");
+}
+
+#[tokio::test]
 async fn latest_completed_findings_ignore_newer_pending_reviews() {
     let _guard = TEST_SERIAL.lock().await;
     let pool = db::create_pool(&pg_url()).await.expect("pool");

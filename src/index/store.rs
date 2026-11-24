@@ -1,4 +1,4 @@
-//! PostgreSQL persistence for the whole-repo symbol index.
+//! `PostgreSQL` persistence for the whole-repo symbol index.
 
 use crate::db::DbPool;
 use crate::index::extract::FileIndex;
@@ -6,25 +6,10 @@ use sqlx::Row;
 
 const INDEX_READY: &str = "ready";
 
-/// Wipe the repo's index and insert a fresh full build in one transaction.
-pub async fn replace_repo_index(
-    pool: &DbPool,
-    repo_full_name: &str,
-    files: &[FileIndex],
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.as_pg().begin().await?;
-    sqlx::query("DELETE FROM repo_symbols WHERE repo_full_name = $1")
-        .bind(repo_full_name)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM repo_edges WHERE repo_full_name = $1")
-        .bind(repo_full_name)
-        .execute(&mut *tx)
-        .await?;
-    finish_index_write(tx, repo_full_name, files).await
-}
-
 /// Incremental update for changed files, replacing only their rows in one transaction.
+///
+/// # Errors
+/// Returns an error when a database operation fails.
 pub async fn replace_files_index(
     pool: &DbPool,
     repo_full_name: &str,
@@ -33,14 +18,20 @@ pub async fn replace_files_index(
     if files.is_empty() {
         return Ok(());
     }
-    let paths: Vec<String> = files.iter().map(|file| file.file_path.clone()).collect();
+    let paths: Vec<&str> = files.iter().map(|file| file.file_path.as_str()).collect();
     let mut tx = pool.as_pg().begin().await?;
     // Edges first: the subquery reads the very rows the symbol DELETE removes,
     // so deleting symbols first would leave every stale edge behind forever.
     sqlx::query(
-        "DELETE FROM repo_edges WHERE repo_full_name = $1 AND
-         (from_symbol = ANY($2) OR
-          from_symbol IN (SELECT symbol_name FROM repo_symbols WHERE repo_full_name = $1 AND file_path = ANY($2)))",
+        "WITH changed_symbols AS MATERIALIZED (
+            SELECT symbol_name FROM repo_symbols
+            WHERE repo_full_name = $1 AND file_path = ANY($2)
+         )
+         DELETE FROM repo_edges
+         WHERE repo_full_name = $1
+           AND (from_symbol = ANY($2)
+                OR from_symbol IN (SELECT symbol_name FROM changed_symbols)
+                OR to_symbol IN (SELECT symbol_name FROM changed_symbols))",
     )
     .bind(repo_full_name)
     .bind(&paths)
@@ -62,7 +53,7 @@ async fn finish_index_write(
     files: &[FileIndex],
 ) -> Result<(), sqlx::Error> {
     insert_files(&mut tx, repo, files).await?;
-    upsert_status(&mut tx, repo, INDEX_READY, None).await?;
+    upsert_status(&mut tx, repo, INDEX_READY).await?;
     tx.commit().await
 }
 
@@ -70,29 +61,29 @@ async fn finish_index_write(
 /// of one per symbol/edge (a full repo build is tens of thousands of rows).
 async fn insert_files(tx: &mut Tx<'_>, repo: &str, files: &[FileIndex]) -> Result<(), sqlx::Error> {
     let sym_total: usize = files.iter().map(|f| f.symbols.len()).sum();
-    let mut paths = Vec::with_capacity(sym_total);
-    let mut names = Vec::with_capacity(sym_total);
-    let mut kinds = Vec::with_capacity(sym_total);
-    let mut signatures: Vec<Option<String>> = Vec::with_capacity(sym_total);
+    let mut paths: Vec<&str> = Vec::with_capacity(sym_total);
+    let mut names: Vec<&str> = Vec::with_capacity(sym_total);
+    let mut kinds: Vec<&str> = Vec::with_capacity(sym_total);
+    let mut signatures: Vec<Option<&str>> = Vec::with_capacity(sym_total);
     let mut lines = Vec::with_capacity(sym_total);
 
     let edge_total: usize = files.iter().map(|f| f.edges.len()).sum();
-    let mut from_symbols = Vec::with_capacity(edge_total);
-    let mut to_symbols = Vec::with_capacity(edge_total);
-    let mut edge_kinds = Vec::with_capacity(edge_total);
+    let mut from_symbols: Vec<&str> = Vec::with_capacity(edge_total);
+    let mut to_symbols: Vec<&str> = Vec::with_capacity(edge_total);
+    let mut edge_kinds: Vec<&str> = Vec::with_capacity(edge_total);
 
     for file in files {
         for sym in &file.symbols {
-            paths.push(file.file_path.clone());
-            names.push(sym.name.clone());
-            kinds.push(sym.kind.clone());
-            signatures.push(sym.signature.clone());
+            paths.push(file.file_path.as_str());
+            names.push(sym.name.as_str());
+            kinds.push(sym.kind.as_str());
+            signatures.push(sym.signature.as_deref());
             lines.push(sym.line);
         }
         for edge in &file.edges {
-            from_symbols.push(edge.from_symbol.clone());
-            to_symbols.push(edge.to_symbol.clone());
-            edge_kinds.push(edge.edge_kind.clone());
+            from_symbols.push(edge.from_symbol.as_str());
+            to_symbols.push(edge.to_symbol.as_str());
+            edge_kinds.push(edge.edge_kind.as_str());
         }
     }
 
@@ -128,23 +119,17 @@ async fn insert_files(tx: &mut Tx<'_>, repo: &str, files: &[FileIndex]) -> Resul
     Ok(())
 }
 
-async fn upsert_status(
-    tx: &mut Tx<'_>,
-    repo: &str,
-    status: &str,
-    error: Option<&str>,
-) -> Result<(), sqlx::Error> {
+async fn upsert_status(tx: &mut Tx<'_>, repo: &str, status: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO index_status (repo_full_name, status, built_at, error)
-         VALUES ($1, $2, NOW(), $3)
+         VALUES ($1, $2, NOW(), NULL)
          ON CONFLICT (repo_full_name)
          DO UPDATE SET status = EXCLUDED.status,
                        built_at = EXCLUDED.built_at,
-                       error = EXCLUDED.error",
+                       error = NULL",
     )
     .bind(repo)
     .bind(status)
-    .bind(error)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -161,6 +146,9 @@ pub async fn index_status(pool: &DbPool, repo: &str) -> Option<(String, String)>
 }
 
 /// Callers of many symbols, capped per symbol.
+///
+/// # Errors
+/// Returns an error when the caller query fails.
 pub async fn callers_of_many(
     pool: &DbPool,
     repo: &str,
@@ -186,6 +174,9 @@ pub async fn callers_of_many(
 }
 
 /// Symbols defined in many files, ordered by path and line.
+///
+/// # Errors
+/// Returns an error when the symbol query fails.
 pub async fn symbols_in_files(
     pool: &DbPool,
     repo: &str,
