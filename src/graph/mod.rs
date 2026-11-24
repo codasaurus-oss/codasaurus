@@ -81,7 +81,7 @@ impl CodeGraph {
         self.blast_radius_capped(symbol, max_hops, usize::MAX)
     }
 
-    /// Like [`blast_radius`], but stops once `cap` nodes have been collected.
+    /// Like [`Self::blast_radius`], but stops once `cap` nodes have been collected.
     pub fn blast_radius_capped(
         &self,
         symbol: &str,

@@ -258,7 +258,7 @@ impl LlmConfig {
         Self::from_env()
     }
 
-    /// Human-readable reason when [`from_db_or_env`] returns `None` (for PR replies).
+    /// Human-readable reason when [`Self::from_db_or_env`] returns `None` (for PR replies).
     pub async fn unavailable_reason(pool: Option<&crate::db::DbPool>) -> String {
         match block_reason(pool).await {
             Some(LlmBlock::Disabled) => "LLM provider is set to **disabled** under Settings → LLM. Set it to LiteLLM and save the gateway key.".into(),
