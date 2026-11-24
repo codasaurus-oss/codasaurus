@@ -299,7 +299,16 @@ pub async fn schedule_review(
         "INSERT INTO review_jobs (repo, pr_number, head_sha, action, status, attempts, priority, run_at, created_at, updated_at)
          VALUES (?, ?, ?, 'scheduled', 'pending', 0, ?, ?, NOW(), NOW())
          ON CONFLICT(repo, pr_number, head_sha) DO UPDATE SET
-           run_at = excluded.run_at, priority = excluded.priority, updated_at = NOW()
+           run_at = excluded.run_at,
+           priority = excluded.priority,
+           -- An explicit schedule must run even if this SHA was already reviewed;
+           -- leave an in-flight run alone.
+           status = CASE WHEN review_jobs.status = 'running' THEN 'running' ELSE 'pending' END,
+           attempts = CASE WHEN review_jobs.status = 'running' THEN review_jobs.attempts ELSE 0 END,
+           lease_id = CASE WHEN review_jobs.status = 'running' THEN review_jobs.lease_id ELSE NULL END,
+           leased_until = CASE WHEN review_jobs.status = 'running' THEN review_jobs.leased_until ELSE NULL END,
+           last_error = CASE WHEN review_jobs.status = 'running' THEN review_jobs.last_error ELSE NULL END,
+           updated_at = NOW()
          RETURNING id",
         repo,
         pr_number,
