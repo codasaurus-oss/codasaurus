@@ -418,97 +418,150 @@ pub async fn fetch_external_tickets(pr_title: &str, pr_body: &str) -> Vec<IssueC
     let jira_configured = jira_base.is_some() && jira_email.is_some() && jira_token.is_some();
     let linear_configured = linear_key.is_some();
 
-    if let (Some(base), Some(email), Some(token)) =
-        (jira_base.clone(), jira_email.clone(), jira_token.clone())
-    {
-        if crate::ssrf::validate_http_url(base.trim(), false).is_ok() {
-            let client = issue_tracker_client();
-            for key in &keys {
-                let url = format!("{}/rest/api/3/issue/{}", base.trim_end_matches('/'), key);
-                if let Ok(resp) = client
-                    .get(&url)
-                    .basic_auth(&email, Some(&token))
-                    .header("Accept", "application/json")
-                    .send()
-                    .await
-                {
-                    if resp.status().is_success() {
-                        if let Ok(v) = resp.json::<serde_json::Value>().await {
-                            let title = v["fields"]["summary"].as_str().unwrap_or(key).to_string();
-                            let body = jira_description_text(&v["fields"]["description"]);
-                            out.push(IssueContext {
-                                number: ticket_number(key),
-                                title: format!("[Jira {key}] {title}"),
-                                body,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    } else if !keys.is_empty() && !jira_configured && !linear_configured {
-        // Ticket keys without a configured integration stay silent — placeholders
-        // looked like linked issues and scored as "unclear" in assessments.
+    if !keys.is_empty() && !jira_configured && !linear_configured {
         tracing::debug!(
             count = keys.len(),
             "ticket keys in PR but issue tracker not configured; skipping"
         );
     }
 
-    if let Some(api_key) = linear_key {
-        let client = issue_tracker_client();
-        for id in &linear_ids {
-            let from_url = linear_from_url.iter().any(|u| u == id);
-            // `issue(id:)` accepts Linear identifiers like ENG-123 (and UUIDs).
+    let jira = async {
+        let (Some(base), Some(email), Some(token)) = (jira_base, jira_email, jira_token) else {
+            return Vec::new();
+        };
+        if crate::ssrf::validate_http_url(base.trim(), false).is_err() {
+            return Vec::new();
+        }
+        fetch_jira_issues(&issue_tracker_client(), &base, &email, &token, &keys).await
+    };
+    let linear = async {
+        let Some(api_key) = linear_key else {
+            return Vec::new();
+        };
+        fetch_linear_issues(
+            &issue_tracker_client(),
+            &api_key,
+            &linear_ids,
+            &linear_from_url,
+        )
+        .await
+    };
+    let (jira, linear) = tokio::join!(jira, linear);
+    out.extend(jira);
+    out.extend(linear);
+    out
+}
+
+async fn fetch_jira_issues(
+    client: &reqwest::Client,
+    base: &str,
+    email: &str,
+    token: &str,
+    keys: &[String],
+) -> Vec<IssueContext> {
+    let mut handles = Vec::with_capacity(keys.len());
+    for key in keys {
+        let client = client.clone();
+        let base = base.trim_end_matches('/').to_string();
+        let email = email.to_string();
+        let token = token.to_string();
+        let key = key.clone();
+        handles.push(tokio::spawn(async move {
+            let url = format!("{base}/rest/api/3/issue/{key}");
+            let response = client
+                .get(&url)
+                .basic_auth(&email, Some(&token))
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let value = response.json::<serde_json::Value>().await.ok()?;
+            let title = value["fields"]["summary"]
+                .as_str()
+                .unwrap_or(&key)
+                .to_string();
+            Some(IssueContext {
+                number: ticket_number(&key),
+                title: format!("[Jira {key}] {title}"),
+                body: jira_description_text(&value["fields"]["description"]),
+            })
+        }));
+    }
+    collect_indexed(handles).await
+}
+
+async fn fetch_linear_issues(
+    client: &reqwest::Client,
+    api_key: &str,
+    ids: &[String],
+    from_urls: &[String],
+) -> Vec<IssueContext> {
+    let mut handles = Vec::with_capacity(ids.len());
+    for id in ids {
+        let client = client.clone();
+        let api_key = api_key.to_string();
+        let id = id.clone();
+        let from_url = from_urls.iter().any(|candidate| candidate == &id);
+        handles.push(tokio::spawn(async move {
             let query = serde_json::json!({
                 "query": "query($id: String!) { issue(id: $id) { identifier title description } }",
                 "variables": { "id": id }
             });
-            match client
+            let response = client
                 .post("https://api.linear.app/graphql")
-                .header("Authorization", api_key.as_str())
+                .header("Authorization", api_key)
                 .header("Content-Type", "application/json")
                 .json(&query)
                 .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(v) = resp.json::<serde_json::Value>().await {
-                        let node = &v["data"]["issue"];
+                .await;
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    if let Ok(value) = response.json::<serde_json::Value>().await {
+                        let node = &value["data"]["issue"];
                         if node.is_object() && !node.is_null() {
-                            let title = node["title"].as_str().unwrap_or(id).to_string();
+                            let title = node["title"].as_str().unwrap_or(&id).to_string();
                             let body = node["description"]
                                 .as_str()
-                                .map(|s| s.chars().take(800).collect());
-                            out.push(IssueContext {
-                                number: ticket_number(id),
+                                .map(|description| description.chars().take(800).collect());
+                            return Some(IssueContext {
+                                number: ticket_number(&id),
                                 title: format!("[Linear {id}] {title}"),
                                 body,
                             });
-                            continue;
                         }
                     }
-                    // Bare keys may be Jira-only — only surface misses for explicit Linear URLs.
-                    if from_url {
-                        out.push(IssueContext {
-                            number: 0,
-                            title: format!("[Linear {id}]"),
-                            body: Some("Linked from PR (fetch returned no issue).".into()),
-                        });
-                    }
-                }
-                _ if from_url => {
-                    out.push(IssueContext {
+                    from_url.then(|| IssueContext {
                         number: 0,
                         title: format!("[Linear {id}]"),
-                        body: Some("Linked from PR (Linear fetch failed).".into()),
-                    });
+                        body: Some("Linked from PR (fetch returned no issue).".into()),
+                    })
                 }
-                _ => {}
+                _ if from_url => Some(IssueContext {
+                    number: 0,
+                    title: format!("[Linear {id}]"),
+                    body: Some("Linked from PR (Linear fetch failed).".into()),
+                }),
+                _ => None,
             }
+        }));
+    }
+    collect_indexed(handles).await
+}
+
+async fn collect_indexed<T: Send + 'static>(
+    handles: Vec<tokio::task::JoinHandle<Option<T>>>,
+) -> Vec<T> {
+    let mut indexed = Vec::with_capacity(handles.len());
+    for (index, handle) in handles.into_iter().enumerate() {
+        if let Ok(Some(item)) = handle.await {
+            indexed.push((index, item));
         }
     }
-    out
+    indexed.sort_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, item)| item).collect()
 }
 
 /// Assemble remote awareness used by detectors + LLM.
@@ -535,7 +588,7 @@ pub async fn gather_remote_context(
         head_ref
     };
 
-    let (manifests_res, guidelines_res, codeowners_res, issues_res) = tokio::join!(
+    let (manifests_res, guidelines_res, codeowners_res, issues_res, external_tickets) = tokio::join!(
         bootstrap_manifests(
             client,
             headers,
@@ -547,6 +600,7 @@ pub async fn gather_remote_context(
         fetch_guidelines(client, headers, repo, head_ref),
         fetch_codeowner_reviewers(client, headers, repo, git_ref, changed_paths),
         fetch_linked_issues(client, headers, repo, pr_title, pr_body),
+        fetch_external_tickets(pr_title, pr_body),
     );
 
     let manifests = manifests_res.unwrap_or_default();
@@ -559,7 +613,7 @@ pub async fn gather_remote_context(
     let codeowner_reviewers = codeowners_res.unwrap_or_default();
     let linked_issues = {
         let mut issues = issues_res.unwrap_or_default();
-        issues.extend(fetch_external_tickets(pr_title, pr_body).await);
+        issues.extend(external_tickets);
         issues
     };
 
