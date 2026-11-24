@@ -80,6 +80,12 @@ codasaurus queue schedule --repo <owner/repo> --pr 42 --sha <sha> --at 2026-11-2
 
 ---
 
+## Testing note
+
+`cargo test` uses `DATABASE_URL`/`CODASAURUS_TEST_DATABASE_URL` and clears
+`review_jobs`. Stop the running app or use a separate test database before
+running the suite, otherwise live workers claim the test jobs.
+
 ## Docs
 
 | Guide                                                   | Topic                              |
