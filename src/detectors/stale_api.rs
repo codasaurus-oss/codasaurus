@@ -32,7 +32,6 @@ pub fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
 }
 
 struct StalePattern {
-    _name: &'static str,
     severity: &'static str,
     regex: regex::Regex,
     message: &'static str,
@@ -42,14 +41,12 @@ struct StalePattern {
 
 impl StalePattern {
     fn new(
-        name: &'static str,
         severity: &'static str,
         pattern: &str,
         message: &'static str,
         suggestion: &'static str,
     ) -> Self {
         Self {
-            _name: name,
             severity,
             regex: regex::Regex::new(pattern).expect("invalid stale-api regex"),
             message,
@@ -59,21 +56,15 @@ impl StalePattern {
     }
 
     fn with_codemod(
-        name: &'static str,
         severity: &'static str,
         pattern: &str,
         message: &'static str,
         suggestion: &'static str,
         codemod: &'static str,
     ) -> Self {
-        Self {
-            _name: name,
-            severity,
-            regex: regex::Regex::new(pattern).expect("invalid stale-api regex"),
-            message,
-            suggestion,
-            codemod: Some(codemod),
-        }
+        let mut stale = Self::new(severity, pattern, message, suggestion);
+        stale.codemod = Some(codemod);
+        stale
     }
 }
 
@@ -82,141 +73,98 @@ use std::sync::LazyLock;
 static STALE_PATTERNS: LazyLock<Vec<StalePattern>> = LazyLock::new(|| {
     vec![
         // --- JavaScript / TypeScript ---
-        StalePattern::new(
-            "react-componentWillMount",
-            "info",
+        StalePattern::new("info",
             r"componentWillMount\s*\(",
             "`componentWillMount` is deprecated. Use `componentDidMount` or constructor instead.",
             "Replace `componentWillMount` with `componentDidMount` or move logic to the constructor.",
         ),
-        StalePattern::new(
-            "react-componentWillUpdate",
-            "info",
+        StalePattern::new("info",
             r"componentWillUpdate\s*\(",
             "`componentWillUpdate` is deprecated. Use `componentDidUpdate` or `getSnapshotBeforeUpdate` instead.",
             "Replace `componentWillUpdate` with `componentDidUpdate`.",
         ),
-        StalePattern::new(
-            "react-componentWillReceiveProps",
-            "info",
+        StalePattern::new("info",
             r"componentWillReceiveProps\s*\(",
             "`componentWillReceiveProps` is deprecated. Use `getDerivedStateFromProps` instead.",
             "Replace `componentWillReceiveProps` with `getDerivedStateFromProps`.",
         ),
-        StalePattern::new(
-            "react-findDOMNode",
-            "warning",
+        StalePattern::new("warning",
             r"findDOMNode\s*\(",
             "`findDOMNode` is deprecated. Use refs with callback or createRef instead.",
             "Replace `findDOMNode` with a ref callback or `createRef`.",
         ),
-        StalePattern::new(
-            "react-string-refs",
-            "warning",
+        StalePattern::new("warning",
             r#"this\.refs\.\w+"#,
             "String refs are deprecated. Use `React.createRef()` or callback refs instead.",
             "Replace string refs with `React.createRef()` or `useRef()`.",
         ),
-        StalePattern::new(
-            "react-propTypes-deprecated",
-            "warning",
+        StalePattern::new("warning",
             r#"import\s+PropTypes\s+from\s+['"]prop-types['"]"#,
             "Using PropTypes when TypeScript types are preferred. Consider using TypeScript interfaces instead.",
             "Replace PropTypes with TypeScript interfaces or types.",
         ),
         // --- Python ---
-        StalePattern::new(
-            "python-urllib2",
-            "warning",
+        StalePattern::new("warning",
             r"import urllib2",
             "`urllib2` was merged into `urllib.request` in Python 3. Use `urllib.request` instead.",
             "Replace `import urllib2` with `import urllib.request`.",
         ),
-        StalePattern::new(
-            "python-print-statement",
-            "info",
+        StalePattern::new("info",
             r#"(?m)^\s*print\s+"[^"]*"$"#,
             "Python 2 print statement detected. Use `print()` function instead.",
             "Replace `print \"...\"` with `print(\"...\")`.",
         ),
-        StalePattern::new(
-            "python-string-exceptions",
-            "warning",
+        StalePattern::new("warning",
             r#"raise\s+['"][^'"]*['"]"#,
             "Raising string exceptions is deprecated. Use an Exception subclass.",
             "Replace the string with an appropriate Exception class (e.g. `ValueError`, `TypeError`).",
         ),
         // --- Rust ---
-        StalePattern::new(
-            "rust-try-macro",
-            "info",
+        StalePattern::new("info",
             r"try!",
             "The `try!` macro is deprecated. Use the `?` operator instead.",
             "Replace `try!` with `?`.",
         ),
-        StalePattern::new(
-            "rust-extern-crate",
-            "info",
+        StalePattern::new("info",
             r"extern crate \w+;",
             "`extern crate` is no longer needed in Rust 2018+. Use `use` directly.",
             "Remove `extern crate` and add the crate to Cargo.toml if needed.",
         ),
         // --- CI / Docker ---
-        StalePattern::with_codemod(
-            "docker-add-curl",
-            "info",
+        StalePattern::with_codemod("info",
             r"apt-get install.* curl",
             "`curl` is available by default in most modern images. Avoid re-installing.",
             "Remove `curl` from the install list if the base image already includes it.",
             "apt-get install -y --no-install-recommends ",
         ),
         // --- Node.js ---
-        StalePattern::new(
-            "node-deprecated-api",
-            "warning",
+        StalePattern::new("warning",
             r#"require\s*\(\s*['"]request['"]\s*\)"#,
             "The `request` package is deprecated. Use `fetch` (built-in) or `got`/`undici`.",
             "Replace `require('request')` with the built-in `fetch` or `undici`.",
         ),
-        StalePattern::new(
-            "node-util-promisify-deprecated",
-            "info",
-            r"util\.promisify",
-            "`util.promisify` is deprecated in favor of `fs.promises` and native Promise APIs.",
-            "Use native Promise-based APIs instead of `util.promisify`.",
-        ),
         // --- Modern framework / API drift (replaces common LLM nits) ---
-        StalePattern::new(
-            "react-createClass",
-            "warning",
+        StalePattern::new("warning",
             r"React\.createClass\s*\(",
             "`React.createClass` is removed from modern React. Use functions or ES6 classes.",
             "Convert to a function component or `class extends React.Component`.",
         ),
-        StalePattern::new(
-            "jquery-ajax",
-            "info",
+        StalePattern::new("info",
             r"\$\.ajax\s*\(",
             "`$.ajax` is legacy; prefer `fetch` / native HTTP clients.",
             "Replace jQuery AJAX with `fetch` or your app's HTTP helper.",
         ),
-        StalePattern::new(
-            "moment-js",
-            "info",
+        StalePattern::new("info",
             r#"from\s+['"]moment['"]|require\s*\(\s*['"]moment['"]\s*\)"#,
             "`moment` is in maintenance mode. Prefer `Temporal`, `dayjs`, or `date-fns`.",
             "Migrate away from Moment.js to a lighter date library.",
         ),
-        StalePattern::new(
-            "enzyme",
-            "info",
+        StalePattern::new("info",
             r#"from\s+['"]enzyme['"]|require\s*\(\s*['"]enzyme['"]\s*\)"#,
             "Enzyme is unmaintained for modern React. Prefer Testing Library / Playwright.",
             "Replace Enzyme with `@testing-library/react`.",
         ),
-        StalePattern::new(
-            "python-asyncio-get-event-loop",
-            "info",
+        StalePattern::new("info",
             r"asyncio\.get_event_loop\s*\(\s*\)",
             "`asyncio.get_event_loop()` is discouraged; use `get_running_loop()` / `asyncio.run()`.",
             "Prefer `asyncio.run()` or `asyncio.get_running_loop()`.",
@@ -303,5 +251,20 @@ mod tests {
             findings.is_empty(),
             "clean code should have no stale-api findings"
         );
+    }
+
+    #[test]
+    fn util_promisify_is_not_deprecated() {
+        let file = ParsedFile {
+            path: "test.js".into(),
+            language: "javascript".into(),
+            raw_content: "const read = util.promisify(fs.readFile);".into(),
+            lines: vec![crate::parser::SourceLine {
+                number: 1,
+                content: "const read = util.promisify(fs.readFile);".into(),
+            }],
+            imports: vec![],
+        };
+        assert!(detect(&[file]).is_empty());
     }
 }
