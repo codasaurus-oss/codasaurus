@@ -17,7 +17,7 @@ use crate::dep_parser::{
 type ManifestDep = crate::dep_parser::VersionedDep;
 
 pub async fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
-    let mut findings = Vec::new();
+    let mut manifests = Vec::new();
 
     for file in parsed_files {
         let path = file.path.to_lowercase();
@@ -32,36 +32,44 @@ pub async fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
         } else {
             continue;
         };
-        if deps.is_empty() {
-            continue;
-        }
-
-        let queries: Vec<(String, String, Option<String>)> = deps
-            .iter()
-            .map(|d| {
-                (
-                    ecosystem.to_string(),
-                    d.name.clone(),
-                    Some(d.version.clone()),
-                )
-            })
-            .collect();
-
-        let results = match crate::registry::query_osv_batch(&queries).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(file = %file.path, error = %e, "OSV querybatch failed, skipping (fail-open)");
-                continue;
-            }
-        };
-
-        for (dep, vulns) in deps.iter().zip(results.iter()) {
-            for vuln in vulns {
-                findings.push(finding_for(&file.path, dep, vuln));
-            }
+        if !deps.is_empty() {
+            manifests.push((file, ecosystem, deps));
         }
     }
 
+    let queries: Vec<(String, String, Option<String>)> = manifests
+        .iter()
+        .flat_map(|(_, ecosystem, deps)| {
+            deps.iter().map(|dep| {
+                (
+                    (*ecosystem).to_string(),
+                    dep.name.clone(),
+                    Some(dep.version.clone()),
+                )
+            })
+        })
+        .collect();
+    if queries.is_empty() {
+        return Vec::new();
+    }
+
+    let results = match crate::registry::query_osv_batch(&queries).await {
+        Ok(results) => results,
+        Err(error) => {
+            tracing::warn!(error = %error, "OSV querybatch failed, skipping (fail-open)");
+            return Vec::new();
+        }
+    };
+
+    let mut results = results.into_iter();
+    let mut findings = Vec::new();
+    for (file, _, deps) in manifests {
+        for dep in deps {
+            for vuln in results.next().unwrap_or_default() {
+                findings.push(finding_for(&file.path, &dep, &vuln));
+            }
+        }
+    }
     findings
 }
 

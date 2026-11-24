@@ -13,16 +13,20 @@ pub fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
         return Vec::new();
     }
 
-    let changed_with_functions: Vec<&ParsedFile> = parsed_files
-        .iter()
-        .filter(|f| file_has_new_function(f))
-        .collect();
+    let mut first = None;
+    let mut count = 0;
+    for file in parsed_files {
+        if file_has_new_function(file) {
+            first.get_or_insert(file);
+            count += 1;
+        }
+    }
 
-    let Some(first) = changed_with_functions.first() else {
+    let Some(first) = first else {
         return Vec::new();
     };
 
-    let n = changed_with_functions.len();
+    let n = count;
     let plural = if n == 1 { "" } else { "s" };
     vec![Finding {
         detector: "test-coverage".to_string(),

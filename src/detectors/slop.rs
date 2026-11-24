@@ -65,22 +65,22 @@ pub fn detect_slop(
     }
 
     // Check 5: High comment-to-code ratio
-    let total_lines: usize = files.iter().map(|f| f.lines.len()).sum();
-    let comment_lines: usize = files
-        .iter()
-        .map(|f| {
-            f.lines
-                .iter()
-                .filter(|l| {
-                    let t = l.content.trim();
-                    t.starts_with("//")
-                        || t.starts_with('#')
-                        || t.starts_with("/*")
-                        || t.starts_with('*')
-                })
-                .count()
-        })
-        .sum();
+    let mut total_lines = 0;
+    let mut comment_lines = 0;
+    for file in files {
+        total_lines += file.lines.len();
+        comment_lines += file
+            .lines
+            .iter()
+            .filter(|line| {
+                let line = line.content.trim();
+                line.starts_with("//")
+                    || line.starts_with('#')
+                    || line.starts_with("/*")
+                    || line.starts_with('*')
+            })
+            .count();
+    }
     if total_lines > 0 && comment_lines > total_lines / 3 {
         score += 1;
         reasons.push("High comment-to-code ratio");

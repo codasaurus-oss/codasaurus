@@ -25,7 +25,7 @@ pub fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
             continue;
         };
         for dep in deps {
-            if !checked.insert((registry.to_string(), dep.clone())) {
+            if !checked.insert((registry, dep.clone())) {
                 continue;
             }
             check_dep(&mut findings, file, registry, &dep);
