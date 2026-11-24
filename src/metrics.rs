@@ -145,22 +145,34 @@ pub fn record_dismissal() {
 
 /// Refresh DB-backed gauges (queue depth, dismissals) before scrape.
 pub async fn refresh_from_db(pool: &crate::db::DbPool) {
-    if let Ok(stats) = crate::bot::queue::queue_depth(pool).await {
-        QUEUE_PENDING.store(stats.pending as u64, Ordering::Relaxed);
-        QUEUE_RUNNING.store(stats.running as u64, Ordering::Relaxed);
-        QUEUE_FAILED.store(stats.failed as u64, Ordering::Relaxed);
-        QUEUE_DEAD.store(stats.dead as u64, Ordering::Relaxed);
-        QUEUE_OLDEST_READY_AGE.store(stats.oldest_ready_age_secs as u64, Ordering::Relaxed);
+    let (stats, dismissals, tier1) = tokio::join!(
+        crate::bot::queue::queue_depth(pool),
+        async { crate::db::db_scalar!(pool, i64, "SELECT COUNT(*) FROM dismissed_findings") },
+        async {
+            crate::db::db_scalar!(
+                pool,
+                i64,
+                "SELECT COUNT(*) FROM findings WHERE detector IN ('secrets', 'vulnerabilities', 'iac')"
+            )
+        },
+    );
+    match stats {
+        Ok(stats) => {
+            QUEUE_PENDING.store(stats.pending as u64, Ordering::Relaxed);
+            QUEUE_RUNNING.store(stats.running as u64, Ordering::Relaxed);
+            QUEUE_FAILED.store(stats.failed as u64, Ordering::Relaxed);
+            QUEUE_DEAD.store(stats.dead as u64, Ordering::Relaxed);
+            QUEUE_OLDEST_READY_AGE.store(stats.oldest_ready_age_secs as u64, Ordering::Relaxed);
+        }
+        Err(error) => tracing::debug!(error = %error, "failed to refresh queue metrics"),
     }
-    if let Ok(n) = crate::db::db_scalar!(pool, i64, "SELECT COUNT(*) FROM dismissed_findings") {
-        DISMISSALS_TOTAL.store(n as u64, Ordering::Relaxed);
+    match dismissals {
+        Ok(count) => DISMISSALS_TOTAL.store(count as u64, Ordering::Relaxed),
+        Err(error) => tracing::debug!(error = %error, "failed to refresh dismissal metrics"),
     }
-    if let Ok(n) = crate::db::db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM findings WHERE detector IN ('secrets', 'vulnerabilities', 'iac')"
-    ) {
-        TIER1_FINDINGS_TOTAL.store(n as u64, Ordering::Relaxed);
+    match tier1 {
+        Ok(count) => TIER1_FINDINGS_TOTAL.store(count as u64, Ordering::Relaxed),
+        Err(error) => tracing::debug!(error = %error, "failed to refresh finding metrics"),
     }
 }
 
