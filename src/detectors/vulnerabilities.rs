@@ -22,22 +22,16 @@ pub fn detect(parsed_files: &[ParsedFile], reachability_enabled: bool) -> Vec<Fi
     let mut checked = std::collections::HashSet::new();
 
     for file in parsed_files {
-        let registry_name = match file.language.as_str() {
-            "javascript" | "typescript" | "tsx" | "jsx" => "npm",
-            "python" => "pypi",
-            "rust" => "crates.io",
-            _ => continue,
+        let Some(registry_name) = crate::detectors::registry_for_language(&file.language) else {
+            continue;
         };
+        if registry_name == "go" {
+            continue;
+        }
 
-        for import in &file.imports {
-            let package = crate::detectors::extract_package_name(&import.name);
-            let package = match package {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // Skip relative imports
-            if package.starts_with('.') || package.starts_with('/') {
+        for (import, package) in crate::detectors::external_imports(file) {
+            // Skip language-provided modules.
+            if crate::detectors::hallucinated_imports::is_builtin(&package, registry_name) {
                 continue;
             }
 
@@ -161,5 +155,12 @@ mod tests {
         assert_eq!(hit.reachability, None);
         assert_eq!(hit.severity, "info");
         assert_eq!(hit.confidence, None);
+    }
+
+    #[test]
+    fn python_stdlib_is_not_queried_for_vulnerabilities() {
+        crate::registry::seed_osv_cache("PyPI", "os", vec![vuln("GHSA-stdlib", "HIGH")]);
+        let parsed = vec![parse_file("main.py", "import os\n").unwrap()];
+        assert!(detect(&parsed, true).is_empty());
     }
 }
