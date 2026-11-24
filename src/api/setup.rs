@@ -40,12 +40,18 @@ pub struct LlmBody {
     pub provider: String, // "litellm" | "disabled"
     pub api_key: Option<String>,
     pub model: Option<String>,
+    pub model_cheap: Option<String>,
+    pub embedding_model: Option<String>,
     /// Gateway-managed model definition. When present, Codasaurus registers it
     /// in LiteLLM and stores only the alias plus a scoped virtual key.
     #[serde(default)]
     pub upstream_provider: Option<String>,
     #[serde(default)]
     pub upstream_model: Option<String>,
+    #[serde(default)]
+    pub upstream_model_cheap: Option<String>,
+    #[serde(default)]
+    pub upstream_model_embedding: Option<String>,
     #[serde(default)]
     pub api_base: Option<String>,
     #[serde(default)]
@@ -62,83 +68,195 @@ fn upstream_model_name(provider: &str, upstream: &str) -> String {
     }
 }
 
-/// Register a model and issue a model-scoped virtual key.
-/// Returns `(alias, virtual_key, model_id)`; `None` keeps the alias-only flow.
-async fn provision_model(
+#[derive(Clone, Debug)]
+struct ManagedModel {
+    alias: String,
+    id: String,
+    upstream: String,
+}
+
+#[derive(Debug)]
+struct ProvisionedModels {
+    primary: ManagedModel,
+    cheap: Option<ManagedModel>,
+    embedding: Option<ManagedModel>,
+    virtual_key: String,
+}
+
+/// Register each selected role and issue one virtual key scoped to all aliases.
+async fn provision_models(
     client: &crate::llm::gateway::GatewayClient,
     body: &LlmBody,
-    current_model_id: Option<&str>,
+    current_ids: [Option<&str>; 3],
     old_key: Option<&str>,
     daily_budget_usd: f64,
-) -> Result<Option<(String, String, String)>, ApiError> {
-    let (Some(provider), Some(upstream)) = (&body.upstream_provider, &body.upstream_model) else {
-        return Ok(None);
-    };
-    let provider = provider.trim();
-    let upstream = upstream.trim();
-    let alias = body
-        .model_alias
-        .as_deref()
-        .or(body.model.as_deref())
-        .unwrap_or("")
-        .trim();
+) -> Result<ProvisionedModels, ApiError> {
+    let provider = body.upstream_provider.as_deref().unwrap_or("").trim();
+    let upstream = body.upstream_model.as_deref().unwrap_or("").trim();
     let key = body.api_key.as_deref().unwrap_or("").trim();
-    if provider.is_empty() || upstream.is_empty() || alias.is_empty() {
+    if provider.is_empty() || upstream.is_empty() {
         return Err(ApiError::bad_request(
-            "Provider, model and alias are required to register a model",
+            "Provider and review model are required to register a model",
         ));
     }
     if key.is_empty() {
         return Err(ApiError::bad_request("A provider API key is required"));
     }
-    let model = upstream_model_name(provider, upstream);
-    let request = crate::llm::gateway::ModelRequest {
-        alias: alias.to_string(),
-        upstream: model,
-        api_key: key.to_string(),
-        api_base: body
-            .api_base
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string),
-    };
-    let model_id = match current_model_id {
-        Some(id) => {
-            client.update_model(id, request).await.map_err(|e| {
-                tracing::error!(error = %e, "gateway model update failed");
-                ApiError::bad_request("Could not update the model in the gateway")
-            })?;
-            id.to_string()
-        }
-        None => client.register_model(request).await.map_err(|e| {
-            tracing::error!(error = %e, "gateway model registration failed");
-            ApiError::bad_request("Could not register the model in the gateway")
-        })?,
-    };
-    let virtual_key = match client.issue_key(alias, daily_budget_usd).await {
-        Ok(key) => key,
-        Err(e) => {
-            tracing::error!(error = %e, "gateway key issuance failed");
-            if current_model_id.is_none() {
-                let _ = client.delete_model(&model_id).await;
-            }
-            return Err(ApiError::bad_request(
-                "Could not issue a gateway key for the model",
-            ));
-        }
-    };
-    if let Some(old) = old_key.filter(|k| !k.is_empty() && *k != virtual_key) {
-        if let Err(e) = client.revoke_key(old).await {
-            tracing::warn!(error = %e, "could not revoke the previous gateway key");
+
+    let primary_alias = body
+        .model_alias
+        .as_deref()
+        .or(body.model.as_deref())
+        .unwrap_or("codasaurus-review")
+        .trim();
+    let mut selections = vec![(primary_alias.to_string(), upstream.to_string(), "text")];
+    if let Some(upstream) = body.upstream_model_cheap.as_deref().map(str::trim) {
+        if !upstream.is_empty() {
+            let alias = body
+                .model_cheap
+                .as_deref()
+                .unwrap_or("codasaurus-cheap")
+                .trim();
+            selections.push((alias.to_string(), upstream.to_string(), "text"));
         }
     }
-    Ok(Some((alias.to_string(), virtual_key, model_id)))
+    if let Some(upstream) = body.upstream_model_embedding.as_deref().map(str::trim) {
+        if !upstream.is_empty() {
+            let alias = body
+                .embedding_model
+                .as_deref()
+                .unwrap_or("codasaurus-embedding")
+                .trim();
+            selections.push((alias.to_string(), upstream.to_string(), "embedding"));
+        }
+    }
+
+    let catalog = client
+        .discover_models(provider, key, body.api_base.as_deref())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "gateway model discovery failed");
+            ApiError::bad_request("Could not load the selected provider's models")
+        })?;
+    if selections
+        .iter()
+        .any(|(alias, _, _)| alias.trim().is_empty())
+    {
+        return Err(ApiError::bad_request("Model aliases cannot be blank"));
+    }
+    for (_, upstream, mode) in &selections {
+        let name = upstream
+            .strip_prefix(provider)
+            .and_then(|name| name.strip_prefix('/'))
+            .unwrap_or(upstream);
+        let selected_mode = catalog
+            .iter()
+            .find(|model| model.name == name)
+            .map(|model| model.mode.as_str());
+        let valid = match *mode {
+            "embedding" => selected_mode.is_some_and(crate::llm::gateway::is_embedding_model_mode),
+            _ => selected_mode.is_some_and(crate::llm::gateway::is_text_model_mode),
+        };
+        if !valid {
+            return Err(ApiError::bad_request(format!(
+                "The selected model is not available for this {mode} role"
+            )));
+        }
+    }
+
+    let api_base = body
+        .api_base
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut created = Vec::new();
+    let result: Result<ProvisionedModels, ApiError> = async {
+        let mut models = Vec::with_capacity(selections.len());
+        for (index, (alias, upstream, _)) in selections.into_iter().enumerate() {
+            let request = crate::llm::gateway::ModelRequest {
+                alias: alias.clone(),
+                upstream: upstream_model_name(provider, &upstream),
+                api_key: key.to_string(),
+                api_base: api_base.clone(),
+            };
+            let id = match current_ids[index] {
+                Some(id) => {
+                    client.update_model(id, request).await.map_err(|error| {
+                        tracing::error!(error = %error, "gateway model update failed");
+                        ApiError::bad_request("Could not update the model in the gateway")
+                    })?;
+                    id.to_string()
+                }
+                None => {
+                    let id = client.register_model(request).await.map_err(|error| {
+                        tracing::error!(error = %error, "gateway model registration failed");
+                        ApiError::bad_request("Could not register the model in the gateway")
+                    })?;
+                    created.push(id.clone());
+                    id
+                }
+            };
+            models.push(ManagedModel {
+                alias,
+                id,
+                upstream: upstream_model_name(provider, &upstream),
+            });
+        }
+        let aliases: Vec<String> = models.iter().map(|model| model.alias.clone()).collect();
+        let virtual_key = client
+            .issue_key_for_models(&aliases, daily_budget_usd)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "gateway key issuance failed");
+                ApiError::bad_request("Could not issue a gateway key for the models")
+            })?;
+        let mut models = models.into_iter();
+        Ok(ProvisionedModels {
+            primary: models
+                .next()
+                .expect("primary model selection is always present"),
+            cheap: models.next(),
+            embedding: models.next(),
+            virtual_key,
+        })
+    }
+    .await;
+    let provisioned = match result {
+        Ok(provisioned) => provisioned,
+        Err(error) => {
+            for id in created {
+                if let Err(cleanup_error) = client.delete_model(&id).await {
+                    tracing::warn!(error = %cleanup_error, "could not remove a partially registered model");
+                }
+            }
+            return Err(error);
+        }
+    };
+    if let Some(old) = old_key.filter(|key| !key.is_empty() && *key != provisioned.virtual_key) {
+        if let Err(error) = client.revoke_key(old).await {
+            tracing::warn!(error = %error, "could not revoke the previous gateway key");
+        }
+    }
+    Ok(provisioned)
+}
+
+#[derive(Deserialize)]
+pub struct LlmDiscoverBody {
+    pub provider: String,
+    pub api_key: String,
+    #[serde(default)]
+    pub api_base: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct LlmTestParams {
     pub test: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct LlmConfigParams {
+    pub provider: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -204,6 +322,7 @@ pub fn router() -> Router<AppState> {
         .route("/status", get(setup_status))
         .route("/database", get(get_database_status).post(setup_database))
         .route("/llm", get(get_llm_config).post(setup_llm))
+        .route("/llm/discover", post(discover_llm_models))
         .route("/github/manifest-page", get(github_manifest_page))
         .route("/github/manifest-url", get(github_manifest_url))
         .route("/github", post(setup_github))
@@ -416,30 +535,77 @@ pub(crate) async fn setup_database(
 pub(crate) async fn get_llm_config(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(params): Query<LlmConfigParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_setup_open_or_admin(&state, &headers).await?;
-    use db::config::get_config;
+    let entries = db::config::get_all_config(&state.pool)
+        .await
+        .unwrap_or_default();
+    let value = |key: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.value.as_str())
+    };
+    let setting = |key: &str, env: &str| {
+        value(key)
+            .map(str::trim)
+            .filter(|value| crate::llm::usable_secret(value))
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::var(env)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| crate::llm::usable_secret(value))
+            })
+    };
 
     let gateway = crate::llm::gateway::GatewayClient::from_env();
-    let (provider, api_key, model, models) = tokio::join!(
-        get_config(&state.pool, "llm_provider"),
-        get_config(&state.pool, "llm_api_key"),
-        get_config(&state.pool, "llm_model"),
+    let selected_provider = params
+        .provider
+        .map(|provider| provider.trim().to_string())
+        .filter(|provider| !provider.is_empty())
+        .or_else(|| value("llm_upstream_provider").map(str::to_string));
+    let (models, providers, catalog) = tokio::join!(
         async {
-            match gateway {
+            match gateway.as_ref() {
                 Some(client) => client
                     .list_models()
                     .await
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|m| json!({"id": m.id, "name": m.name}))
+                    .map(|model| json!({"id": model.id, "name": model.name}))
                     .collect(),
                 None => Vec::new(),
             }
         },
+        async {
+            match gateway.as_ref() {
+                Some(client) => client
+                    .list_providers()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|provider| json!({"id": provider.id, "name": provider.name}))
+                    .collect(),
+                None => Vec::new(),
+            }
+        },
+        async {
+            match (gateway.as_ref(), selected_provider.as_deref()) {
+                (Some(client), Some(provider)) => client
+                    .list_model_catalog(provider)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|model| json!({"name": model.name, "mode": model.mode}))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        },
     );
-    let provider = match provider.ok().flatten() {
-        Some(p) if p.eq_ignore_ascii_case("disabled") => Some("disabled".to_string()),
+    let provider = match value("llm_provider") {
+        Some(provider) if provider.eq_ignore_ascii_case("disabled") => Some("disabled".to_string()),
         Some(_) => Some("litellm".to_string()),
         None if crate::util::env_set("CODASAURUS_API_KEY")
             || crate::util::env_set("CODASAURUS_BASE_URL") =>
@@ -448,21 +614,58 @@ pub(crate) async fn get_llm_config(
         }
         None => None,
     };
-    let api_key = api_key
-        .ok()
-        .flatten()
-        .or_else(|| std::env::var("CODASAURUS_API_KEY").ok())
-        .map(|_| "••••••••".to_string());
-    let model = model
-        .ok()
-        .flatten()
-        .or_else(|| std::env::var("CODASAURUS_MODEL").ok());
+    let api_key = value("llm_api_key").is_some_and(crate::llm::usable_secret)
+        || std::env::var("CODASAURUS_API_KEY").is_ok_and(|value| crate::llm::usable_secret(&value));
+    let api_key = api_key.then(|| "••••••••".to_string());
 
     Ok(Json(json!({
         "provider": provider,
         "api_key": api_key,
-        "model": model,
+        "model": setting("llm_model", "CODASAURUS_MODEL"),
+        "model_cheap": setting("llm_model_cheap", "CODASAURUS_MODEL_CHEAP"),
+        "embedding_model": setting("llm_embedding_model", "CODASAURUS_EMBEDDING_MODEL"),
+        "upstream_provider": value("llm_upstream_provider"),
+        "upstream_model": value("llm_upstream_model"),
+        "upstream_model_cheap": value("llm_upstream_model_cheap"),
+        "upstream_model_embedding": value("llm_upstream_model_embedding"),
         "models": models,
+        "providers": providers,
+        "catalog": catalog,
+    })))
+}
+
+/// POST /api/setup/llm/discover — list the selected provider's models through LiteLLM.
+#[utoipa::path(post, path = "/api/setup/llm/discover", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn discover_llm_models(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<LlmDiscoverBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_setup_open_or_admin(&state, &headers).await?;
+    let provider = body.provider.trim();
+    let api_key = body.api_key.trim();
+    if provider.is_empty() || api_key.is_empty() {
+        return Err(ApiError::bad_request(
+            "Provider and API key are required to load models",
+        ));
+    }
+    let client = crate::llm::gateway::GatewayClient::from_env().ok_or_else(|| {
+        ApiError::bad_request(
+            "Gateway management is not configured. Set LITELLM_MASTER_KEY and CODASAURUS_BASE_URL.",
+        )
+    })?;
+    let models = client
+        .discover_models(provider, api_key, body.api_base.as_deref())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "gateway model discovery failed");
+            ApiError::bad_request("Could not load models from the selected provider")
+        })?;
+    Ok(Json(json!({
+        "models": models
+            .into_iter()
+            .map(|model| json!({"name": model.name, "mode": model.mode}))
+            .collect::<Vec<_>>(),
     })))
 }
 
@@ -485,40 +688,65 @@ pub(crate) async fn setup_llm(
     };
     let api_key = body.api_key.as_deref().unwrap_or("");
 
-    let (stored_model_id, stored_key, daily_budget_usd) = tokio::join!(
+    let (stored_model_id, stored_cheap_id, stored_embedding_id, stored_key, daily_budget_usd) = tokio::join!(
         db::config::get_config(&state.pool, "llm_gateway_model_id"),
+        db::config::get_config(&state.pool, "llm_gateway_model_id_cheap"),
+        db::config::get_config(&state.pool, "llm_gateway_model_id_embedding"),
         db::config::get_config(&state.pool, "llm_api_key"),
         crate::llm::budget::daily_budget_usd(Some(&state.pool)),
     );
-    let stored_model_id = stored_model_id.ok().flatten().filter(|v| !v.is_empty());
+    let stored_model_id = stored_model_id
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty());
+    let stored_cheap_id = stored_cheap_id
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty());
+    let stored_embedding_id = stored_embedding_id
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty());
     let stored_key = stored_key.ok().flatten();
-    let wants_managed = body.upstream_provider.is_some() || body.upstream_model.is_some();
+    let wants_managed = body.upstream_provider.is_some()
+        || body.upstream_model.is_some()
+        || body.upstream_model_cheap.is_some()
+        || body.upstream_model_embedding.is_some();
 
-    // Gateway-managed setup: register/update the model and keep only a scoped virtual key.
+    // Gateway-managed setup: register/update the selected roles and keep only a scoped virtual key.
     let managed = if provider == "litellm" && wants_managed {
         let client = crate::llm::gateway::GatewayClient::from_env().ok_or_else(|| {
             ApiError::bad_request(
                 "Gateway management is not configured. Set LITELLM_MASTER_KEY and CODASAURUS_BASE_URL.",
             )
         })?;
-        provision_model(
-            &client,
-            &body,
-            stored_model_id.as_deref(),
-            stored_key.as_deref(),
-            daily_budget_usd,
+        Some(
+            provision_models(
+                &client,
+                &body,
+                [
+                    stored_model_id.as_deref(),
+                    stored_cheap_id.as_deref(),
+                    stored_embedding_id.as_deref(),
+                ],
+                stored_key.as_deref(),
+                daily_budget_usd,
+            )
+            .await?,
         )
-        .await?
     } else {
         None
     };
 
     if provider == "disabled" {
         let mut deleted = true;
-        if let Some(id) = &stored_model_id {
+        for id in [&stored_model_id, &stored_cheap_id, &stored_embedding_id]
+            .into_iter()
+            .flatten()
+        {
             if let Some(client) = crate::llm::gateway::GatewayClient::from_env() {
-                if let Err(e) = client.delete_model(id).await {
-                    tracing::warn!(error = %e, "could not delete managed gateway model");
+                if let Err(error) = client.delete_model(id).await {
+                    tracing::warn!(error = %error, "could not delete managed gateway model");
                     deleted = false;
                 }
             }
@@ -526,15 +754,20 @@ pub(crate) async fn setup_llm(
         if deleted {
             if let (Some(client), Some(key)) = (
                 crate::llm::gateway::GatewayClient::from_env(),
-                stored_key.as_deref().filter(|k| !k.is_empty()),
+                stored_key.as_deref().filter(|key| !key.is_empty()),
             ) {
-                if let Err(e) = client.revoke_key(key).await {
-                    tracing::warn!(error = %e, "could not revoke gateway key on disable");
+                if let Err(error) = client.revoke_key(key).await {
+                    tracing::warn!(error = %error, "could not revoke gateway key on disable");
                 }
             }
             db::config::set_configs(
                 &state.pool,
-                &[("llm_gateway_model_id", ""), ("llm_api_key", "")],
+                &[
+                    ("llm_gateway_model_id", ""),
+                    ("llm_gateway_model_id_cheap", ""),
+                    ("llm_gateway_model_id_embedding", ""),
+                    ("llm_api_key", ""),
+                ],
             )
             .await?;
             db::config::apply_setting_to_env("llm_api_key", "");
@@ -542,14 +775,59 @@ pub(crate) async fn setup_llm(
     }
 
     let mut entries = vec![("llm_provider", provider)];
-    if let Some((alias, virtual_key, model_id)) = &managed {
+    if let Some(managed) = &managed {
+        let cheap_alias = managed
+            .cheap
+            .as_ref()
+            .map(|model| model.alias.as_str())
+            .unwrap_or("");
+        let embedding_alias = managed
+            .embedding
+            .as_ref()
+            .map(|model| model.alias.as_str())
+            .unwrap_or("");
+        let cheap_id = managed
+            .cheap
+            .as_ref()
+            .map(|model| model.id.as_str())
+            .unwrap_or("");
+        let embedding_id = managed
+            .embedding
+            .as_ref()
+            .map(|model| model.id.as_str())
+            .unwrap_or("");
+        let upstream_provider = body.upstream_provider.as_deref().unwrap_or("").trim();
         entries.extend([
-            ("llm_model", alias.as_str()),
-            ("llm_api_key", virtual_key.as_str()),
-            ("llm_gateway_model_id", model_id.as_str()),
+            ("llm_model", managed.primary.alias.as_str()),
+            ("llm_model_cheap", cheap_alias),
+            ("llm_embedding_model", embedding_alias),
+            ("llm_api_key", managed.virtual_key.as_str()),
+            ("llm_gateway_model_id", managed.primary.id.as_str()),
+            ("llm_gateway_model_id_cheap", cheap_id),
+            ("llm_gateway_model_id_embedding", embedding_id),
+            ("llm_upstream_provider", upstream_provider),
+            ("llm_upstream_model", managed.primary.upstream.as_str()),
+            (
+                "llm_upstream_model_cheap",
+                managed
+                    .cheap
+                    .as_ref()
+                    .map(|model| model.upstream.as_str())
+                    .unwrap_or(""),
+            ),
+            (
+                "llm_upstream_model_embedding",
+                managed
+                    .embedding
+                    .as_ref()
+                    .map(|model| model.upstream.as_str())
+                    .unwrap_or(""),
+            ),
         ]);
-        db::config::apply_setting_to_env("llm_model", alias);
-        db::config::apply_setting_to_env("llm_api_key", virtual_key);
+        db::config::apply_setting_to_env("llm_model", &managed.primary.alias);
+        db::config::apply_setting_to_env("llm_model_cheap", cheap_alias);
+        db::config::apply_setting_to_env("llm_embedding_model", embedding_alias);
+        db::config::apply_setting_to_env("llm_api_key", &managed.virtual_key);
     } else {
         // A masked placeholder from GET /api/setup/llm must not overwrite the real key.
         if crate::llm::usable_secret(api_key) {
@@ -560,8 +838,36 @@ pub(crate) async fn setup_llm(
             entries.push(("llm_model", model.as_str()));
             db::config::apply_setting_to_env("llm_model", model);
         }
+        if let Some(model_cheap) = &body.model_cheap {
+            entries.push(("llm_model_cheap", model_cheap.trim()));
+            db::config::apply_setting_to_env("llm_model_cheap", model_cheap.trim());
+        }
+        if let Some(embedding_model) = &body.embedding_model {
+            entries.push(("llm_embedding_model", embedding_model.trim()));
+            db::config::apply_setting_to_env("llm_embedding_model", embedding_model.trim());
+        }
     }
     db::config::set_configs(&state.pool, &entries).await?;
+
+    if let Some(managed) = &managed {
+        let current_ids = [
+            Some(managed.primary.id.as_str()),
+            managed.cheap.as_ref().map(|model| model.id.as_str()),
+            managed.embedding.as_ref().map(|model| model.id.as_str()),
+        ];
+        for old_id in [&stored_model_id, &stored_cheap_id, &stored_embedding_id]
+            .into_iter()
+            .flatten()
+        {
+            if !current_ids.contains(&Some(old_id.as_str())) {
+                if let Some(client) = crate::llm::gateway::GatewayClient::from_env() {
+                    if let Err(error) = client.delete_model(old_id).await {
+                        tracing::warn!(error = %error, "could not remove a replaced gateway model");
+                    }
+                }
+            }
+        }
+    }
 
     // If ?test=true, send a lightweight probe to the gateway
     let test_passed = if params.test.unwrap_or(false) {
@@ -1356,14 +1662,168 @@ mod tests {
         );
     }
 
+    async fn provision_mock() -> (
+        crate::llm::gateway::GatewayClient,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let models = captured.clone();
+        let app = Router::new()
+            .route(
+                "/public/litellm_model_cost_map",
+                get(|| async {
+                    Json(json!({
+                        "gpt-4o": {"litellm_provider": "openai", "mode": "responses"},
+                        "gpt-4o-mini": {"litellm_provider": "openai", "mode": "completion"},
+                        "text-embedding-3-small": {"litellm_provider": "openai", "mode": "embedding"}
+                    }))
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"data": [
+                        {"id": "openai/gpt-4o"},
+                        {"id": "openai/gpt-4o-mini"},
+                        {"id": "openai/text-embedding-3-small"},
+                        {"id": "openai/new-text-model"},
+                        {"id": "openai/decision-model"}
+                    ]}))
+                }),
+            )
+            .route(
+                "/model/info",
+                get(|| async {
+                    Json(json!({"data": [
+                        {"model_name": "openai/gpt-4o", "model_info": {"mode": "responses"}},
+                        {"model_name": "openai/gpt-4o-mini", "model_info": {"mode": "completion"}},
+                        {"model_name": "openai/text-embedding-3-small", "model_info": {"mode": "embedding"}},
+                        {"model_name": "openai/new-text-model", "model_info": {}},
+                        {"model_name": "openai/decision-model", "model_info": {"mode": "decisions"}}
+                    ]}))
+                }),
+            )
+            .route(
+                "/model/new",
+                post(move |request: axum::extract::Request| {
+                    let models = models.clone();
+                    async move {
+                        let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let alias = body["model_name"].as_str().unwrap();
+                        let model_id = format!("id-{alias}");
+                        models.lock().unwrap().push(body);
+                        Json(json!({"model_id": model_id}))
+                    }
+                }),
+            )
+            .route(
+                "/model/delete",
+                post(|| async { Json(json!({})) }),
+            )
+            .route(
+                "/key/generate",
+                post({
+                    let captured = captured.clone();
+                    move |request: axum::extract::Request| {
+                        let captured = captured.clone();
+                        async move {
+                            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                                .await
+                                .unwrap();
+                            captured.lock().unwrap().push(
+                                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                            );
+                            Json(json!({"key": "sk-virtual"}))
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            crate::llm::gateway::GatewayClient::new(format!("http://{addr}"), "sk-master".into()),
+            captured,
+        )
+    }
+
+    #[tokio::test]
+    async fn provision_models_accepts_non_embedding_review_roles() {
+        let (client, captured) = provision_mock().await;
+        let body = LlmBody {
+            provider: "litellm".into(),
+            api_key: Some("provider-key".into()),
+            model: Some("review".into()),
+            model_cheap: Some("cheap".into()),
+            embedding_model: Some("embedding".into()),
+            upstream_provider: Some("openai".into()),
+            upstream_model: Some("gpt-4o".into()),
+            upstream_model_cheap: Some("gpt-4o-mini".into()),
+            upstream_model_embedding: Some("text-embedding-3-small".into()),
+            api_base: None,
+            model_alias: Some("review".into()),
+        };
+
+        let provisioned = provision_models(&client, &body, [None, None, None], None, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(provisioned.primary.alias, "review");
+        assert_eq!(provisioned.primary.id, "id-review");
+        assert_eq!(provisioned.primary.upstream, "openai/gpt-4o");
+        assert_eq!(provisioned.cheap.unwrap().id, "id-cheap");
+        assert_eq!(provisioned.embedding.unwrap().id, "id-embedding");
+        assert_eq!(provisioned.virtual_key, "sk-virtual");
+
+        let rows = captured.lock().unwrap();
+        let key = rows.iter().find(|row| row.get("models").is_some()).unwrap();
+        assert_eq!(key["models"], json!(["review", "cheap", "embedding"]));
+    }
+
+    #[tokio::test]
+    async fn provision_models_accepts_discovered_model_missing_from_cost_map() {
+        let (client, captured) = provision_mock().await;
+        let body = LlmBody {
+            provider: "litellm".into(),
+            api_key: Some("provider-key".into()),
+            model: Some("review".into()),
+            model_cheap: None,
+            embedding_model: None,
+            upstream_provider: Some("openai".into()),
+            upstream_model: Some("new-text-model".into()),
+            upstream_model_cheap: None,
+            upstream_model_embedding: None,
+            api_base: None,
+            model_alias: Some("review".into()),
+        };
+
+        let provisioned = provision_models(&client, &body, [None, None, None], None, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(provisioned.primary.upstream, "openai/new-text-model");
+        assert_eq!(provisioned.virtual_key, "sk-virtual");
+
+        let rows = captured.lock().unwrap();
+        let key = rows.iter().find(|row| row.get("models").is_some()).unwrap();
+        assert_eq!(key["models"], json!(["review"]));
+    }
+
     #[tokio::test]
     async fn provision_rejects_blank_provider_key() {
         let body = LlmBody {
             provider: "litellm".into(),
             api_key: Some("   ".into()),
             model: None,
+            model_cheap: None,
+            embedding_model: None,
             upstream_provider: Some("openrouter".into()),
             upstream_model: Some("liquid/lfm-3-1.7b:free".into()),
+            upstream_model_cheap: None,
+            upstream_model_embedding: None,
             api_base: None,
             model_alias: Some("codasaurus-e2e".into()),
         };
@@ -1371,7 +1831,7 @@ mod tests {
             "http://127.0.0.1:1".into(),
             "sk-master".into(),
         );
-        let err = provision_model(&client, &body, None, None, 0.0)
+        let err = provision_models(&client, &body, [None, None, None], None, 0.0)
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)), "got {err:?}");

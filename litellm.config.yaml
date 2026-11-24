@@ -12,3 +12,4 @@ litellm_settings:
   request_timeout: 45 # must stay below the app's 60s client timeout
   json_logs: true
   drop_params: false # surface an unsupported response_format instead of silently dropping it
+  check_provider_endpoint: true

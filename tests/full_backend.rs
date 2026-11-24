@@ -597,6 +597,13 @@ async fn setup_endpoints_database_llm_public_url() {
     );
 
     let old_llm = db::config::get_config(&pool, "llm_provider").await.unwrap();
+    let old_model = db::config::get_config(&pool, "llm_model").await.unwrap();
+    let old_cheap = db::config::get_config(&pool, "llm_model_cheap")
+        .await
+        .unwrap();
+    let old_embedding = db::config::get_config(&pool, "llm_embedding_model")
+        .await
+        .unwrap();
     let llm_get = call(&app, req("GET", "/api/setup/llm", Some(&token), None)).await;
     assert_eq!(llm_get.status, StatusCode::OK, "{}", llm_get.body);
     assert!(llm_get.body.contains("\"provider\""), "{}", llm_get.body);
@@ -607,7 +614,12 @@ async fn setup_endpoints_database_llm_public_url() {
             "POST",
             "/api/setup/llm",
             Some(&token),
-            Some(serde_json::json!({"provider": "litellm"})),
+            Some(serde_json::json!({
+                "provider": "litellm",
+                "model": "review-alias",
+                "model_cheap": "cheap-alias",
+                "embedding_model": "embedding-alias"
+            })),
         ),
     )
     .await;
@@ -618,11 +630,64 @@ async fn setup_endpoints_database_llm_public_url() {
         llm_post.body
     );
     assert_eq!(
-        db::config::get_config(&pool, "llm_provider")
+        db::config::get_config(&pool, "llm_model")
             .await
             .unwrap()
             .as_deref(),
-        Some("litellm")
+        Some("review-alias")
+    );
+    assert_eq!(
+        db::config::get_config(&pool, "llm_model_cheap")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("cheap-alias")
+    );
+    assert_eq!(
+        db::config::get_config(&pool, "llm_embedding_model")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("embedding-alias")
+    );
+
+    let llm_get = call(&app, req("GET", "/api/setup/llm", Some(&token), None)).await;
+    assert_eq!(llm_get.status, StatusCode::OK, "{}", llm_get.body);
+    let llm_config: serde_json::Value = serde_json::from_str(&llm_get.body).unwrap();
+    assert_eq!(llm_config["model"], "review-alias");
+    assert_eq!(llm_config["model_cheap"], "cheap-alias");
+    assert_eq!(llm_config["embedding_model"], "embedding-alias");
+    assert!(llm_config["providers"].is_array());
+    assert!(llm_config["catalog"].is_array());
+
+    let blank_post = call(
+        &app,
+        req(
+            "POST",
+            "/api/setup/llm",
+            Some(&token),
+            Some(serde_json::json!({
+                "provider": "litellm",
+                "model_cheap": "   ",
+                "embedding_model": ""
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(blank_post.status, StatusCode::OK, "{}", blank_post.body);
+    assert_eq!(
+        db::config::get_config(&pool, "llm_model_cheap")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        db::config::get_config(&pool, "llm_embedding_model")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("")
     );
 
     let old_url = db::config::get_config(&pool, "public_url").await.unwrap();
@@ -653,6 +718,28 @@ async fn setup_endpoints_database_llm_public_url() {
         Some("http://localhost:3000")
     );
 
+    match old_embedding {
+        Some(v) => db::config::set_config(&pool, "llm_embedding_model", &v)
+            .await
+            .unwrap(),
+        None => db::config::delete_config(&pool, "llm_embedding_model")
+            .await
+            .unwrap(),
+    }
+    match old_cheap {
+        Some(v) => db::config::set_config(&pool, "llm_model_cheap", &v)
+            .await
+            .unwrap(),
+        None => db::config::delete_config(&pool, "llm_model_cheap")
+            .await
+            .unwrap(),
+    }
+    match old_model {
+        Some(v) => db::config::set_config(&pool, "llm_model", &v)
+            .await
+            .unwrap(),
+        None => db::config::delete_config(&pool, "llm_model").await.unwrap(),
+    }
     match old_llm {
         Some(v) => db::config::set_config(&pool, "llm_provider", &v)
             .await
