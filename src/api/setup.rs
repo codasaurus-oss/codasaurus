@@ -21,7 +21,7 @@ async fn require_setup_open_or_admin(
 ) -> Result<(), ApiError> {
     let owner_exists = db::users::owner_exists(&state.pool)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::internal_error)?;
     if !owner_exists {
         return Ok(());
     }
@@ -62,13 +62,14 @@ fn upstream_model_name(provider: &str, upstream: &str) -> String {
     }
 }
 
-/// Register a model in the gateway and issue a model-scoped virtual key.
-/// Returns `(alias, virtual_key)`; `None` keeps the legacy alias-only flow.
+/// Register a model and issue a model-scoped virtual key.
+/// Returns `(alias, virtual_key, model_id)`; `None` keeps the alias-only flow.
 async fn provision_model(
     client: &crate::llm::gateway::GatewayClient,
     body: &LlmBody,
     current_model_id: Option<&str>,
     old_key: Option<&str>,
+    daily_budget_usd: f64,
 ) -> Result<Option<(String, String, String)>, ApiError> {
     let (Some(provider), Some(upstream)) = (&body.upstream_provider, &body.upstream_model) else {
         return Ok(None);
@@ -115,7 +116,7 @@ async fn provision_model(
             ApiError::bad_request("Could not register the model in the gateway")
         })?,
     };
-    let virtual_key = match client.issue_key(alias).await {
+    let virtual_key = match client.issue_key(alias, daily_budget_usd).await {
         Ok(key) => key,
         Err(e) => {
             tracing::error!(error = %e, "gateway key issuance failed");
@@ -246,36 +247,22 @@ pub(crate) async fn setup_status(
 ) -> Result<Json<SetupStatus>, ApiError> {
     use db::config::get_config;
 
-    // Serving implies Postgres is already connected; also honor wizard / env markers.
     let database = true;
-
-    // Check both DB config and env vars for GitHub. If GITHUB_APP_ID is set
-    // in the environment, the bot is already configured at startup — no need
-    // to create a new GitHub App through the manifest flow.
-    let github = get_config(&state.pool, "github_app_id")
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-        || crate::util::env_set("GITHUB_APP_ID");
-
-    // An env key or base URL alone is not a working LLM: without a model alias
-    // `LlmConfig` fails closed, so the wizard must not report a complete step.
-    let llm_provider = get_config(&state.pool, "llm_provider").await.ok().flatten();
-    let llm_configured = crate::llm::LlmConfig::from_db_or_env(Some(&state.pool))
-        .await
-        .is_some();
-    let llm = llm_step_complete(llm_provider.as_deref(), llm_configured);
-
-    let admin = db::users::owner_exists(&state.pool).await.unwrap_or(false);
-
+    let (github_id, llm_provider, llm_configured, admin, slug, public_url) = tokio::join!(
+        get_config(&state.pool, "github_app_id"),
+        get_config(&state.pool, "llm_provider"),
+        crate::llm::LlmConfig::from_db_or_env(Some(&state.pool)),
+        db::users::owner_exists(&state.pool),
+        get_config(&state.pool, "github_app_slug"),
+        resolve_public_url(&state, &headers),
+    );
+    let github = github_id.ok().flatten().is_some() || crate::util::env_set("GITHUB_APP_ID");
+    let llm_provider = llm_provider.ok().flatten();
+    let llm = llm_step_complete(llm_provider.as_deref(), llm_configured.is_some());
+    let admin = admin?;
     let complete = database && llm && github && admin;
 
-    let owner_exists = admin;
-    // Slug lives in DB after the manifest flow; env-configured deploys may
-    // only have GITHUB_APP_SLUG until the next boot syncs it into the DB.
-    let mut github_install_url = get_config(&state.pool, "github_app_slug")
-        .await
+    let mut github_install_url = slug
         .ok()
         .flatten()
         .or_else(|| {
@@ -285,7 +272,7 @@ pub(crate) async fn setup_status(
                 .filter(|s| !s.is_empty())
         })
         .map(|slug| format!("https://github.com/apps/{slug}/installations/new"));
-    if owner_exists
+    if admin
         && super::rbac::current_user(&state.pool, &headers)
             .await
             .is_err()
@@ -300,7 +287,7 @@ pub(crate) async fn setup_status(
         admin,
         complete,
         github_install_url,
-        public_url: resolve_public_url(&state, &headers).await,
+        public_url,
     }))
 }
 
@@ -315,12 +302,12 @@ pub(crate) async fn get_database_status(
         .pool
         .ping()
         .await
-        .map_err(|e| ApiError::internal(format!("Postgres ping failed: {e}")))?;
+        .map_err(|e| ApiError::internal_error(format!("Postgres ping failed: {e}")))?;
 
     let (version,): (String,) = sqlx::query_as("SELECT version()")
         .fetch_one(state.pool.as_pg())
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::internal_error)?;
 
     let short_version = version
         .split_whitespace()
@@ -433,7 +420,25 @@ pub(crate) async fn get_llm_config(
     require_setup_open_or_admin(&state, &headers).await?;
     use db::config::get_config;
 
-    let provider = match get_config(&state.pool, "llm_provider").await.ok().flatten() {
+    let gateway = crate::llm::gateway::GatewayClient::from_env();
+    let (provider, api_key, model, models) = tokio::join!(
+        get_config(&state.pool, "llm_provider"),
+        get_config(&state.pool, "llm_api_key"),
+        get_config(&state.pool, "llm_model"),
+        async {
+            match gateway {
+                Some(client) => client
+                    .list_models()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| json!({"id": m.id, "name": m.name}))
+                    .collect(),
+                None => Vec::new(),
+            }
+        },
+    );
+    let provider = match provider.ok().flatten() {
         Some(p) if p.eq_ignore_ascii_case("disabled") => Some("disabled".to_string()),
         Some(_) => Some("litellm".to_string()),
         None if crate::util::env_set("CODASAURUS_API_KEY")
@@ -443,30 +448,15 @@ pub(crate) async fn get_llm_config(
         }
         None => None,
     };
-
-    let api_key = get_config(&state.pool, "llm_api_key")
-        .await
+    let api_key = api_key
         .ok()
         .flatten()
         .or_else(|| std::env::var("CODASAURUS_API_KEY").ok())
-        .map(|_| "••••••••".to_string()); // never expose full key
-
-    let model = get_config(&state.pool, "llm_model")
-        .await
+        .map(|_| "••••••••".to_string());
+    let model = model
         .ok()
         .flatten()
         .or_else(|| std::env::var("CODASAURUS_MODEL").ok());
-
-    let models: Vec<serde_json::Value> = match crate::llm::gateway::GatewayClient::from_env() {
-        Some(client) => client
-            .list_models()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|m| json!({"id": m.id, "name": m.name}))
-            .collect(),
-        None => Vec::new(),
-    };
 
     Ok(Json(json!({
         "provider": provider,
@@ -495,15 +485,13 @@ pub(crate) async fn setup_llm(
     };
     let api_key = body.api_key.as_deref().unwrap_or("");
 
-    let stored_model_id = db::config::get_config(&state.pool, "llm_gateway_model_id")
-        .await
-        .ok()
-        .flatten()
-        .filter(|v| !v.is_empty());
-    let stored_key = db::config::get_config(&state.pool, "llm_api_key")
-        .await
-        .ok()
-        .flatten();
+    let (stored_model_id, stored_key, daily_budget_usd) = tokio::join!(
+        db::config::get_config(&state.pool, "llm_gateway_model_id"),
+        db::config::get_config(&state.pool, "llm_api_key"),
+        crate::llm::budget::daily_budget_usd(Some(&state.pool)),
+    );
+    let stored_model_id = stored_model_id.ok().flatten().filter(|v| !v.is_empty());
+    let stored_key = stored_key.ok().flatten();
     let wants_managed = body.upstream_provider.is_some() || body.upstream_model.is_some();
 
     // Gateway-managed setup: register/update the model and keep only a scoped virtual key.
@@ -518,6 +506,7 @@ pub(crate) async fn setup_llm(
             &body,
             stored_model_id.as_deref(),
             stored_key.as_deref(),
+            daily_budget_usd,
         )
         .await?
     } else {
@@ -543,31 +532,36 @@ pub(crate) async fn setup_llm(
                     tracing::warn!(error = %e, "could not revoke gateway key on disable");
                 }
             }
-            db::config::set_config(&state.pool, "llm_gateway_model_id", "").await?;
-            db::config::set_config(&state.pool, "llm_api_key", "").await?;
+            db::config::set_configs(
+                &state.pool,
+                &[("llm_gateway_model_id", ""), ("llm_api_key", "")],
+            )
+            .await?;
             db::config::apply_setting_to_env("llm_api_key", "");
         }
     }
 
-    // Always store the config (+ mirror into process env for immediate ask/review use).
-    db::config::set_config(&state.pool, "llm_provider", provider).await?;
+    let mut entries = vec![("llm_provider", provider)];
     if let Some((alias, virtual_key, model_id)) = &managed {
-        db::config::set_config(&state.pool, "llm_model", alias).await?;
-        db::config::set_config(&state.pool, "llm_api_key", virtual_key).await?;
-        db::config::set_config(&state.pool, "llm_gateway_model_id", model_id).await?;
+        entries.extend([
+            ("llm_model", alias.as_str()),
+            ("llm_api_key", virtual_key.as_str()),
+            ("llm_gateway_model_id", model_id.as_str()),
+        ]);
         db::config::apply_setting_to_env("llm_model", alias);
         db::config::apply_setting_to_env("llm_api_key", virtual_key);
     } else {
         // A masked placeholder from GET /api/setup/llm must not overwrite the real key.
         if crate::llm::usable_secret(api_key) {
-            db::config::set_config(&state.pool, "llm_api_key", api_key).await?;
+            entries.push(("llm_api_key", api_key));
             db::config::apply_setting_to_env("llm_api_key", api_key);
         }
         if let Some(model) = &body.model {
-            db::config::set_config(&state.pool, "llm_model", model).await?;
+            entries.push(("llm_model", model.as_str()));
             db::config::apply_setting_to_env("llm_model", model);
         }
     }
+    db::config::set_configs(&state.pool, &entries).await?;
 
     // If ?test=true, send a lightweight probe to the gateway
     let test_passed = if params.test.unwrap_or(false) {
@@ -775,7 +769,7 @@ pub(crate) async fn github_manifest_page(
     };
 
     let manifest_json = serde_json::to_string(&manifest)
-        .map_err(|e| ApiError::internal(format!("Failed to serialize manifest: {e}")))?;
+        .map_err(|e| ApiError::internal_error(format!("Failed to serialize manifest: {e}")))?;
 
     // HTML page that auto-submits the manifest form to GitHub.
     // This matches GitHub's documented POST form flow exactly.
@@ -887,17 +881,19 @@ pub(crate) async fn setup_github(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Store credentials
-    db::config::set_config(&state.pool, "github_app_id", &body.app_id).await?;
-    db::config::set_config(&state.pool, "github_private_key", &body.private_key).await?;
-    db::config::set_config(&state.pool, "github_webhook_secret", &body.webhook_secret).await?;
+    let mut entries = vec![
+        ("github_app_id", body.app_id.as_str()),
+        ("github_private_key", body.private_key.as_str()),
+        ("github_webhook_secret", body.webhook_secret.as_str()),
+    ];
     if let Some(slug) = slug.as_deref() {
-        db::config::set_config(&state.pool, "github_app_slug", slug).await?;
+        entries.push(("github_app_slug", slug));
         db::config::apply_setting_to_env("github_app_slug", slug);
     }
     if let Some(name) = app_name.as_deref() {
-        db::config::set_config(&state.pool, "github_app_name", name).await?;
+        entries.push(("github_app_name", name));
     }
+    db::config::set_configs(&state.pool, &entries).await?;
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let port: u16 = std::env::var("PORT")
@@ -1069,7 +1065,7 @@ fn http_client(secs: u64) -> Result<reqwest::Client, ApiError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(secs))
         .build()
-        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))
+        .map_err(|e| ApiError::internal_error(format!("Failed to build HTTP client: {e}")))
 }
 
 /// POST /api/setup/github/callback
@@ -1123,11 +1119,17 @@ pub(crate) async fn github_callback(
         .to_string();
     let app_name = data["name"].as_str().unwrap_or(&slug).to_string();
 
-    db::config::set_config(&state.pool, "github_app_id", &app_id).await?;
-    db::config::set_config(&state.pool, "github_private_key", &pem).await?;
-    db::config::set_config(&state.pool, "github_webhook_secret", &webhook_secret).await?;
-    db::config::set_config(&state.pool, "github_app_name", &app_name).await?;
-    db::config::set_config(&state.pool, "github_app_slug", &slug).await?;
+    db::config::set_configs(
+        &state.pool,
+        &[
+            ("github_app_id", app_id.as_str()),
+            ("github_private_key", pem.as_str()),
+            ("github_webhook_secret", webhook_secret.as_str()),
+            ("github_app_name", app_name.as_str()),
+            ("github_app_slug", slug.as_str()),
+        ],
+    )
+    .await?;
     db::config::apply_setting_to_env("github_app_slug", &slug);
 
     // Update the in-memory bot config so the webhook handler picks up the
@@ -1369,7 +1371,7 @@ mod tests {
             "http://127.0.0.1:1".into(),
             "sk-master".into(),
         );
-        let err = provision_model(&client, &body, None, None)
+        let err = provision_model(&client, &body, None, None, 0.0)
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)), "got {err:?}");

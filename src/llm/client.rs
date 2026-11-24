@@ -3,9 +3,7 @@
 //! and every plain-text helper.
 
 use super::config::{assert_endpoint_safe, LlmConfig};
-use super::cost::estimate_spend_microdollars;
 use super::schema::review_response_format;
-use crate::llm::budget;
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use anyhow::{bail, Result};
 use serde_json::json;
@@ -162,8 +160,8 @@ pub(crate) async fn post_chat(
     Ok(resp.json().await?)
 }
 
-/// Plain-text chat completion on the cheap alias, with the budget gate and one
-/// retry when a reasoning model spends its whole budget and returns no content.
+/// Plain-text chat completion on the cheap alias, with one retry when a
+/// reasoning model spends its whole token budget and returns no content.
 pub(crate) async fn chat_text(
     client: &reqwest::Client,
     config: &LlmConfig,
@@ -171,12 +169,7 @@ pub(crate) async fn chat_text(
     user_prompt: &str,
     max_tokens: u32,
 ) -> Result<String> {
-    let pool = crate::bot::CONFIG_POOL.get();
-    budget::assert_within_budget(pool).await?;
     let prompt_chars = system_prompt.len() + user_prompt.len();
-    let micros = estimate_spend_microdollars(prompt_chars, max_tokens, false);
-    budget::record_local_spend_micros(micros);
-
     let model = config.effective_text_model();
     let body = text_body(model, system_prompt, user_prompt, max_tokens);
     let resp = post_chat(

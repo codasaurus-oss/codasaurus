@@ -61,14 +61,11 @@ pub async fn review_diff(
     mcp_tools: &[crate::mcp::McpToolSpec],
 ) -> Result<LlmReviewOutput> {
     let pool = crate::bot::CONFIG_POOL.get();
-    budget::assert_within_budget(pool).await?;
     let max_diff = crate::bot_runtime::BotRuntimeConfig::default().max_llm_diff_chars;
     let diff = truncate_chars(diff, max_diff);
     let prompt = build_review_prompt(&diff, context);
     let prompt_chars = prompt.len() + REVIEW_PROMPT_OVERHEAD_CHARS;
     crate::metrics::record_llm_request(prompt_chars, config.max_tokens, true);
-    let micros = estimate_spend_microdollars(prompt_chars, config.max_tokens, true);
-    budget::record_local_spend_micros(micros);
 
     let client = llm_client()?;
     let model = config.model.as_str();
@@ -92,12 +89,7 @@ pub async fn review_diff(
         .collect();
 
     let resp_json = loop {
-        let iteration_budget_ok = if messages.len() > 2 {
-            budget::assert_within_budget(pool).await.is_ok()
-        } else {
-            true
-        };
-        let force_final = messages.len() > 2 * MAX_TOOL_ITERATIONS || !iteration_budget_ok;
+        let force_final = messages.len() > 2 * MAX_TOOL_ITERATIONS;
 
         let mut body = chat_body(config, model, &messages, config.max_tokens);
         if !tool_specs.is_empty() {

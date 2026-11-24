@@ -253,11 +253,8 @@ fn validate_setting(key: &str, value: &str) -> Result<(), ApiError> {
         }
         return Ok(());
     }
-    if key == "llm_daily_budget_usd" && !value.trim().is_empty() {
-        value
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| ApiError::bad_request("llm_daily_budget_usd must be a number"))?;
+    if key == "llm_daily_budget_usd" {
+        crate::llm::budget::parse_daily_budget_usd(value).map_err(ApiError::bad_request)?;
         return Ok(());
     }
 
@@ -347,6 +344,21 @@ pub(crate) async fn set_setting(
     validate_setting(&key, &body.value)?;
     validate_setting_async(&key, &body.value).await?;
 
+    if key == "llm_daily_budget_usd" {
+        let budget = crate::llm::budget::parse_daily_budget_usd(&body.value)
+            .map_err(ApiError::bad_request)?;
+        let stored_key = db::config::get_config(&state.pool, "llm_api_key").await?;
+        if let (Some(client), Some(key)) = (
+            crate::llm::gateway::GatewayClient::from_env(),
+            stored_key.filter(|key| !key.is_empty()),
+        ) {
+            client.update_key_budget(&key, budget).await.map_err(|e| {
+                tracing::error!(error = %e, "gateway budget update failed");
+                ApiError::bad_request("Could not update the LLM budget in the gateway")
+            })?;
+        }
+    }
+
     db::config::set_config(&state.pool, &key, &body.value).await?;
     db::config::apply_setting_to_env(&key, &body.value);
     db::audit::log_event(
@@ -420,9 +432,7 @@ pub(crate) async fn delete_github_settings(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
-    for key in GITHUB_KEYS {
-        db::config::delete_config(&state.pool, key).await?;
-    }
+    db::config::delete_configs(&state.pool, GITHUB_KEYS).await?;
     // Drop live credentials so webhooks fail closed and workers stop minting tokens.
     crate::bot::clear_bot_config();
     // Without App credentials we cannot talk to GitHub; stop reviewing locally.
@@ -442,8 +452,8 @@ pub(crate) async fn delete_github_settings(
 }
 
 async fn clear_mirrored_keys(pool: &db::DbPool, keys: &[&str]) -> Result<(), ApiError> {
+    db::config::delete_configs(pool, keys).await?;
     for key in keys {
-        db::config::delete_config(pool, key).await?;
         db::config::apply_setting_to_env(key, "");
     }
     Ok(())
@@ -455,7 +465,7 @@ fn http_client(secs: u64) -> Result<reqwest::Client, ApiError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(secs))
         .build()
-        .map_err(|e| ApiError::internal(format!("HTTP client: {e}")))
+        .map_err(|e| ApiError::internal_error(format!("HTTP client: {e}")))
 }
 
 /// POST /api/settings/github/test — verify App JWT against GET /app.
