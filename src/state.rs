@@ -86,20 +86,6 @@ impl ReviewState {
         Ok(())
     }
 
-    pub async fn get_reviewed_sha_async(
-        &self,
-        repo: &str,
-        pr_number: i64,
-    ) -> Result<Option<String>> {
-        let key = format!("{repo}/{pr_number}");
-        Ok(db_scalar_optional!(
-            &self.pool,
-            String,
-            "SELECT head_sha FROM reviewed_commits WHERE repo_pr = ?",
-            &key
-        )?)
-    }
-
     pub async fn try_claim_sha(&self, repo: &str, pr_number: i64, sha: &str) -> Result<bool> {
         let key = format!("{repo}/{pr_number}");
         let owner = lease_owner_id();

@@ -75,11 +75,6 @@ pub async fn create_review(pool: &DbPool, review: &ReviewCreate) -> Result<Revie
     )
 }
 
-pub async fn delete_findings_for_review(pool: &DbPool, review_id: i64) -> Result<(), sqlx::Error> {
-    db_execute!(pool, "DELETE FROM findings WHERE review_id = ?", review_id)?;
-    Ok(())
-}
-
 async fn delete_findings_on(
     conn: &mut sqlx::PgConnection,
     review_id: i64,

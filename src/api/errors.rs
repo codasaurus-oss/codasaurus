@@ -69,10 +69,6 @@ impl ApiError {
         ApiError::Forbidden(msg.into())
     }
 
-    pub fn too_many_requests(msg: impl Into<String>) -> Self {
-        ApiError::TooManyRequests(msg.into(), 0)
-    }
-
     pub fn too_many_requests_after(msg: impl Into<String>, retry_after_secs: u64) -> Self {
         ApiError::TooManyRequests(msg.into(), retry_after_secs)
     }

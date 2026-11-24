@@ -83,21 +83,6 @@ pub async fn get_pending_by_token(
     )
 }
 
-pub async fn get_pending_by_email(
-    pool: &DbPool,
-    email: &str,
-) -> Result<Option<Invite>, sqlx::Error> {
-    db_fetch_optional!(
-        pool,
-        Invite,
-        "SELECT * FROM invites
-         WHERE lower(email) = lower(?) AND accepted_at IS NULL AND expires_at > NOW()
-         ORDER BY created_at DESC
-         LIMIT 1",
-        email
-    )
-}
-
 pub async fn revoke(pool: &DbPool, id: i64) -> Result<bool, sqlx::Error> {
     let n = db_execute!(
         pool,
@@ -105,15 +90,6 @@ pub async fn revoke(pool: &DbPool, id: i64) -> Result<bool, sqlx::Error> {
         id
     )?;
     Ok(n > 0)
-}
-
-pub async fn mark_accepted(pool: &DbPool, id: i64) -> Result<(), sqlx::Error> {
-    db_execute!(
-        pool,
-        "UPDATE invites SET accepted_at = NOW() WHERE id = ?",
-        id
-    )?;
-    Ok(())
 }
 
 /// Accept a local invite: atomically claim invite, then create user (single transaction).

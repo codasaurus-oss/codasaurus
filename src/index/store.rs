@@ -5,7 +5,6 @@ use crate::index::extract::FileIndex;
 use sqlx::Row;
 
 const INDEX_READY: &str = "ready";
-const INDEX_FAILED: &str = "failed";
 
 /// Wipe the repo's index and insert a fresh full build in one transaction.
 pub async fn replace_repo_index(
@@ -141,13 +140,6 @@ async fn upsert_status(
     Ok(())
 }
 
-pub async fn mark_index_failed(pool: &DbPool, repo: &str, error: &str) {
-    if let Ok(mut tx) = pool.as_pg().begin().await {
-        let _ = upsert_status(&mut tx, repo, INDEX_FAILED, Some(error)).await;
-        let _ = tx.commit().await;
-    }
-}
-
 pub async fn index_status(pool: &DbPool, repo: &str) -> Option<(String, String)> {
     sqlx::query("SELECT status, COALESCE(error, '') FROM index_status WHERE repo_full_name = $1")
         .bind(repo)
@@ -200,21 +192,4 @@ pub async fn symbols_in_file(
             .map(|r| (r.get(0), r.get(1), r.get(2)))
             .collect()
     })
-}
-
-/// Files defining a symbol (reverse DEFINES edges).
-pub async fn files_defining_symbol(
-    pool: &DbPool,
-    repo: &str,
-    symbol: &str,
-) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query(
-        "SELECT file_path FROM repo_symbols
-         WHERE repo_full_name = $1 AND symbol_name = $2",
-    )
-    .bind(repo)
-    .bind(symbol)
-    .fetch_all(pool.as_pg())
-    .await
-    .map(|rows| rows.into_iter().map(|r| r.get(0)).collect())
 }

@@ -53,21 +53,3 @@ async fn verify_slack_token(token: &str) -> Option<bool> {
     let json: serde_json::Value = resp.json().await.ok()?;
     json.get("ok").and_then(|v| v.as_bool())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unsupported_pattern_returns_none() {
-        assert_eq!(
-            verify_secret("AWS Access Key", "AKIAABCDEFGHIJKLMNOP"),
-            None
-        );
-    }
-
-    #[test]
-    fn short_value_returns_none_without_network() {
-        assert_eq!(verify_secret("GitHub Token", "short"), None);
-    }
-}

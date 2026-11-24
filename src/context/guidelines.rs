@@ -1,4 +1,3 @@
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use crate::context::rules::{parse_guidelines_md, ExtractedRule};
@@ -137,85 +136,6 @@ impl GuidelineFile {
             rules,
         })
     }
-}
-
-/// Format guideline files as a compact LLM-friendly string.
-pub fn format_guidelines_section(files: &[GuidelineFile]) -> String {
-    if files.is_empty() {
-        return String::new();
-    }
-
-    let mut out = String::with_capacity(4096);
-    out.push_str("## Contribution Guidelines\n\n");
-
-    for gf in files {
-        let label = gf
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&gf.source);
-        let _ = write!(out, "### {} ({})\n\n", label, gf.source);
-
-        if !gf.rules.is_empty() {
-            let mut checklist_count = 0;
-            let mut req_count = 0;
-            let mut commit_count = 0;
-            let mut branch_count = 0;
-            let mut checklist_items: Vec<&str> = Vec::new();
-
-            for rule in &gf.rules {
-                match rule {
-                    ExtractedRule::ChecklistItem { text, .. } => {
-                        checklist_count += 1;
-                        checklist_items.push(text);
-                    }
-                    ExtractedRule::FileRequired { .. } => req_count += 1,
-                    ExtractedRule::CommitRule { .. } => commit_count += 1,
-                    ExtractedRule::BranchPattern { .. } => branch_count += 1,
-                    ExtractedRule::SectionRule { .. } => {}
-                }
-            }
-
-            if checklist_count > 0 {
-                let _ = writeln!(out, "- **{checklist_count} checklist items**");
-            }
-            if req_count > 0 {
-                let _ = writeln!(out, "- **{req_count} required files**");
-            }
-            if commit_count > 0 {
-                let _ = writeln!(out, "- **{commit_count} commit rules**");
-            }
-            if branch_count > 0 {
-                let _ = writeln!(out, "- **{branch_count} branch patterns**");
-            }
-
-            for text in checklist_items {
-                let _ = writeln!(out, "  - [ ] {text}");
-            }
-            out.push('\n');
-        }
-
-        if !gf.content.is_empty() {
-            let truncated = if gf.content.len() > 4096 {
-                let trunc_byte = gf
-                    .content
-                    .char_indices()
-                    .nth(4096)
-                    .map(|(i, _)| i)
-                    .unwrap_or(gf.content.len());
-                format!(
-                    "{}\n\n[Content truncated at 4096 characters — full file at {}]",
-                    &gf.content[..trunc_byte],
-                    gf.path.display()
-                )
-            } else {
-                gf.content.clone()
-            };
-            let _ = write!(out, "```\n{truncated}\n```\n\n");
-        }
-    }
-
-    out
 }
 
 #[cfg(test)]
