@@ -398,22 +398,32 @@ pub async fn fetch_external_tickets(pr_title: &str, pr_body: &str) -> Vec<IssueC
     }
     linear_ids.truncate(5);
 
-    let (jira_base, jira_email, jira_token, linear_key) =
-        if let Some(pool) = crate::bot::CONFIG_POOL.get() {
-            tokio::join!(
-                crate::db::config::config_or_env(pool, "jira_base_url", "JIRA_BASE_URL"),
-                crate::db::config::config_or_env(pool, "jira_email", "JIRA_EMAIL"),
-                crate::db::config::config_or_env(pool, "jira_api_token", "JIRA_API_TOKEN"),
-                crate::db::config::config_or_env(pool, "linear_api_key", "LINEAR_API_KEY"),
-            )
-        } else {
-            (
-                std::env::var("JIRA_BASE_URL").ok(),
-                std::env::var("JIRA_EMAIL").ok(),
-                std::env::var("JIRA_API_TOKEN").ok(),
-                std::env::var("LINEAR_API_KEY").ok(),
-            )
-        };
+    let settings = if let Some(pool) = crate::bot::CONFIG_POOL.get() {
+        crate::db::config::get_configs(
+            pool,
+            &[
+                "jira_base_url",
+                "jira_email",
+                "jira_api_token",
+                "linear_api_key",
+            ],
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let setting = |key: &str, env: &str| {
+        settings
+            .get(key)
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .or_else(|| std::env::var(env).ok().filter(|value| !value.is_empty()))
+    };
+    let jira_base = setting("jira_base_url", "JIRA_BASE_URL");
+    let jira_email = setting("jira_email", "JIRA_EMAIL");
+    let jira_token = setting("jira_api_token", "JIRA_API_TOKEN");
+    let linear_key = setting("linear_api_key", "LINEAR_API_KEY");
 
     let jira_configured = jira_base.is_some() && jira_email.is_some() && jira_token.is_some();
     let linear_configured = linear_key.is_some();

@@ -135,37 +135,47 @@ pub async fn review_pr_with_options(
             repo_llm_enabled = repo_flags.llm_enabled;
         }
     }
-    if let Some(pool) = pool {
-        if let Ok(Some(v)) = crate::db::config::get_config(pool, "auto_labels_enabled").await {
-            if matches!(
-                v.to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            ) {
-                repo_flags.auto_labels = false;
-            }
-        }
-        // Global Settings toggle for auto-approve (repo config_json wins when true).
-        if !repo_flags.auto_approve {
-            if let Ok(Some(v)) = crate::db::config::get_config(pool, "auto_approve").await {
-                if crate::util::flag_truthy(&v) {
-                    repo_flags.auto_approve = true;
-                }
-            }
-        }
-        let repo_had_title_key = repo_config_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .is_some_and(|v| v.get("pr_title_fix").is_some());
-        let global_title = crate::db::config::get_config(pool, "pr_title_fix")
-            .await
-            .ok()
-            .flatten();
-        repo_flags.pr_title_fix = crate::bot::title_fix::resolve_mode(
-            repo_flags.pr_title_fix,
-            global_title.as_deref(),
-            repo_had_title_key,
-        );
+    let settings = if let Some(pool) = pool {
+        crate::db::config::get_configs(
+            pool,
+            &[
+                "auto_labels_enabled",
+                "auto_approve",
+                "pr_title_fix",
+                "llm_provider",
+                "offline_mode",
+            ],
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    if settings.get("auto_labels_enabled").is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        )
+    }) {
+        repo_flags.auto_labels = false;
     }
+    // Global Settings toggle for auto-approve (repo config_json wins when true).
+    if !repo_flags.auto_approve
+        && settings
+            .get("auto_approve")
+            .is_some_and(|value| crate::util::flag_truthy(value))
+    {
+        repo_flags.auto_approve = true;
+    }
+    let repo_had_title_key = repo_config_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .is_some_and(|value| value.get("pr_title_fix").is_some());
+    repo_flags.pr_title_fix = crate::bot::title_fix::resolve_mode(
+        repo_flags.pr_title_fix,
+        settings.get("pr_title_fix").map(String::as_str),
+        repo_had_title_key,
+    );
     let mut options = options;
     if !repo_flags.auto_describe {
         options.auto_describe = false;
@@ -175,22 +185,15 @@ pub async fn review_pr_with_options(
     }
 
     // Offline / air-gap: fail closed. Never call LLM; skip registry prefetch.
-    let offline_mode = {
-        let db_off = if let Some(pool) = pool {
-            if let Ok(Some(provider)) = crate::db::config::get_config(pool, "llm_provider").await {
-                if provider.eq_ignore_ascii_case("disabled") {
-                    repo_llm_enabled = false;
-                }
-            }
-            crate::db::config::get_config(pool, "offline_mode")
-                .await
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
-        crate::bot::offline::offline_mode_from_env_and_db(db_off.as_deref())
-    };
+    if settings
+        .get("llm_provider")
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("disabled"))
+    {
+        repo_llm_enabled = false;
+    }
+    let offline_mode = crate::bot::offline::offline_mode_from_env_and_db(
+        settings.get("offline_mode").map(String::as_str),
+    );
     if offline_mode {
         repo_llm_enabled = false;
         options.auto_review_diff = false;
