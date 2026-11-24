@@ -677,6 +677,50 @@ async fn semantic_reindex_removes_embeddings_for_removed_symbols() {
 }
 
 #[tokio::test]
+async fn recent_maintainer_dismissals_are_ordered_by_recency() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let suffix = uuid::Uuid::new_v4().simple();
+    let repo = format!("acme/learning-recent-{suffix}");
+    let old_detector = format!("a-old-{suffix}");
+    let new_detector = format!("z-new-{suffix}");
+    for (fingerprint, detector, message, age) in [
+        ("old", old_detector.as_str(), "old noise", "2 days"),
+        ("new", new_detector.as_str(), "new noise", "1 hour"),
+    ] {
+        sqlx::query(
+            "INSERT INTO dismissed_findings
+                (fingerprint, repo_full_name, detector, file, line, message, dismissed_at, is_maintainer)
+             VALUES ($1, $2, $3, '', 0, $4, NOW() - $5::interval, TRUE)",
+        )
+        .bind(fingerprint)
+        .bind(&repo)
+        .bind(detector)
+        .bind(message)
+        .bind(age)
+        .execute(pool.as_pg())
+        .await
+        .expect("insert dismissal");
+    }
+
+    let store = codasaurus::learning::store::LearningStore::from_pool(&pool);
+    let rows = store
+        .recent_maintainer_dismissals(Some(&repo), 2)
+        .await
+        .expect("recent dismissals");
+    assert!(rows.contains(&(new_detector, "new noise".to_string())));
+    assert!(!rows
+        .iter()
+        .any(|(detector, _)| detector.starts_with("a-old-")));
+
+    sqlx::query("DELETE FROM dismissed_findings WHERE repo_full_name = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await
+        .expect("cleanup dismissals");
+}
+
+#[tokio::test]
 async fn latest_completed_findings_ignore_newer_pending_reviews() {
     let _guard = TEST_SERIAL.lock().await;
     let pool = db::create_pool(&pg_url()).await.expect("pool");
