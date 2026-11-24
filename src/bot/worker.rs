@@ -26,10 +26,14 @@ fn start_queue_listener() {
     if LISTENER_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    let Ok(raw) = std::env::var("DATABASE_URL") else {
         tracing::warn!("DATABASE_URL not set; queue wake-ups use polling only");
         return;
     };
+    let url = crate::db::ensure_connect_timeout(
+        &crate::db::ensure_sslmode(&crate::db::normalize_database_url(&raw)),
+        30,
+    );
     tokio::spawn(async move {
         loop {
             match sqlx::postgres::PgListener::connect(&url).await {
@@ -94,7 +98,26 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                 match queue::claim_next(&pool, stale_secs).await {
                     Ok(Some(job)) => {
                         idle_ticks = 0;
+                        let heartbeat = bot_db_pool().map(|pool| {
+                            let lease = job.lease_id.clone();
+                            let id = job.id;
+                            tokio::spawn(async move {
+                                loop {
+                                    tokio::time::sleep(Duration::from_secs(10)).await;
+                                    match queue::heartbeat(pool, id, &lease).await {
+                                        Ok(true) => {}
+                                        Ok(false) => break,
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "queue heartbeat failed")
+                                        }
+                                    }
+                                }
+                            })
+                        });
                         let Some(cfg) = current_bot_config() else {
+                            if let Some(task) = heartbeat {
+                                task.abort();
+                            }
                             tracing::warn!(
                                 job_id = job.id,
                                 "no bot config; requeueing after delay"
@@ -105,12 +128,16 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                                 &job.lease_id,
                                 "bot config not configured",
                                 job.attempts,
+                                job.max_attempts,
                             )
                             .await;
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             continue;
                         };
                         if cfg.app_id.is_empty() || cfg.private_key.is_empty() {
+                            if let Some(task) = heartbeat {
+                                task.abort();
+                            }
                             tracing::warn!(
                                 job_id = job.id,
                                 "incomplete GitHub App credentials; delaying job"
@@ -121,6 +148,7 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                                 &job.lease_id,
                                 "github app credentials incomplete",
                                 job.attempts,
+                                job.max_attempts,
                             )
                             .await;
                             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -135,7 +163,9 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                             job.installation_id,
                             &job.action,
                             job.attempts,
+                            job.max_attempts,
                             &job.lease_id,
+                            heartbeat,
                             timeout_secs,
                         )
                         .await;
@@ -171,7 +201,9 @@ async fn process_queued_review(
     inst_id: Option<i64>,
     _action: &str,
     attempts: i64,
+    max_attempts: i64,
     lease_id: &str,
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
     timeout_secs: u64,
 ) {
     let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
@@ -183,19 +215,6 @@ async fn process_queued_review(
     let lock = pr_lock(repo, pr_number).await;
     let _guard = lock.lock().await;
     let started = std::time::Instant::now();
-    let heartbeat = bot_db_pool().map(|pool| {
-        let lease = lease_id.to_string();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                match queue::heartbeat(pool, job_id, &lease).await {
-                    Ok(true) => {}
-                    Ok(false) => break, // another worker owns the job now
-                    Err(e) => tracing::warn!(error = %e, "queue heartbeat failed"),
-                }
-            }
-        })
-    });
 
     let opts = ReviewOptions {
         auto_describe: false,
@@ -239,7 +258,24 @@ async fn process_queued_review(
             tracing::error!(job_id, error = %e, "queued review failed");
             release_claim_best_effort(repo, pr_number, head_sha).await;
             if let Some(pool) = pool {
-                let _ = queue::mark_failed(pool, job_id, lease_id, &e.to_string(), attempts).await;
+                match queue::mark_failed(
+                    pool,
+                    job_id,
+                    lease_id,
+                    &e.to_string(),
+                    attempts,
+                    max_attempts,
+                )
+                .await
+                {
+                    Ok(queue::Outcome::Dead) => {
+                        tracing::error!(job_id, repo, pr = pr_number, error = %e, "review job dead-lettered")
+                    }
+                    Ok(queue::Outcome::LeaseLost) => {
+                        tracing::warn!(job_id, "lease lost while recording failure")
+                    }
+                    _ => {}
+                }
             }
         }
         Err(_) => {
@@ -247,7 +283,20 @@ async fn process_queued_review(
             tracing::error!(job_id, "queued review timed out");
             release_claim_best_effort(repo, pr_number, head_sha).await;
             if let Some(pool) = pool {
-                let _ = queue::mark_failed(pool, job_id, lease_id, "timeout", attempts).await;
+                match queue::mark_failed(pool, job_id, lease_id, "timeout", attempts, max_attempts)
+                    .await
+                {
+                    Ok(queue::Outcome::Dead) => tracing::error!(
+                        job_id,
+                        repo,
+                        pr = pr_number,
+                        "review job dead-lettered after timeout"
+                    ),
+                    Ok(queue::Outcome::LeaseLost) => {
+                        tracing::warn!(job_id, "lease lost while recording timeout")
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -369,7 +418,10 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(2), listener.try_recv())
                 .await
                 .expect("notification within 2s");
-        assert!(notification.is_ok(), "listener got a notification");
+        assert!(
+            notification.expect("notification").is_some(),
+            "listener got a notification"
+        );
         let _ = sqlx::query("DELETE FROM review_jobs WHERE repo = $1")
             .bind(&repo)
             .execute(pool.as_pg())

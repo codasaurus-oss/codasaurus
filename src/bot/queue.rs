@@ -8,7 +8,6 @@ use crate::db::{db_fetch_one, DbPool};
 use anyhow::Result;
 
 const QUEUE_NAME: &str = "reviews";
-const DEFAULT_MAX_ATTEMPTS: i64 = 5;
 
 #[derive(Debug, Clone)]
 pub struct ReviewJob {
@@ -19,6 +18,7 @@ pub struct ReviewJob {
     pub installation_id: Option<i64>,
     pub action: String,
     pub attempts: i64,
+    pub max_attempts: i64,
     pub lease_id: String,
     pub priority: i16,
     pub queue_name: String,
@@ -28,6 +28,7 @@ pub struct ReviewJob {
 pub enum Outcome {
     Scheduled { delay_secs: i64 },
     Dead,
+    LeaseLost,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,10 +66,6 @@ pub async fn enqueue(
              WHEN review_jobs.status = 'failed' THEN excluded.action
              ELSE review_jobs.action
            END,
-           run_at = CASE
-             WHEN review_jobs.status = 'failed' THEN NOW()
-             ELSE review_jobs.run_at
-           END,
            updated_at = NOW()
          RETURNING id",
         repo,
@@ -99,28 +96,33 @@ pub async fn claim_batch(pool: &DbPool, stale_secs: i64, limit: i64) -> Result<V
             String,
             i32,
             i16,
+            i32,
             String,
-            String,
+            bool,
         ),
     >(
-        "UPDATE review_jobs SET
+        "WITH picked AS (
+           SELECT id, status = 'running' AS reclaimed
+             FROM review_jobs
+            WHERE queue_name = $4
+              AND ((status = 'pending' AND run_at <= NOW())
+                OR (status = 'failed' AND run_at <= NOW())
+                OR (status = 'running'
+                    AND (leased_until IS NULL OR leased_until < NOW())))
+            ORDER BY priority ASC, run_at ASC, id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT $3
+         )
+         UPDATE review_jobs SET
            status = 'running',
            attempts = attempts + 1,
            lease_id = $1::uuid,
            leased_until = NOW() + ($2::bigint * INTERVAL '1 second'),
            updated_at = NOW()
-         WHERE id IN (
-           SELECT id FROM review_jobs
-            WHERE queue_name = $4
-              AND ((status = 'pending' AND run_at <= NOW())
-                OR (status = 'failed' AND run_at <= NOW())
-                OR (status = 'running' AND leased_until < NOW()))
-            ORDER BY priority ASC, run_at ASC, id ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT $3
-         )
-         RETURNING id, repo, pr_number, head_sha, installation_id, action, attempts,
-                   priority, queue_name, lease_id::text",
+         FROM picked
+         WHERE review_jobs.id = picked.id
+         RETURNING review_jobs.id, repo, pr_number, head_sha, installation_id, action,
+                   attempts, priority, max_attempts, lease_id::text, picked.reclaimed",
     )
     .bind(lease_id.to_string())
     .bind(stale_secs)
@@ -141,9 +143,13 @@ pub async fn claim_batch(pool: &DbPool, stale_secs: i64, limit: i64) -> Result<V
                 action,
                 attempts,
                 priority,
-                queue_name,
+                max_attempts,
                 lease,
+                reclaimed,
             )| {
+                if reclaimed {
+                    crate::metrics::record_queue_reclaim();
+                }
                 ReviewJob {
                     id,
                     repo,
@@ -152,9 +158,10 @@ pub async fn claim_batch(pool: &DbPool, stale_secs: i64, limit: i64) -> Result<V
                     installation_id,
                     action,
                     attempts: i64::from(attempts),
+                    max_attempts: i64::from(max_attempts),
                     lease_id: lease,
                     priority,
-                    queue_name,
+                    queue_name: QUEUE_NAME.to_string(),
                 }
             },
         )
@@ -205,9 +212,10 @@ pub async fn mark_failed(
     lease_id: &str,
     err: &str,
     attempts: i64,
+    max_attempts: i64,
 ) -> Result<Outcome> {
     let msg: String = err.chars().take(500).collect();
-    if attempts >= DEFAULT_MAX_ATTEMPTS {
+    if attempts >= max_attempts {
         let n = sqlx::query(
             "UPDATE review_jobs SET status = 'dead', updated_at = NOW(), last_error = $1,
                lease_id = NULL, leased_until = NULL
@@ -221,13 +229,14 @@ pub async fn mark_failed(
         .rows_affected();
         if n > 0 {
             crate::metrics::record_queue_dead();
+            return Ok(Outcome::Dead);
         }
-        return Ok(Outcome::Dead);
+        return Ok(Outcome::LeaseLost);
     }
     let base = 2_i64.pow(attempts.min(10) as u32).min(3600);
     let jitter = ((id % 41) - 20) as f64 / 100.0;
     let delay_secs = ((base as f64) * (1.0 + jitter)).round().max(1.0) as i64;
-    sqlx::query(
+    let n = sqlx::query(
         "UPDATE review_jobs SET status = 'failed', updated_at = NOW(), last_error = $1,
            run_at = NOW() + ($2::bigint * INTERVAL '1 second'),
            lease_id = NULL, leased_until = NULL
@@ -238,7 +247,11 @@ pub async fn mark_failed(
     .bind(id)
     .bind(lease_id)
     .execute(pool.as_pg())
-    .await?;
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Ok(Outcome::LeaseLost);
+    }
     crate::metrics::record_queue_retry();
     Ok(Outcome::Scheduled { delay_secs })
 }
