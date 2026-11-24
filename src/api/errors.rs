@@ -42,13 +42,17 @@ impl IntoResponse for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
-        tracing::error!("database error: {err}");
-        ApiError::Internal("Internal server error".into())
+        Self::internal_error(err)
     }
 }
 
-// Convenience constructors so handlers read naturally.
 impl ApiError {
+    /// Log the real cause and return a generic response body.
+    pub fn internal_error(err: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %err, "internal API error");
+        ApiError::Internal("Internal server error".into())
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         ApiError::NotFound(msg.into())
     }

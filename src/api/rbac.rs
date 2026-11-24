@@ -50,14 +50,13 @@ pub fn normalize_role(role: &str) -> &str {
     }
 }
 
-/// Load the authenticated user (email + role) from the session cookie.
+/// Load the authenticated user from the session cookie.
 pub async fn current_user(pool: &db::DbPool, headers: &HeaderMap) -> Result<UserView, ApiError> {
-    let email = auth::require_session(pool, headers)
+    let token = auth::extract_token(headers)
+        .ok_or_else(|| ApiError::unauthorized("Authentication required"))?;
+    let user = db::sessions::get_session_user(pool, &token)
         .await
-        .map_err(|_| ApiError::unauthorized("Authentication required"))?;
-    let user = db::users::get_user_by_email(pool, &email)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(ApiError::internal_error)?
         .ok_or_else(|| ApiError::unauthorized("Authentication required"))?;
     Ok(UserView {
         email: user.email,
@@ -92,40 +91,28 @@ pub async fn require_maintainer(
     require_role(&state.pool, headers, MinRole::Maintainer).await
 }
 
-/// Require a Viewer session and confirm the repo exists.
+/// Require a Viewer session and return the repo.
 pub async fn require_repo_read(
     state: &AppState,
     headers: &HeaderMap,
     repo_id: i64,
-) -> Result<UserView, ApiError> {
+) -> Result<(UserView, db::models::Repo), ApiError> {
     let user = require_role(&state.pool, headers, MinRole::Viewer).await?;
-    let repo = db::repos::get_repo(&state.pool, repo_id).await?;
-    if repo.is_none() {
-        return Err(ApiError::not_found(format!("Repo {repo_id} not found")));
-    }
-    Ok(user)
+    let repo = db::repos::get_repo(&state.pool, repo_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Repo {repo_id} not found")))?;
+    Ok((user, repo))
 }
 
-/// Resolve a review to its repo and apply the repo read policy.
-/// Single session/user lookup — the old version re-authenticated via
-/// `require_repo_read`, doubling session + user queries per call.
+/// Resolve a review and its repo in one query after a single auth lookup.
 pub async fn require_review_read(
     state: &AppState,
     headers: &HeaderMap,
     review_id: i64,
-) -> Result<(UserView, i64), ApiError> {
+) -> Result<(UserView, db::reviews::ReviewWithRepo), ApiError> {
     let user = require_role(&state.pool, headers, MinRole::Viewer).await?;
-    let review = db::reviews::get_review(&state.pool, review_id)
+    let review = db::reviews::get_review_with_repo(&state.pool, review_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Review {review_id} not found")))?;
-    let repo_exists = db::repos::get_repo(&state.pool, review.repo_id)
-        .await?
-        .is_some();
-    if !repo_exists {
-        return Err(ApiError::not_found(format!(
-            "Repo {} not found",
-            review.repo_id
-        )));
-    }
-    Ok((user, review.repo_id))
+    Ok((user, review))
 }

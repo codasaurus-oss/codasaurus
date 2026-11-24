@@ -25,10 +25,7 @@ pub(crate) async fn list_rules(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
     let store = LearningStore::from_pool(&state.pool);
-    let rules = store
-        .list_rules()
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rules = store.list_rules().await.map_err(ApiError::internal_error)?;
     let items: Vec<serde_json::Value> = rules
         .into_iter()
         .map(|r| {
@@ -56,7 +53,7 @@ fn rule_outcome(
     changed: Result<bool, anyhow::Error>,
     not_found: &str,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if changed.map_err(|e| ApiError::internal(e.to_string()))? {
+    if changed.map_err(ApiError::internal_error)? {
         Ok(Json(json!({ "status": "ok", "id": id })))
     } else {
         Err(ApiError::not_found(not_found))

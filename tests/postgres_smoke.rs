@@ -276,3 +276,84 @@ async fn postgres_migrations_enqueue_and_claim() {
         .execute(pool.as_pg())
         .await;
 }
+
+#[tokio::test]
+async fn bulk_repo_upsert_preserves_local_config_and_active_state() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let suffix = uuid::Uuid::new_v4().simple();
+    let first_github_id = (uuid::Uuid::new_v4().as_u128() & 0x7fff_ffff_ffff_ffff) as i64;
+    let second_github_id = (uuid::Uuid::new_v4().as_u128() & 0x7fff_ffff_ffff_ffff) as i64;
+    let third_github_id = (uuid::Uuid::new_v4().as_u128() & 0x7fff_ffff_ffff_ffff) as i64;
+    let existing_name = format!("acme/bulk-existing-{suffix}");
+    let new_name = format!("acme/bulk-new-{suffix}");
+    let existing = db::repos::create_repo(
+        &pool,
+        &db::models::RepoCreate {
+            github_id: Some(first_github_id),
+            full_name: existing_name.clone(),
+            owner: "acme".into(),
+            name: format!("bulk-existing-{suffix}"),
+            default_branch: Some("main".into()),
+            installation_id: 1,
+            private: false,
+        },
+    )
+    .await
+    .expect("create existing repo");
+    let config = r#"{"checks":{"secrets":false}}"#;
+    db::repos::update_repo(&pool, existing.id, config, true)
+        .await
+        .expect("configure existing repo");
+
+    let affected = db::repos::upsert_repos(
+        &pool,
+        &[
+            db::models::RepoCreate {
+                github_id: Some(second_github_id),
+                full_name: existing_name.clone(),
+                owner: "acme".into(),
+                name: format!("bulk-existing-{suffix}"),
+                default_branch: None,
+                installation_id: 3,
+                private: true,
+            },
+            db::models::RepoCreate {
+                github_id: Some(third_github_id),
+                full_name: new_name.clone(),
+                owner: "acme".into(),
+                name: format!("bulk-new-{suffix}"),
+                default_branch: Some("trunk".into()),
+                installation_id: 3,
+                private: false,
+            },
+        ],
+    )
+    .await
+    .expect("bulk upsert");
+    assert_eq!(affected, 2);
+
+    let updated = db::repos::get_repo_by_full_name(&pool, &existing_name)
+        .await
+        .expect("lookup updated repo")
+        .expect("updated repo");
+    assert_eq!(updated.github_id, Some(second_github_id));
+    assert_eq!(updated.installation_id, 3);
+    assert!(updated.private);
+    assert!(updated.active);
+    assert_eq!(updated.default_branch.as_deref(), Some("main"));
+    assert_eq!(updated.config_json.as_deref(), Some(config));
+
+    let inserted = db::repos::get_repo_by_full_name(&pool, &new_name)
+        .await
+        .expect("lookup inserted repo")
+        .expect("inserted repo");
+    assert!(!inserted.active);
+
+    db::repos::delete_repo(&pool, updated.id)
+        .await
+        .expect("cleanup");
+    db::repos::delete_repo(&pool, inserted.id)
+        .await
+        .expect("cleanup");
+}

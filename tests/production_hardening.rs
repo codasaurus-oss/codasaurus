@@ -545,7 +545,7 @@ async fn viewer_repo_and_review_reads_go_through_policy() {
     assert!(require_repo_read(&state, &headers, repo.id).await.is_ok());
     let read = require_review_read(&state, &headers, review.id).await;
     assert!(read.is_ok());
-    assert_eq!(read.unwrap().1, repo.id);
+    assert_eq!(read.unwrap().1.review.repo_id, repo.id);
 
     let empty = axum::http::HeaderMap::new();
     let err = require_repo_read(&state, &empty, repo.id)
