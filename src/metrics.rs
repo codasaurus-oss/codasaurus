@@ -324,6 +324,8 @@ mod tests {
         assert!(body.contains("codasaurus_reviews_total"));
         assert!(body.contains("codasaurus_github_429_total"));
         assert!(body.contains("codasaurus_queue_depth"));
+        assert!(body.contains("codasaurus_queue_depth{status=\"dead\"}"));
+        assert!(body.contains("codasaurus_oldest_ready_job_age_seconds"));
         assert!(body.contains("codasaurus_fp_proxy_ratio"));
         assert!(body.contains("codasaurus_llm_spend_usd_estimate"));
         assert!(body.contains("codasaurus_registry_cache_hits_total"));

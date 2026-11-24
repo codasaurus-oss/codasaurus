@@ -1,5 +1,6 @@
 //! Durable review-queue worker.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -16,6 +17,53 @@ use crate::bot_runtime::BotRuntimeConfig;
 pub(crate) static QUEUE_NOTIFY: std::sync::LazyLock<tokio::sync::Notify> =
     std::sync::LazyLock::new(tokio::sync::Notify::new);
 
+static LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Wake workers on committed enqueues. `NOTIFY` is only a latency hint; the
+/// poll loop remains the correctness path. A dedicated connection is required
+/// because LISTEN is session state and does not work through transaction pooling.
+fn start_queue_listener() {
+    if LISTENER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        tracing::warn!("DATABASE_URL not set; queue wake-ups use polling only");
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            match sqlx::postgres::PgListener::connect(&url).await {
+                Ok(mut listener) => {
+                    if let Err(e) = listener.listen("review_jobs_ready").await {
+                        tracing::warn!(error = %e, "queue LISTEN failed");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                    // Drain anything committed before LISTEN took effect.
+                    QUEUE_NOTIFY.notify_waiters();
+                    loop {
+                        match tokio::time::timeout(Duration::from_secs(30), listener.try_recv())
+                            .await
+                        {
+                            Ok(Ok(Some(_))) => QUEUE_NOTIFY.notify_waiters(),
+                            Ok(Ok(None)) => break, // connection closed; reconnect
+                            Ok(Err(e)) => {
+                                tracing::warn!(error = %e, "queue listener error");
+                                break;
+                            }
+                            Err(_) => QUEUE_NOTIFY.notify_waiters(), // fallback scan
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "queue listener reconnect failed");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+}
+
 /// Background workers that drain durable review_jobs (crash recovery).
 ///
 /// Spawns `N` independent claim/process loops. `N` comes from
@@ -25,6 +73,7 @@ pub(crate) static QUEUE_NOTIFY: std::sync::LazyLock<tokio::sync::Notify> =
 /// Credentials are read from [`current_bot_config`] per job so wizard updates
 /// and key rotations take effect without restarting the process.
 pub fn start_review_worker(pool: crate::db::DbPool) {
+    start_queue_listener();
     let default_n = REVIEW_PERMITS.available_permits().clamp(1, 4);
     let n = std::env::var("CODASAURUS_QUEUE_WORKERS")
         .ok()
@@ -134,6 +183,19 @@ async fn process_queued_review(
     let lock = pr_lock(repo, pr_number).await;
     let _guard = lock.lock().await;
     let started = std::time::Instant::now();
+    let heartbeat = bot_db_pool().map(|pool| {
+        let lease = lease_id.to_string();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                match queue::heartbeat(pool, job_id, &lease).await {
+                    Ok(true) => {}
+                    Ok(false) => break, // another worker owns the job now
+                    Err(e) => tracing::warn!(error = %e, "queue heartbeat failed"),
+                }
+            }
+        })
+    });
 
     let opts = ReviewOptions {
         auto_describe: false,
@@ -190,6 +252,9 @@ async fn process_queued_review(
         }
     }
 
+    if let Some(task) = heartbeat {
+        task.abort();
+    }
     drop(_guard);
     prune_pr_lock(repo, pr_number, lock).await;
 }
@@ -270,5 +335,44 @@ pub(crate) async fn release_claim_best_effort(repo: &str, pr_number: i64, head_s
     let state = crate::state::ReviewState::from_pool(pool);
     if let Err(e) = state.release_sha_claim(repo, pr_number, head_sha).await {
         tracing::warn!(error = %e, "failed to release SHA claim");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn enqueue_notifies_ready_listeners() {
+        let url = std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("CODASAURUS_TEST_DATABASE_URL"))
+            .unwrap_or_else(|_| {
+                "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
+            });
+        let mut listener = sqlx::postgres::PgListener::connect(&url)
+            .await
+            .expect("listener connects");
+        listener
+            .listen("review_jobs_ready")
+            .await
+            .expect("LISTEN succeeds");
+
+        let repo = format!("acme/notify-{}", uuid::Uuid::new_v4().simple());
+        let pool = crate::db::create_pool(&url).await.expect("pool");
+        let _ = sqlx::query("DELETE FROM review_jobs WHERE repo = $1")
+            .bind(&repo)
+            .execute(pool.as_pg())
+            .await;
+        let _ = crate::bot::queue::enqueue(&pool, &repo, 100, "notify-sha", None, "opened")
+            .await
+            .expect("enqueue");
+
+        let notification =
+            tokio::time::timeout(std::time::Duration::from_secs(2), listener.try_recv())
+                .await
+                .expect("notification within 2s");
+        assert!(notification.is_ok(), "listener got a notification");
+        let _ = sqlx::query("DELETE FROM review_jobs WHERE repo = $1")
+            .bind(&repo)
+            .execute(pool.as_pg())
+            .await;
     }
 }

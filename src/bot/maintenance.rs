@@ -18,7 +18,7 @@ pub async fn run_periodic_cleanup(pool: &DbPool) {
     if let Err(e) = db_execute!(
         pool,
         "DELETE FROM review_jobs
-         WHERE status IN ('done', 'failed')
+         WHERE status IN ('done', 'failed', 'dead')
            AND updated_at < NOW() - INTERVAL '30 days'"
     ) {
         tracing::debug!(error = %e, "review_jobs cleanup skipped");
