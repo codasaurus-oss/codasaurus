@@ -638,20 +638,23 @@ async fn check_osv_async(ecosystem: &str, package: &str) -> Result<Vec<OsvVulner
     Ok(vulns)
 }
 
-fn extract_severity(value: &serde_json::Value) -> String {
+fn ecosystem_severity(affected: &serde_json::Value) -> Option<&str> {
+    affected
+        .get("ecosystem_specific")
+        .and_then(|data| data.get("severity"))
+        .and_then(|severity| severity.as_str())
+}
+
+fn extract_severity(value: &serde_json::Value, preferred: Option<&serde_json::Value>) -> String {
     value
         .get("database_specific")
         .and_then(|data| data.get("severity"))
         .and_then(|severity| severity.as_str())
+        .or_else(|| preferred.and_then(ecosystem_severity))
         .or_else(|| {
-            value["affected"].as_array().and_then(|affected| {
-                affected.iter().find_map(|entry| {
-                    entry
-                        .get("ecosystem_specific")
-                        .and_then(|data| data.get("severity"))
-                        .and_then(|severity| severity.as_str())
-                })
-            })
+            value["affected"]
+                .as_array()
+                .and_then(|affected| affected.iter().find_map(ecosystem_severity))
         })
         .unwrap_or("UNKNOWN")
         .to_string()
@@ -664,7 +667,6 @@ fn extract_osv_vuln_for(
 ) -> Option<OsvVulnerability> {
     let id = value["id"].as_str()?.to_string();
     let summary = value["summary"].as_str().unwrap_or("").to_string();
-    let severity = extract_severity(value);
     let affected = value["affected"].as_array().and_then(|affected| {
         affected.iter().find(|entry| {
             let candidate = entry["package"]["name"].as_str().unwrap_or_default();
@@ -678,6 +680,7 @@ fn extract_osv_vuln_for(
             same_package && entry["package"]["ecosystem"].as_str() == Some(ecosystem)
         })
     });
+    let severity = extract_severity(value, affected);
     let fixed = affected
         .and_then(|entry| entry.get("ranges"))
         .and_then(|ranges| ranges.as_array())
@@ -773,7 +776,8 @@ mod tests {
                         record["affected"] = json!([
                             {
                                 "package": { "name": "unrelated", "ecosystem": "PyPI" },
-                                "ranges": [{ "events": [{ "fixed": "8.0.0" }] }]
+                                "ranges": [{ "events": [{ "fixed": "8.0.0" }] }],
+                                "ecosystem_specific": { "severity": "HIGH" }
                             },
                             {
                                 "package": { "name": "one", "ecosystem": "npm" },
@@ -915,9 +919,9 @@ mod tests {
             "affected": [{ "ecosystem_specific": { "severity": "MODERATE" } }]
         });
 
-        assert_eq!(extract_severity(&database), "HIGH");
-        assert_eq!(extract_severity(&ecosystem), "MODERATE");
-        assert_eq!(extract_severity(&serde_json::json!({})), "UNKNOWN");
+        assert_eq!(extract_severity(&database, None), "HIGH");
+        assert_eq!(extract_severity(&ecosystem, None), "MODERATE");
+        assert_eq!(extract_severity(&serde_json::json!({}), None), "UNKNOWN");
     }
 
     #[test]
