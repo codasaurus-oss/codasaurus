@@ -3,7 +3,7 @@
 //! Uses `DATABASE_URL` or `CODASAURUS_TEST_DATABASE_URL`
 //! (defaults to `postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus`).
 
-use codasaurus::bot::queue;
+use codasaurus::bot::queue::{self, Outcome};
 use codasaurus::db;
 use std::sync::LazyLock;
 
@@ -22,6 +22,7 @@ async fn migration_v27_adds_lease_and_scheduling_columns() {
     let pool = db::create_pool(&pg_url())
         .await
         .expect("postgres create_pool / migrations");
+    let _ = sqlx::query("DELETE FROM review_jobs").execute(pool.as_pg()).await;
 
     let repo = format!("acme/schema-{}", uuid::Uuid::new_v4().simple());
     let id = queue::enqueue(&pool, &repo, 77, "schemasha", None, "opened")
@@ -58,6 +59,74 @@ async fn migration_v27_adds_lease_and_scheduling_columns() {
 }
 
 #[tokio::test]
+async fn queue_lease_backoff_and_dead_letter() {
+    let _guard = TEST_SERIAL.lock().await;
+    let pool = db::create_pool(&pg_url()).await.expect("pool");
+    let _ = sqlx::query("DELETE FROM review_jobs").execute(pool.as_pg()).await;
+    let repo = format!("acme/lease-{}", uuid::Uuid::new_v4().simple());
+    let id = queue::enqueue(&pool, &repo, 91, "leasesha", None, "opened")
+        .await
+        .expect("enqueue");
+
+    let first = queue::claim_next(&pool, 600).await.expect("claim").expect("job");
+    assert_eq!(first.id, id);
+    assert!(queue::claim_next(&pool, 600).await.expect("claim").is_none());
+
+    sqlx::query("UPDATE review_jobs SET leased_until = NOW() - INTERVAL '1 second' WHERE id = $1")
+        .bind(id)
+        .execute(pool.as_pg())
+        .await
+        .expect("expire lease");
+    let second = queue::claim_next(&pool, 600).await.expect("reclaim").expect("job");
+    assert_ne!(first.lease_id, second.lease_id);
+    assert!(
+        !queue::mark_done(&pool, id, &first.lease_id).await.expect("stale done"),
+        "stale lease must not mark done"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM review_jobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool.as_pg())
+        .await
+        .expect("status");
+    assert_eq!(status, "running");
+
+    let outcome = queue::mark_failed(&pool, id, &second.lease_id, "rate limited", 1)
+        .await
+        .expect("mark_failed");
+    assert!(matches!(outcome, Outcome::Scheduled { delay_secs } if delay_secs >= 1));
+    let run_at_future: bool =
+        sqlx::query_scalar("SELECT run_at > NOW() FROM review_jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool.as_pg())
+            .await
+            .expect("run_at");
+    assert!(run_at_future, "retry must be scheduled into the future");
+
+    sqlx::query("UPDATE review_jobs SET run_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(pool.as_pg())
+        .await
+        .expect("make retry due");
+    let third = queue::claim_next(&pool, 600).await.expect("claim after retry").expect("job");
+    let outcome = queue::mark_failed(&pool, id, &third.lease_id, "still failing", 5)
+        .await
+        .expect("dead letter");
+    assert_eq!(outcome, Outcome::Dead);
+    assert!(queue::replay_dead_job(&pool, id).await.expect("replay"));
+    let status: String = sqlx::query_scalar("SELECT status FROM review_jobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool.as_pg())
+        .await
+        .expect("status");
+    assert_eq!(status, "pending");
+
+    let _ = sqlx::query("DELETE FROM review_jobs WHERE repo = $1")
+        .bind(&repo)
+        .execute(pool.as_pg())
+        .await;
+}
+
+#[tokio::test]
 async fn postgres_migrations_enqueue_and_claim() {
     let _guard = TEST_SERIAL.lock().await;
     let pool = db::create_pool(&pg_url())
@@ -79,7 +148,7 @@ async fn postgres_migrations_enqueue_and_claim() {
     assert_eq!(job.repo, repo);
     assert_eq!(job.pr_number, 42);
 
-    queue::mark_done(&pool, job.id).await.expect("mark_done");
+    queue::mark_done(&pool, job.id, &job.lease_id).await.expect("mark_done");
 
     let email = format!(
         "pg-smoke-{}@example.com",
