@@ -7,49 +7,6 @@ pub mod store;
 
 use crate::config::IndexConfig;
 
-/// List every file path in the repo at `git_ref` via the Git Trees API
-/// (`GET /repos/{repo}/git/trees/{sha}?recursive=1`), capped by max_files.
-pub async fn list_repo_files(
-    client: &reqwest::Client,
-    headers: &reqwest::header::HeaderMap,
-    repo_full_name: &str,
-    git_ref: &str,
-    max_files: usize,
-) -> Result<Vec<String>, anyhow::Error> {
-    let url =
-        format!("https://api.github.com/repos/{repo_full_name}/git/trees/{git_ref}?recursive=1");
-    let resp = crate::retry::retry_async(
-        &crate::retry::RetryConfig::api_default(),
-        "index_tree",
-        &crate::retry::is_reqwest_error_retryable,
-        || async {
-            client
-                .get(&url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(Into::into)
-        },
-    )
-    .await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("git trees API returned {}", resp.status());
-    }
-    let json: serde_json::Value = resp.json().await?;
-    let mut paths: Vec<String> = json["tree"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|t| t["type"].as_str() == Some("blob"))
-                .filter_map(|t| t["path"].as_str().map(|p| p.to_string()))
-                .filter(|p| extract::language_name(p).is_some())
-                .collect()
-        })
-        .unwrap_or_default();
-    paths.truncate(max_files);
-    Ok(paths)
-}
-
 /// Whole-repo callers of symbols defined in `paths`, as compact markdown.
 /// Empty when the repo has no index rows (callers fall back to diff-only impact).
 pub async fn callers_markdown(
@@ -113,6 +70,18 @@ pub async fn callers_markdown(
     )
 }
 
+fn eligible_paths(paths: &[String], config: &IndexConfig) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|path| {
+            extract::language_name(path)
+                .is_some_and(|language| config.languages.iter().any(|allowed| allowed == language))
+        })
+        .take(config.max_files)
+        .cloned()
+        .collect()
+}
+
 /// Incremental: fetch and re-index changed files in bounded parallel batches.
 #[allow(clippy::too_many_arguments)]
 pub async fn reindex_files(
@@ -124,17 +93,10 @@ pub async fn reindex_files(
     paths: &[String],
     config: &IndexConfig,
     llm_cfg: Option<&crate::llm::LlmConfig>,
-) -> Result<(), anyhow::Error> {
-    let eligible: Vec<String> = paths
-        .iter()
-        .filter(|path| {
-            extract::language_name(path)
-                .is_some_and(|lang| config.languages.iter().any(|l| l == lang))
-        })
-        .cloned()
-        .collect();
+) {
+    let eligible = eligible_paths(paths, config);
     if eligible.is_empty() {
-        return Ok(());
+        return;
     }
     let fetched = crate::bot::github_files::fetch_repo_files_parallel(
         client,
@@ -157,39 +119,20 @@ pub async fn reindex_files(
         .filter_map(|(path, content)| extract::extract_file(&path, &content))
         .collect();
     if indices.is_empty() {
-        return Ok(());
+        return;
     }
 
     if let Err(error) = store::replace_files_index(pool, repo_full_name, &indices).await {
-        tracing::warn!(error = %error, repo = repo_full_name, "batch index update failed; retrying files");
-        for index in &indices {
-            if let Err(error) =
-                store::replace_files_index(pool, repo_full_name, std::slice::from_ref(index)).await
-            {
-                tracing::warn!(error = %error, repo = repo_full_name, path = index.file_path, "incremental index failed");
-            }
-        }
+        tracing::warn!(error = %error, repo = repo_full_name, "batch index update failed");
+        return;
     }
     if let Some(llm_cfg) = llm_cfg {
         if let Err(error) =
             semantic::reindex_repo_embeddings(pool, llm_cfg, repo_full_name, &indices).await
         {
-            tracing::warn!(error = %error, repo = repo_full_name, "batch embedding update failed; retrying files");
-            for index in &indices {
-                if let Err(error) = semantic::reindex_repo_embeddings(
-                    pool,
-                    llm_cfg,
-                    repo_full_name,
-                    std::slice::from_ref(index),
-                )
-                .await
-                {
-                    tracing::warn!(error = %error, repo = repo_full_name, path = index.file_path, "semantic index embedding failed");
-                }
-            }
+            tracing::warn!(error = %error, repo = repo_full_name, "semantic index embedding failed");
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -197,16 +140,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn language_gating_respects_config() {
+    fn eligible_paths_respect_language_and_file_caps() {
         let config = IndexConfig {
             enabled: true,
             languages: vec!["python".into()],
-            max_files: 1000,
+            max_files: 1,
             ..Default::default()
         };
-        assert_eq!(extract::language_name("a.py"), Some("python"));
-        assert_eq!(extract::language_name("a.rs"), Some("rust"));
-        assert!(config.languages.iter().any(|l| l == "python"));
-        assert!(!config.languages.iter().any(|l| l == "rust"));
+        let paths = ["a.py".into(), "b.py".into(), "c.rs".into()];
+        assert_eq!(eligible_paths(&paths, &config), ["a.py"]);
+        let disabled = IndexConfig {
+            max_files: 0,
+            ..config
+        };
+        assert!(eligible_paths(&paths, &disabled).is_empty());
     }
 }
