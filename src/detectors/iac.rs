@@ -57,7 +57,7 @@ fn scan_terraform(file: &ParsedFile) -> Vec<Finding> {
                 column: 0,
                 message: "Possible plaintext secret/password in Terraform".into(),
                 suggestion: Some("Use secrets manager / sensitive variables.".into()),
-                evidence: Some(line.trim().chars().take(80).collect()),
+                evidence: None,
                 codemod: None,
                 confidence: None,
                 judge_rationale: None,
@@ -92,9 +92,14 @@ fn scan_k8s(file: &ParsedFile) -> Vec<Finding> {
     if !(lower_all.contains("apiversion:") || lower_all.contains("kind:")) {
         return findings;
     }
+    let mut secret_name = false;
     for (idx, line) in content.lines().enumerate() {
         let line_no = idx + 1;
         let trimmed = line.trim().to_lowercase();
+        let field = trimmed.strip_prefix("- ").unwrap_or(&trimmed);
+        if field.starts_with("name:") {
+            secret_name = contains_secret_key(field);
+        }
         if trimmed == "privileged: true" {
             findings.push(Finding {
                 detector: "iac".into(),
@@ -127,30 +132,38 @@ fn scan_k8s(file: &ParsedFile) -> Vec<Finding> {
                 reachability: None,
             });
         }
-        if trimmed.starts_with("value:")
-            && (trimmed.contains("password")
-                || trimmed.contains("secret")
-                || trimmed.contains("token")
-                || trimmed.contains("apikey"))
-        {
-            findings.push(Finding {
-                detector: "iac".into(),
-                severity: "warning",
-                file: file.path.clone(),
-                line: line_no,
-                column: 0,
-                message: "Possible secret embedded as literal env value".into(),
-                suggestion: Some("Use Secret refs / external secrets instead of literals.".into()),
-                evidence: Some(line.trim().chars().take(80).collect()),
-                codemod: None,
-                confidence: None,
-                judge_rationale: None,
-                reachability: None,
-            });
+        if field.starts_with("value:") {
+            if secret_name || contains_secret_key(field) {
+                findings.push(Finding {
+                    detector: "iac".into(),
+                    severity: "warning",
+                    file: file.path.clone(),
+                    line: line_no,
+                    column: 0,
+                    message: "Possible secret embedded as literal env value".into(),
+                    suggestion: Some(
+                        "Use Secret refs / external secrets instead of literals.".into(),
+                    ),
+                    evidence: None,
+                    codemod: None,
+                    confidence: None,
+                    judge_rationale: None,
+                    reachability: None,
+                });
+            }
+            secret_name = false;
+        } else if field.starts_with("valuefrom:") {
+            secret_name = false;
         }
     }
     findings.truncate(20);
     findings
+}
+
+fn contains_secret_key(value: &str) -> bool {
+    ["password", "secret", "token", "apikey"]
+        .iter()
+        .any(|keyword| value.contains(keyword))
 }
 
 #[cfg(test)]
@@ -173,5 +186,45 @@ mod tests {
         .unwrap();
         let hits = detect(&[f]);
         assert!(hits.iter().any(|h| h.severity == "blocking"));
+    }
+
+    #[test]
+    fn secret_findings_do_not_expose_literal_values() {
+        let files = [
+            crate::parser::parse_file("main.tf", "password = \"super-secret\"\n").unwrap(),
+            crate::parser::parse_file(
+                "deploy/pod.yaml",
+                "apiVersion: v1\nkind: Pod\nvalue: secret-value\n",
+            )
+            .unwrap(),
+        ];
+        let findings = detect(&files);
+        let secret_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.message.contains("plaintext secret") || f.message.contains("secret embedded")
+            })
+            .collect();
+        assert_eq!(secret_findings.len(), 2);
+        for finding in secret_findings {
+            assert!(finding
+                .evidence
+                .as_deref()
+                .is_none_or(|evidence| !evidence.contains("super-secret")
+                    && !evidence.contains("secret-value")));
+        }
+    }
+
+    #[test]
+    fn kubernetes_secret_name_marks_the_following_literal_value() {
+        let file = crate::parser::parse_file(
+            "deploy/pod.yaml",
+            "apiVersion: v1\nkind: Pod\nenv:\n- name: PASSWORD\n  value: hunter2\n",
+        )
+        .unwrap();
+        let findings = detect(&[file]);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.message.contains("secret embedded")));
     }
 }

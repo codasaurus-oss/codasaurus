@@ -604,7 +604,6 @@ pub async fn review_pr_with_options(
             &remote_ctx.guidelines,
             head_ref,
             &commit_messages,
-            &changed_paths,
             &present_paths,
             &pr_title,
         );
