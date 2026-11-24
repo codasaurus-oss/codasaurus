@@ -7,7 +7,6 @@ mod persist;
 mod pipeline;
 mod reviewers;
 
-pub(crate) use findings::is_critical_full_file_path;
 pub use github::fetch_pull_request;
 pub(crate) use github::{
     github_api_headers, next_github_link, post_or_update_comment, GITHUB_CLIENT,

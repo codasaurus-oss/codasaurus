@@ -49,6 +49,28 @@ enum Commands {
         ready: bool,
     },
 
+    /// Replay a dead-lettered review job
+    QueueReplay {
+        /// review_jobs.id
+        #[arg(long)]
+        id: i64,
+    },
+
+    /// Schedule a review job at a future time
+    QueueSchedule {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        pr: i64,
+        #[arg(long)]
+        sha: String,
+        /// RFC 3339 timestamp, e.g. 2026-11-24T10:00:00Z
+        #[arg(long)]
+        at: String,
+        #[arg(long, default_value_t = 100)]
+        priority: i16,
+    },
+
     /// Reset a local dashboard user's password (emergency recovery; no email flow)
     ResetPassword {
         /// Account email
@@ -113,6 +135,48 @@ fn main() -> Result<()> {
         }
         Commands::Version => {
             println!("codasaurus v{}", env!("CARGO_PKG_VERSION"));
+        }
+        Commands::QueueReplay { id } => {
+            let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
+            });
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                let pool = db::create_pool(&database_url).await?;
+                let ok = codasaurus::bot::queue::replay_dead_job(&pool, *id).await?;
+                pool.close().await;
+                println!(
+                    "{}",
+                    if ok {
+                        format!("Requeued dead job {id}")
+                    } else {
+                        format!("No dead job with id {id}")
+                    }
+                );
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+        Commands::QueueSchedule {
+            repo,
+            pr,
+            sha,
+            at,
+            priority,
+        } => {
+            let when = chrono::DateTime::parse_from_rfc3339(at)?.with_timezone(&chrono::Utc);
+            let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
+            });
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                let pool = db::create_pool(&database_url).await?;
+                let id =
+                    codasaurus::bot::queue::schedule_review(&pool, repo, *pr, sha, when, *priority)
+                        .await?;
+                pool.close().await;
+                println!("Scheduled review job {id} for {when}");
+                Ok::<(), anyhow::Error>(())
+            })?;
         }
         Commands::ResetPassword { email, password } => {
             let email = email.trim().to_lowercase();

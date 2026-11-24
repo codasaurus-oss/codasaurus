@@ -177,7 +177,7 @@ fn path_signal_score(path: &str) -> i32 {
         score += 20;
     }
 
-    if crate::bot::review::is_critical_full_file_path(path) {
+    if crate::util::is_security_sensitive_path(path) {
         score += 15;
     }
 
