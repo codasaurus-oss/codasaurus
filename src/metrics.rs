@@ -26,6 +26,11 @@ static DISMISSALS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static TIER1_FINDINGS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static QUEUE_PENDING: AtomicU64 = AtomicU64::new(0);
 static QUEUE_RUNNING: AtomicU64 = AtomicU64::new(0);
+static QUEUE_FAILED: AtomicU64 = AtomicU64::new(0);
+static QUEUE_DEAD: AtomicU64 = AtomicU64::new(0);
+static QUEUE_OLDEST_READY_AGE: AtomicU64 = AtomicU64::new(0);
+static QUEUE_RETRIES: AtomicU64 = AtomicU64::new(0);
+static QUEUE_RECLAIMS: AtomicU64 = AtomicU64::new(0);
 
 /// Rolling latency samples (milliseconds) for approximate p50/p95.
 static LATENCIES_MS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
@@ -118,6 +123,18 @@ pub fn record_queue_completed() {
     QUEUE_COMPLETED.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn record_queue_retry() {
+    QUEUE_RETRIES.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_queue_dead() {
+    QUEUE_DEAD.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_queue_reclaim() {
+    QUEUE_RECLAIMS.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn record_tier1_findings(n: usize) {
     TIER1_FINDINGS_TOTAL.fetch_add(n as u64, Ordering::Relaxed);
 }
@@ -128,9 +145,12 @@ pub fn record_dismissal() {
 
 /// Refresh DB-backed gauges (queue depth, dismissals) before scrape.
 pub async fn refresh_from_db(pool: &crate::db::DbPool) {
-    if let Ok((pending, running)) = crate::bot::queue::queue_depth(pool).await {
-        QUEUE_PENDING.store(pending as u64, Ordering::Relaxed);
-        QUEUE_RUNNING.store(running as u64, Ordering::Relaxed);
+    if let Ok(stats) = crate::bot::queue::queue_depth(pool).await {
+        QUEUE_PENDING.store(stats.pending as u64, Ordering::Relaxed);
+        QUEUE_RUNNING.store(stats.running as u64, Ordering::Relaxed);
+        QUEUE_FAILED.store(stats.failed as u64, Ordering::Relaxed);
+        QUEUE_DEAD.store(stats.dead as u64, Ordering::Relaxed);
+        QUEUE_OLDEST_READY_AGE.store(stats.oldest_ready_age_secs as u64, Ordering::Relaxed);
     }
     if let Ok(n) = crate::db::db_scalar!(pool, i64, "SELECT COUNT(*) FROM dismissed_findings") {
         DISMISSALS_TOTAL.store(n as u64, Ordering::Relaxed);
@@ -171,6 +191,11 @@ pub fn render_prometheus() -> String {
     };
     let q_pending = QUEUE_PENDING.load(Ordering::Relaxed);
     let q_running = QUEUE_RUNNING.load(Ordering::Relaxed);
+    let q_failed = QUEUE_FAILED.load(Ordering::Relaxed);
+    let q_dead = QUEUE_DEAD.load(Ordering::Relaxed);
+    let q_oldest_age = QUEUE_OLDEST_READY_AGE.load(Ordering::Relaxed);
+    let q_retries = QUEUE_RETRIES.load(Ordering::Relaxed);
+    let q_reclaims = QUEUE_RECLAIMS.load(Ordering::Relaxed);
     let spend_usd = llm_spend_usd_estimate();
 
     format!(
@@ -242,6 +267,17 @@ pub fn render_prometheus() -> String {
          # TYPE codasaurus_queue_depth gauge\n\
          codasaurus_queue_depth{{status=\"pending\"}} {q_pending}\n\
          codasaurus_queue_depth{{status=\"running\"}} {q_running}\n\
+         codasaurus_queue_depth{{status=\"failed\"}} {q_failed}\n\
+         codasaurus_queue_depth{{status=\"dead\"}} {q_dead}\n\
+         # HELP codasaurus_oldest_ready_job_age_seconds Age of the oldest ready job\n\
+         # TYPE codasaurus_oldest_ready_job_age_seconds gauge\n\
+         codasaurus_oldest_ready_job_age_seconds {q_oldest_age}\n\
+         # HELP codasaurus_queue_retries_total Retryable job failures\n\
+         # TYPE codasaurus_queue_retries_total counter\n\
+         codasaurus_queue_retries_total {q_retries}\n\
+         # HELP codasaurus_queue_reclaims_total Jobs reclaimed after lease expiry\n\
+         # TYPE codasaurus_queue_reclaims_total counter\n\
+         codasaurus_queue_reclaims_total {q_reclaims}\n\
          # HELP codasaurus_dismissals_total Dismissed findings (FP proxy numerator)\n\
          # TYPE codasaurus_dismissals_total gauge\n\
          codasaurus_dismissals_total {dismissals}\n\

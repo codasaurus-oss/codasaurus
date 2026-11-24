@@ -1,7 +1,14 @@
 //! Durable review job queue (Postgres `FOR UPDATE SKIP LOCKED`).
+//!
+//! Jobs carry an ownership lease and a `run_at` timestamp. A claim is a single
+//! atomic statement; finishing a job is only valid while the lease still
+//! matches. This keeps at-least-once execution safe when a worker stalls.
 
-use crate::db::{db_execute, db_fetch_one, db_scalar, DbPool};
+use crate::db::{db_fetch_one, DbPool};
 use anyhow::Result;
+
+const QUEUE_NAME: &str = "reviews";
+const DEFAULT_MAX_ATTEMPTS: i64 = 5;
 
 #[derive(Debug, Clone)]
 pub struct ReviewJob {
@@ -12,6 +19,24 @@ pub struct ReviewJob {
     pub installation_id: Option<i64>,
     pub action: String,
     pub attempts: i64,
+    pub lease_id: String,
+    pub priority: i16,
+    pub queue_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Scheduled { delay_secs: i64 },
+    Dead,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueueStats {
+    pub pending: i64,
+    pub running: i64,
+    pub failed: i64,
+    pub dead: i64,
+    pub oldest_ready_age_secs: i64,
 }
 
 /// Enqueue (or refresh) a review job for this SHA. Idempotent per (repo, pr, sha).
@@ -30,8 +55,8 @@ pub async fn enqueue(
          VALUES (?, ?, ?, ?, ?, 'pending', 0, NOW(), NOW())
          ON CONFLICT(repo, pr_number, head_sha) DO UPDATE SET
            status = CASE
-             -- Retry failures only. Do not re-pend a successful job for the same
-             -- SHA (duplicate opened/synchronize deliveries would post twice).
+             -- Retry failures only. Do not re-pend a successful or dead job for
+             -- the same SHA (duplicate deliveries must not post twice).
              WHEN review_jobs.status = 'failed' THEN 'pending'
              ELSE review_jobs.status
            END,
@@ -39,6 +64,10 @@ pub async fn enqueue(
            action = CASE
              WHEN review_jobs.status = 'failed' THEN excluded.action
              ELSE review_jobs.action
+           END,
+           run_at = CASE
+             WHEN review_jobs.status = 'failed' THEN NOW()
+             ELSE review_jobs.run_at
            END,
            updated_at = NOW()
          RETURNING id",
@@ -48,97 +77,182 @@ pub async fn enqueue(
         installation_id,
         action
     )?;
+    // Wake-up hint only; polling is the correctness path.
+    let _ = sqlx::query("SELECT pg_notify('review_jobs_ready', '')")
+        .execute(pool.as_pg())
+        .await;
     crate::metrics::record_queue_enqueued();
     Ok(row.0)
 }
 
-/// Atomically claim the oldest pending (or stale running) job.
-pub async fn claim_next(pool: &DbPool, stale_secs: i64) -> Result<Option<ReviewJob>> {
-    // Partial indexes on pending/running keep this hot path index-friendly.
-    let row = sqlx::query_as::<_, (i64, String, i64, String, Option<i64>, String, i32)>(
+/// Atomically claim up to `limit` due jobs. Expired leases are reclaimed.
+pub async fn claim_batch(pool: &DbPool, stale_secs: i64, limit: i64) -> Result<Vec<ReviewJob>> {
+    let lease_id = uuid::Uuid::new_v4();
+    let rows = sqlx::query_as::<
+        _,
+        (i64, String, i64, String, Option<i64>, String, i32, i16, String, String),
+    >(
         "UPDATE review_jobs SET
            status = 'running',
            attempts = attempts + 1,
+           lease_id = $1::uuid,
+           leased_until = NOW() + ($2::bigint * INTERVAL '1 second'),
            updated_at = NOW()
-         WHERE id = (
+         WHERE id IN (
            SELECT id FROM review_jobs
-           WHERE status = 'pending'
-              OR (status = 'running'
-                  AND updated_at < NOW() - ($1::bigint * INTERVAL '1 second'))
-           ORDER BY
-             CASE WHEN status = 'pending' THEN 0 ELSE 1 END,
-             CASE WHEN status = 'pending' THEN created_at ELSE updated_at END
-           ASC
-           LIMIT 1
-           FOR UPDATE SKIP LOCKED
+            WHERE queue_name = $4
+              AND ((status = 'pending' AND run_at <= NOW())
+                OR (status = 'failed' AND run_at <= NOW())
+                OR (status = 'running' AND leased_until < NOW()))
+            ORDER BY priority ASC, run_at ASC, id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT $3
          )
-         RETURNING id, repo, pr_number, head_sha, installation_id, action, attempts",
+         RETURNING id, repo, pr_number, head_sha, installation_id, action, attempts,
+                   priority, queue_name, lease_id::text",
     )
+    .bind(lease_id.to_string())
     .bind(stale_secs)
-    .fetch_optional(pool.as_pg())
+    .bind(limit)
+    .bind(QUEUE_NAME)
+    .fetch_all(pool.as_pg())
     .await?;
 
-    Ok(row.map(
-        |(id, repo, pr_number, head_sha, installation_id, action, attempts)| ReviewJob {
-            id,
-            repo,
-            pr_number,
-            head_sha,
-            installation_id,
-            action,
-            attempts: i64::from(attempts),
-        },
-    ))
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, repo, pr_number, head_sha, installation_id, action, attempts, priority, queue_name, lease)| {
+                ReviewJob {
+                    id,
+                    repo,
+                    pr_number,
+                    head_sha,
+                    installation_id,
+                    action,
+                    attempts: i64::from(attempts),
+                    lease_id: lease,
+                    priority,
+                    queue_name,
+                }
+            },
+        )
+        .collect())
 }
 
-pub async fn mark_done(pool: &DbPool, id: i64) -> Result<()> {
-    db_execute!(
-        pool,
-        "UPDATE review_jobs SET status = 'done', updated_at = NOW(), last_error = NULL WHERE id = ?",
-        id
-    )?;
-    crate::metrics::record_queue_completed();
-    Ok(())
+pub async fn claim_next(pool: &DbPool, stale_secs: i64) -> Result<Option<ReviewJob>> {
+    Ok(claim_batch(pool, stale_secs, 1).await?.into_iter().next())
 }
 
-pub async fn mark_failed(pool: &DbPool, id: i64, err: &str) -> Result<()> {
-    let msg: String = err.chars().take(500).collect();
-    db_execute!(
-        pool,
-        "UPDATE review_jobs SET status = 'failed', updated_at = NOW(), last_error = ? WHERE id = ?",
-        &msg,
-        id
-    )?;
-    Ok(())
+/// Refresh the lease while a job is running. False means ownership was lost.
+pub async fn heartbeat(pool: &DbPool, id: i64, lease_id: &str) -> Result<bool> {
+    let n = sqlx::query(
+        "UPDATE review_jobs SET leased_until = NOW() + INTERVAL '600 seconds'
+          WHERE id = $1 AND lease_id::text = $2 AND status = 'running'",
+    )
+    .bind(id)
+    .bind(lease_id)
+    .execute(pool.as_pg())
+    .await?
+    .rows_affected();
+    Ok(n > 0)
 }
 
-pub async fn requeue_if_retryable(
+/// Mark success only if this worker still owns the lease. False means a stale
+/// worker tried to overwrite a reclaimed run.
+pub async fn mark_done(pool: &DbPool, id: i64, lease_id: &str) -> Result<bool> {
+    let n = sqlx::query(
+        "UPDATE review_jobs SET status = 'done', updated_at = NOW(), last_error = NULL,
+           lease_id = NULL, leased_until = NULL
+          WHERE id = $1 AND lease_id::text = $2 AND status = 'running'",
+    )
+    .bind(id)
+    .bind(lease_id)
+    .execute(pool.as_pg())
+    .await?
+    .rows_affected();
+    if n > 0 {
+        crate::metrics::record_queue_completed();
+    }
+    Ok(n > 0)
+}
+
+/// Record a failure with exponential backoff and jitter, or dead-letter it.
+pub async fn mark_failed(
     pool: &DbPool,
     id: i64,
+    lease_id: &str,
+    err: &str,
     attempts: i64,
-    max_attempts: i64,
-) -> Result<()> {
-    if attempts >= max_attempts {
-        return Ok(());
+) -> Result<Outcome> {
+    let msg: String = err.chars().take(500).collect();
+    if attempts >= DEFAULT_MAX_ATTEMPTS {
+        let n = sqlx::query(
+            "UPDATE review_jobs SET status = 'dead', updated_at = NOW(), last_error = $1,
+               lease_id = NULL, leased_until = NULL
+             WHERE id = $2 AND lease_id::text = $3 AND status = 'running'",
+        )
+        .bind(&msg)
+        .bind(id)
+        .bind(lease_id)
+        .execute(pool.as_pg())
+        .await?
+        .rows_affected();
+        if n > 0 {
+            crate::metrics::record_queue_dead();
+        }
+        return Ok(Outcome::Dead);
     }
-    db_execute!(
-        pool,
-        "UPDATE review_jobs SET status = 'pending', updated_at = NOW() WHERE id = ? AND status = 'failed'",
-        id
-    )?;
-    Ok(())
+    let base = 2_i64.pow(attempts.min(10) as u32).min(3600);
+    let jitter = ((id % 41) - 20) as f64 / 100.0;
+    let delay_secs = ((base as f64) * (1.0 + jitter)).round().max(1.0) as i64;
+    sqlx::query(
+        "UPDATE review_jobs SET status = 'failed', updated_at = NOW(), last_error = $1,
+           run_at = NOW() + ($2::bigint * INTERVAL '1 second'),
+           lease_id = NULL, leased_until = NULL
+         WHERE id = $3 AND lease_id::text = $4 AND status = 'running'",
+    )
+    .bind(&msg)
+    .bind(delay_secs)
+    .bind(id)
+    .bind(lease_id)
+    .execute(pool.as_pg())
+    .await?;
+    crate::metrics::record_queue_retry();
+    Ok(Outcome::Scheduled { delay_secs })
 }
 
-pub async fn queue_depth(pool: &DbPool) -> Result<(i64, i64), sqlx::Error> {
-    let pending: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM review_jobs WHERE status = 'pending'"
-    )?;
-    let running: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM review_jobs WHERE status = 'running'"
-    )?;
-    Ok((pending, running))
+/// Put a dead job back in the queue for an operator-driven retry.
+pub async fn replay_dead_job(pool: &DbPool, id: i64) -> Result<bool> {
+    let n = sqlx::query(
+        "UPDATE review_jobs SET status = 'pending', attempts = 0, run_at = NOW(),
+           last_error = NULL, updated_at = NOW()
+         WHERE id = $1 AND status = 'dead'",
+    )
+    .bind(id)
+    .execute(pool.as_pg())
+    .await?
+    .rows_affected();
+    Ok(n > 0)
+}
+
+pub async fn queue_depth(pool: &DbPool) -> Result<QueueStats, sqlx::Error> {
+    let row: (i64, i64, i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT
+           COUNT(*) FILTER (WHERE status = 'pending'),
+           COUNT(*) FILTER (WHERE status = 'running'),
+           COUNT(*) FILTER (WHERE status = 'failed'),
+           COUNT(*) FILTER (WHERE status = 'dead'),
+           MAX(EXTRACT(EPOCH FROM (NOW() - run_at))::bigint) FILTER (WHERE status IN ('pending', 'failed'))
+         FROM review_jobs WHERE queue_name = $1",
+    )
+    .bind(QUEUE_NAME)
+    .fetch_one(pool.as_pg())
+    .await?;
+    Ok(QueueStats {
+        pending: row.0,
+        running: row.1,
+        failed: row.2,
+        dead: row.3,
+        oldest_ready_age_secs: row.4.unwrap_or(0).max(0),
+    })
 }

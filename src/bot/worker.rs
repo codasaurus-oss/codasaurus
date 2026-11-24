@@ -50,10 +50,14 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                                 job_id = job.id,
                                 "no bot config; requeueing after delay"
                             );
-                            let _ = queue::mark_failed(&pool, job.id, "bot config not configured")
-                                .await;
-                            let _ =
-                                queue::requeue_if_retryable(&pool, job.id, job.attempts, 3).await;
+                            let _ = queue::mark_failed(
+                                &pool,
+                                job.id,
+                                &job.lease_id,
+                                "bot config not configured",
+                                job.attempts,
+                            )
+                            .await;
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             continue;
                         };
@@ -65,11 +69,11 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                             let _ = queue::mark_failed(
                                 &pool,
                                 job.id,
+                                &job.lease_id,
                                 "github app credentials incomplete",
+                                job.attempts,
                             )
                             .await;
-                            let _ =
-                                queue::requeue_if_retryable(&pool, job.id, job.attempts, 3).await;
                             tokio::time::sleep(Duration::from_secs(10)).await;
                             continue;
                         }
@@ -82,6 +86,7 @@ pub fn start_review_worker(pool: crate::db::DbPool) {
                             job.installation_id,
                             &job.action,
                             job.attempts,
+                            &job.lease_id,
                             timeout_secs,
                         )
                         .await;
@@ -117,6 +122,7 @@ async fn process_queued_review(
     inst_id: Option<i64>,
     _action: &str,
     attempts: i64,
+    lease_id: &str,
     timeout_secs: u64,
 ) {
     let Ok(_permit) = REVIEW_PERMITS.acquire().await else {
@@ -163,7 +169,7 @@ async fn process_queued_review(
             crate::metrics::record_review_ok(started);
             tracing::info!(job_id, repo, pr = pr_number, "queued review completed");
             if let Some(pool) = pool {
-                let _ = queue::mark_done(pool, job_id).await;
+                let _ = queue::mark_done(pool, job_id, lease_id).await;
             }
         }
         Ok(Err(e)) => {
@@ -171,8 +177,7 @@ async fn process_queued_review(
             tracing::error!(job_id, error = %e, "queued review failed");
             release_claim_best_effort(repo, pr_number, head_sha).await;
             if let Some(pool) = pool {
-                let _ = queue::mark_failed(pool, job_id, &e.to_string()).await;
-                let _ = queue::requeue_if_retryable(pool, job_id, attempts, 3).await;
+                let _ = queue::mark_failed(pool, job_id, lease_id, &e.to_string(), attempts).await;
             }
         }
         Err(_) => {
@@ -180,8 +185,7 @@ async fn process_queued_review(
             tracing::error!(job_id, "queued review timed out");
             release_claim_best_effort(repo, pr_number, head_sha).await;
             if let Some(pool) = pool {
-                let _ = queue::mark_failed(pool, job_id, "timeout").await;
-                let _ = queue::requeue_if_retryable(pool, job_id, attempts, 3).await;
+                let _ = queue::mark_failed(pool, job_id, lease_id, "timeout", attempts).await;
             }
         }
     }
