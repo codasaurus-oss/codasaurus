@@ -280,6 +280,49 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     migrate_v26_findings_fingerprint_per_review(pool).await?;
     migrate_v27_review_queue_hardening(pool).await?;
     migrate_v28_queue_lease_recovery(pool).await?;
+    migrate_v29_query_indexes(pool).await?;
+    Ok(())
+}
+
+/// v29: EXPLAIN ANALYZE with 50k reviews showed the list endpoints scanning
+/// `idx_reviews_created` and discarding most rows. Add covering composite
+/// indexes for the actual predicates, plus the learning-scope lookups.
+async fn migrate_v29_query_indexes(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 29 {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(931847263)")
+        .execute(&mut *tx)
+        .await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(&mut *tx)
+        .await?;
+    if current.unwrap_or(0) >= 29 {
+        tx.commit().await?;
+        return Ok(());
+    }
+    for sql in [
+        "CREATE INDEX IF NOT EXISTS idx_reviews_status_created
+           ON reviews (status, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_reviews_repo_status_created
+           ON reviews (repo_id, status, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_dismissed_scope_maintainer
+           ON dismissed_findings (detector, is_maintainer, COALESCE(repo_full_name, ''))",
+        "CREATE INDEX IF NOT EXISTS idx_learned_scope_approved
+           ON learned_rules (detector, status, COALESCE(repo_full_name, ''))",
+    ] {
+        sqlx::query(sql).execute(&mut *tx).await?;
+    }
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (29) ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
