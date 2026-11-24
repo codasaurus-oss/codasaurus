@@ -5,7 +5,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default, skip_serializing)]
     pub api_key: String,
@@ -35,6 +35,27 @@ pub struct LlmConfig {
     pub embedding_model: String,
 }
 
+impl std::fmt::Debug for LlmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConfig")
+            .field(
+                "api_key",
+                &if self.api_key.is_empty() {
+                    "<unset>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("model", &self.model)
+            .field("text_model", &self.text_model)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("base_url", &self.base_url)
+            .field("embedding_model", &self.embedding_model)
+            .finish()
+    }
+}
+
 /// First non-empty, non-masked value; DB wins over env. A masked dashboard
 /// placeholder never reaches the wire.
 fn resolve_model(db: Option<&str>, env: Option<&str>) -> Option<String> {
@@ -56,6 +77,7 @@ fn default_temperature() -> f32 {
 
 /// Masked dashboard placeholders must never be sent back as a credential.
 pub(crate) fn usable_secret(value: &str) -> bool {
+    let value = value.trim();
     !value.is_empty() && !value.contains('•') && !value.contains('*')
 }
 
@@ -69,13 +91,17 @@ fn resolve_api_key(db_primary: Option<&str>, env_primary: Option<&str>) -> Optio
     [db_primary, env_primary]
         .into_iter()
         .flatten()
+        .map(str::trim)
         .find(|v| usable_secret(v))
         .map(str::to_string)
 }
 
 /// Gateway endpoint from the environment; empty counts as unset (fail closed).
 fn resolve_base_url(value: Option<String>) -> Option<String> {
-    value.filter(|url| !url.is_empty())
+    value.and_then(|url| {
+        let url = url.trim();
+        (!url.is_empty()).then(|| url.to_string())
+    })
 }
 
 fn llm_disabled(provider: Option<&str>) -> bool {
@@ -196,10 +222,11 @@ impl LlmConfig {
 
     /// Model used for non-review text helpers.
     pub fn effective_text_model(&self) -> &str {
-        if self.text_model.trim().is_empty() {
+        let text_model = self.text_model.trim();
+        if text_model.is_empty() {
             &self.model
         } else {
-            &self.text_model
+            text_model
         }
     }
 
@@ -305,6 +332,27 @@ mod tests {
             embedding_model: "my-embedding-alias".into(),
         };
         assert_eq!(cfg.effective_text_model(), "my-review-alias");
+        let blank = LlmConfig {
+            text_model: "   ".into(),
+            ..cfg
+        };
+        assert_eq!(blank.effective_text_model(), "my-review-alias");
+    }
+
+    #[test]
+    fn debug_output_redacts_api_key() {
+        let cfg = LlmConfig {
+            api_key: "super-secret-key".into(),
+            model: "alias".into(),
+            text_model: String::new(),
+            max_tokens: 2048,
+            temperature: 0.1,
+            base_url: "http://litellm:4000/v1".into(),
+            embedding_model: String::new(),
+        };
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("super-secret-key"));
+        assert!(debug.contains("redacted"));
     }
 
     #[test]
@@ -367,6 +415,16 @@ mod tests {
             Some("http://gateway.test:4000/v1")
         );
         assert_eq!(resolve_base_url(Some(String::new())), None);
+        assert_eq!(resolve_base_url(Some("   ".into())), None);
         assert_eq!(resolve_base_url(None), None);
+    }
+
+    #[test]
+    fn blank_api_key_falls_back_to_env() {
+        assert_eq!(
+            resolve_api_key(Some("   "), Some("real-key")).as_deref(),
+            Some("real-key")
+        );
+        assert_eq!(resolve_api_key(Some("   "), None), None);
     }
 }
