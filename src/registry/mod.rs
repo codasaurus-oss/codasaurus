@@ -357,14 +357,15 @@ async fn query_osv_batch_at(
         .map(String::as_str)
         .collect::<HashSet<_>>();
     let details = fetch_osv_details(client, base_url, &unique_ids).await;
-    Ok(ids_by_query
+    Ok(queries
         .iter()
-        .map(|ids| {
+        .zip(ids_by_query)
+        .map(|((ecosystem, package, _), ids)| {
             ids.iter()
                 .map(|id| {
                     details
                         .get(id)
-                        .cloned()
+                        .and_then(|data| extract_osv_vuln_for(data, ecosystem, package))
                         .unwrap_or_else(|| id_only_vulnerability(id))
                 })
                 .collect()
@@ -400,7 +401,7 @@ async fn fetch_osv_details(
     client: &reqwest::Client,
     base_url: &str,
     ids: &HashSet<&str>,
-) -> HashMap<String, OsvVulnerability> {
+) -> HashMap<String, serde_json::Value> {
     let semaphore = Arc::new(Semaphore::new(OSV_DETAIL_CONCURRENCY));
     let mut tasks = JoinSet::new();
     for id in ids {
@@ -433,13 +434,14 @@ async fn fetch_osv_details(
             )
             .await;
             match result {
-                Ok(data) => match extract_osv_vuln(&data) {
-                    Some(vuln) => Some((id, vuln)),
-                    None => {
-                        tracing::warn!(%id, "OSV vulnerability detail is missing an id");
+                Ok(data) => {
+                    if data["id"].as_str() == Some(id.as_str()) {
+                        Some((id, data))
+                    } else {
+                        tracing::warn!(%id, "OSV vulnerability detail id did not match");
                         None
                     }
-                },
+                }
                 Err(error) => {
                     tracing::warn!(%id, error = %error, "OSV vulnerability detail lookup failed");
                     None
@@ -451,8 +453,8 @@ async fn fetch_osv_details(
     let mut details = HashMap::with_capacity(ids.len());
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Some((id, vuln))) => {
-                details.insert(id, vuln);
+            Ok(Some((id, data))) => {
+                details.insert(id, data);
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(error = %error, "OSV vulnerability detail task failed"),
@@ -619,7 +621,9 @@ async fn check_osv_async(ecosystem: &str, package: &str) -> Result<Vec<OsvVulner
     .await?;
 
     let vulns = data["vulns"].as_array().map_or_else(Vec::new, |arr| {
-        arr.iter().filter_map(extract_osv_vuln).collect()
+        arr.iter()
+            .filter_map(|vuln| extract_osv_vuln_for(vuln, ecosystem, package))
+            .collect()
     });
 
     {
@@ -653,22 +657,37 @@ fn extract_severity(value: &serde_json::Value) -> String {
         .to_string()
 }
 
-fn extract_osv_vuln(v: &serde_json::Value) -> Option<OsvVulnerability> {
-    let id = v["id"].as_str()?.to_string();
-    let summary = v["summary"].as_str().unwrap_or("").to_string();
-    let severity = extract_severity(v);
-    let fixed = v["affected"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|a| a.get("ranges"))
-        .and_then(|r| r.as_array())
+fn extract_osv_vuln_for(
+    value: &serde_json::Value,
+    ecosystem: &str,
+    package: &str,
+) -> Option<OsvVulnerability> {
+    let id = value["id"].as_str()?.to_string();
+    let summary = value["summary"].as_str().unwrap_or("").to_string();
+    let severity = extract_severity(value);
+    let affected = value["affected"].as_array().and_then(|affected| {
+        affected.iter().find(|entry| {
+            let candidate = entry["package"]["name"].as_str().unwrap_or_default();
+            let same_package = if ecosystem == "PyPI" {
+                candidate
+                    .replace(['_', '.'], "-")
+                    .eq_ignore_ascii_case(&package.replace(['_', '.'], "-"))
+            } else {
+                candidate == package
+            };
+            same_package && entry["package"]["ecosystem"].as_str() == Some(ecosystem)
+        })
+    });
+    let fixed = affected
+        .and_then(|entry| entry.get("ranges"))
+        .and_then(|ranges| ranges.as_array())
         .and_then(|ranges| ranges.first())
-        .and_then(|r| r.get("events"))
-        .and_then(|e| e.as_array())
+        .and_then(|range| range.get("events"))
+        .and_then(|events| events.as_array())
         .and_then(|events| {
             events
                 .iter()
-                .find_map(|e| e["fixed"].as_str().map(|s| s.to_string()))
+                .find_map(|event| event["fixed"].as_str().map(str::to_string))
         });
 
     Some(OsvVulnerability {
@@ -734,23 +753,34 @@ mod tests {
                     if id == "GHSA-missing" {
                         return StatusCode::NOT_FOUND.into_response();
                     }
-                    let severity = if id == "GHSA-1" {
-                        json!({ "database_specific": { "severity": "HIGH" } })
-                    } else {
-                        json!({
-                            "affected": [{ "ecosystem_specific": { "severity": "MODERATE" } }]
-                        })
-                    };
                     let mut record = json!({
                         "id": id,
-                        "summary": format!("summary-{id}"),
-                        "affected": [{ "ranges": [{ "events": [{ "fixed": "2.0.0" }] }] }]
+                        "summary": format!("summary-{id}")
                     });
                     if id == "GHSA-1" {
-                        record["database_specific"] = severity["database_specific"].clone();
+                        record["database_specific"] = json!({ "severity": "HIGH" });
+                        record["affected"] = json!([
+                            {
+                                "package": { "name": "other", "ecosystem": "npm" },
+                                "ranges": [{ "events": [{ "fixed": "9.0.0" }] }]
+                            },
+                            {
+                                "package": { "name": "one", "ecosystem": "npm" },
+                                "ranges": [{ "events": [{ "fixed": "2.0.0" }] }]
+                            }
+                        ]);
                     } else {
-                        record["affected"][0]["ecosystem_specific"] =
-                            severity["affected"][0]["ecosystem_specific"].clone();
+                        record["affected"] = json!([
+                            {
+                                "package": { "name": "unrelated", "ecosystem": "PyPI" },
+                                "ranges": [{ "events": [{ "fixed": "8.0.0" }] }]
+                            },
+                            {
+                                "package": { "name": "one", "ecosystem": "npm" },
+                                "ranges": [{ "events": [{ "fixed": "3.0.0" }] }],
+                                "ecosystem_specific": { "severity": "MODERATE" }
+                            }
+                        ]);
                     }
                     Json(record).into_response()
                 }),
@@ -794,7 +824,9 @@ mod tests {
         assert_eq!(results[0][0].severity, "HIGH");
         assert_eq!(results[0][0].fixed_version.as_deref(), Some("2.0.0"));
         assert_eq!(results[0][1].severity, "MODERATE");
+        assert_eq!(results[0][1].fixed_version.as_deref(), Some("3.0.0"));
         assert_eq!(results[1][0].id, "GHSA-1");
+        assert_eq!(results[1][0].fixed_version, None);
         assert_eq!(results[2][0].id, "GHSA-missing");
         assert_eq!(results[2][0].severity, "UNKNOWN");
         let calls = state.detail_calls.lock().unwrap();
