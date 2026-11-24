@@ -387,17 +387,14 @@ fn author_can_command(payload: &WebhookPayload) -> bool {
 }
 
 /// Who may dismiss findings via emoji reactions (same trust bar as slash commands).
-fn reactor_can_dismiss(payload: &WebhookPayload) -> bool {
-    let assoc = payload
-        .reaction
-        .as_ref()
-        .and_then(|r| r.get("author_association"))
-        .and_then(|a| a.as_str())
-        .unwrap_or("");
-    let login = payload
-        .reaction
-        .as_ref()
-        .and_then(|r| r.pointer("/user/login"))
+/// Login of the object's author, falling back to the webhook sender.
+fn actor_login<'a>(
+    object: Option<&'a serde_json::Value>,
+    user_path: &str,
+    payload: &'a WebhookPayload,
+) -> Option<&'a str> {
+    object
+        .and_then(|o| o.pointer(user_path))
         .and_then(|v| v.as_str())
         .or_else(|| {
             payload
@@ -405,7 +402,17 @@ fn reactor_can_dismiss(payload: &WebhookPayload) -> bool {
                 .as_ref()
                 .and_then(|s| s.get("login"))
                 .and_then(|v| v.as_str())
-        });
+        })
+}
+
+fn reactor_can_dismiss(payload: &WebhookPayload) -> bool {
+    let assoc = payload
+        .reaction
+        .as_ref()
+        .and_then(|r| r.get("author_association"))
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    let login = actor_login(payload.reaction.as_ref(), "/user/login", payload);
     dismissal_allowed(payload, assoc, login)
 }
 
@@ -426,18 +433,7 @@ fn thread_resolver_can_dismiss(payload: &WebhookPayload) -> bool {
         .and_then(|t| t.pointer("/comments/0/author_association"))
         .and_then(|a| a.as_str())
         .unwrap_or("");
-    let login = payload
-        .thread
-        .as_ref()
-        .and_then(|t| t.pointer("/comments/0/user/login"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            payload
-                .sender
-                .as_ref()
-                .and_then(|s| s.get("login"))
-                .and_then(|v| v.as_str())
-        });
+    let login = actor_login(payload.thread.as_ref(), "/comments/0/user/login", payload);
     dismissal_allowed(payload, assoc, login)
 }
 

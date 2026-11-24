@@ -1203,41 +1203,31 @@ mod tests {
         assert!(s.contains("redacted"));
     }
 
-    #[test]
-    fn short_fp_len() {
-        let f = Finding {
-            detector: "secrets".into(),
+    fn inline_finding(detector: &str, message: &str, evidence: Option<&str>) -> Finding {
+        Finding {
+            detector: detector.into(),
             severity: "blocking",
             file: "a.rs".into(),
             line: 1,
             column: 0,
-            message: "x".into(),
+            message: message.into(),
             suggestion: None,
-            evidence: None,
+            evidence: evidence.map(str::to_string),
             codemod: None,
             confidence: None,
             judge_rationale: None,
             reachability: None,
-        };
-        assert_eq!(short_fp(&f).len(), 12);
+        }
+    }
+
+    #[test]
+    fn short_fp_len() {
+        assert_eq!(short_fp(&inline_finding("secrets", "x", None)).len(), 12);
     }
 
     #[test]
     fn inline_includes_provenance_details() {
-        let f = Finding {
-            detector: "secrets".into(),
-            severity: "blocking",
-            file: "a.rs".into(),
-            line: 1,
-            column: 0,
-            message: "key".into(),
-            suggestion: None,
-            evidence: Some("AKIA".into()),
-            codemod: None,
-            confidence: None,
-            judge_rationale: None,
-            reachability: None,
-        };
+        let f = inline_finding("secrets", "key", Some("AKIA"));
         let body = inline_finding_comment(&f);
         assert!(body.contains("<details>"));
         assert!(body.contains("Why it matters"));
@@ -1522,20 +1512,7 @@ mod tests {
 
     #[test]
     fn progress_set_diff() {
-        let a = Finding {
-            detector: "secrets".into(),
-            severity: "blocking",
-            file: "a.rs".into(),
-            line: 1,
-            column: 0,
-            message: "key".into(),
-            suggestion: None,
-            evidence: None,
-            codemod: None,
-            confidence: None,
-            judge_rationale: None,
-            reachability: None,
-        };
+        let a = inline_finding("secrets", "key", None);
         let b = Finding {
             detector: "todo-leaks".into(),
             severity: "warning",
@@ -1572,20 +1549,7 @@ mod tests {
 
     #[test]
     fn inline_leads_with_action() {
-        let f = Finding {
-            detector: "secrets".into(),
-            severity: "blocking",
-            file: "a.rs".into(),
-            line: 1,
-            column: 0,
-            message: "key".into(),
-            suggestion: None,
-            evidence: Some("AKIA".into()),
-            codemod: None,
-            confidence: None,
-            judge_rationale: None,
-            reachability: None,
-        };
+        let f = inline_finding("secrets", "key", Some("AKIA"));
         let body = inline_finding_comment(&f);
         assert!(body.contains("**Do this:**"));
         assert!(body.contains("Needs fix"));

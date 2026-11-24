@@ -977,27 +977,8 @@ pub async fn review_pr_with_options(
                 }
             }
         }
-        if !head_sha.is_empty() {
-            if let Some(ref s) = state {
-                if let Err(e) = s
-                    .set_reviewed_sha_async(repo_name, pr_number, head_sha)
-                    .await
-                {
-                    tracing::warn!(error = %e, "failed to store reviewed SHA");
-                };
-            }
-        }
-        // Persist clean review to local DB
-        save_review_to_db(
-            repo_name,
-            pr_number,
-            &pr_title,
-            pr["user"]["login"].as_str().unwrap_or(""),
-            pr["base"]["ref"].as_str().unwrap_or(""),
-            pr["head"]["ref"].as_str().unwrap_or(""),
-            head_sha,
-            &findings,
-            false,
+        persist_finished_review(
+            &state, repo_name, pr_number, &pr_title, pr, head_sha, &findings, false,
         )
         .await;
         if policy_pack.create_check_run {
@@ -1142,26 +1123,12 @@ pub async fn review_pr_with_options(
         }
     }
 
-    // Record the reviewed commit SHA for incremental review
-    if !head_sha.is_empty() {
-        if let Some(ref s) = state {
-            if let Err(e) = s
-                .set_reviewed_sha_async(repo_name, pr_number, head_sha)
-                .await
-            {
-                tracing::warn!(error = %e, "failed to store reviewed SHA");
-            };
-        }
-    }
-
-    // Persist review + findings to local DB for dashboard and audit log
-    save_review_to_db(
+    persist_finished_review(
+        &state,
         repo_name,
         pr_number,
         &pr_title,
-        pr["user"]["login"].as_str().unwrap_or(""),
-        pr["base"]["ref"].as_str().unwrap_or(""),
-        pr["head"]["ref"].as_str().unwrap_or(""),
+        pr,
         head_sha,
         &findings,
         has_blocking,
@@ -1171,19 +1138,7 @@ pub async fn review_pr_with_options(
     let mut premerge_md = String::new();
     let mut premerge_blockers: Vec<String> = Vec::new();
     if repo_llm_enabled && !offline_mode && !config.pre_merge.checks.is_empty() {
-        let mut diff = String::new();
-        for f in files.iter().take(20) {
-            let name = f["filename"].as_str().unwrap_or("?");
-            let patch = f["patch"].as_str().unwrap_or("");
-            if patch.is_empty() {
-                continue;
-            }
-            use std::fmt::Write as _;
-            let _ = write!(diff, "--- a/{name}\n+++ b/{name}\n{patch}\n");
-            if diff.len() > 20_000 {
-                break;
-            }
-        }
+        let diff = super::github::unified_diff_from_files(&files, 20, 20_000);
         let results = crate::bot::premerge::run_pre_merge_checks(
             pool,
             repo_name,
@@ -1362,6 +1317,54 @@ pub async fn review_pr_with_options(
     Ok(())
 }
 
+/// Record the reviewed SHA and persist the review so a later push diffs against it.
+#[allow(clippy::too_many_arguments)]
+async fn persist_finished_review(
+    state: &Option<ReviewState>,
+    repo_name: &str,
+    pr_number: i64,
+    pr_title: &str,
+    pr: &serde_json::Value,
+    head_sha: &str,
+    findings: &Findings,
+    has_blocking: bool,
+) {
+    remember_reviewed_sha(state, repo_name, pr_number, head_sha).await;
+    save_review_to_db(
+        repo_name,
+        pr_number,
+        pr_title,
+        pr["user"]["login"].as_str().unwrap_or(""),
+        pr["base"]["ref"].as_str().unwrap_or(""),
+        pr["head"]["ref"].as_str().unwrap_or(""),
+        head_sha,
+        findings,
+        has_blocking,
+    )
+    .await;
+}
+
+/// Best-effort record of the reviewed commit for incremental review.
+async fn remember_reviewed_sha(
+    state: &Option<ReviewState>,
+    repo_name: &str,
+    pr_number: i64,
+    head_sha: &str,
+) {
+    if head_sha.is_empty() {
+        return;
+    }
+    let Some(state) = state else {
+        return;
+    };
+    if let Err(e) = state
+        .set_reviewed_sha_async(repo_name, pr_number, head_sha)
+        .await
+    {
+        tracing::warn!(error = %e, "failed to store reviewed SHA");
+    }
+}
+
 /// POST a pull-request review with the shared retry policy and headers.
 async fn post_pr_review(
     client: &reqwest::Client,
@@ -1523,19 +1526,7 @@ async fn maybe_sequence_diagram(
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
-    let mut diff = String::new();
-    for f in files.iter().take(20) {
-        let name = f["filename"].as_str().unwrap_or("?");
-        let patch = f["patch"].as_str().unwrap_or("");
-        if patch.is_empty() {
-            continue;
-        }
-        use std::fmt::Write as _;
-        let _ = write!(diff, "--- a/{name}\n+++ b/{name}\n{patch}\n");
-        if diff.len() > 8_000 {
-            break;
-        }
-    }
+    let diff = super::github::unified_diff_from_files(files, 20, 8_000);
     if diff.is_empty() {
         return None;
     }

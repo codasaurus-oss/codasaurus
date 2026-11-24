@@ -219,33 +219,47 @@ mod tests {
         GatewayClient::new(base.to_string(), "sk-master".to_string())
     }
 
+    /// Mock LiteLLM endpoint that records `(route, auth, body)` and replies `response`.
+    fn capture_route(
+        label: &'static str,
+        captured: Arc<Mutex<Vec<(String, String, String)>>>,
+        response: serde_json::Value,
+    ) -> axum::routing::MethodRouter {
+        post({
+            let c = captured.clone();
+            move |req: Request| {
+                let c = c.clone();
+                let response = response.clone();
+                async move {
+                    let auth = req
+                        .headers()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+                        .await
+                        .unwrap();
+                    c.lock().unwrap().push((
+                        label.into(),
+                        auth,
+                        String::from_utf8(body.to_vec()).unwrap(),
+                    ));
+                    Json(response)
+                }
+            }
+        })
+    }
+
     async fn spawn(captured: Arc<Mutex<Vec<(String, String, String)>>>) -> String {
         let app = Router::new()
             .route(
                 "/model/new",
-                post({
-                    let c = captured.clone();
-                    move |req: Request| {
-                        let c = c.clone();
-                        async move {
-                            let auth = req
-                                .headers()
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string();
-                            let body = axum::body::to_bytes(req.into_body(), 1 << 20)
-                                .await
-                                .unwrap();
-                            c.lock().unwrap().push((
-                                "new".into(),
-                                auth,
-                                String::from_utf8(body.to_vec()).unwrap(),
-                            ));
-                            Json(serde_json::json!({"model_id": "m-1"}))
-                        }
-                    }
-                }),
+                capture_route(
+                    "new",
+                    captured.clone(),
+                    serde_json::json!({"model_id": "m-1"}),
+                ),
             )
             .route(
                 "/model/info",
@@ -255,55 +269,23 @@ mod tests {
             )
             .route(
                 "/model/delete",
-                post({
-                    let c = captured.clone();
-                    move |req: Request| {
-                        let c = c.clone();
-                        async move {
-                            let auth = req
-                                .headers()
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string();
-                            let body = axum::body::to_bytes(req.into_body(), 1 << 20)
-                                .await
-                                .unwrap();
-                            c.lock().unwrap().push((
-                                "delete".into(),
-                                auth,
-                                String::from_utf8(body.to_vec()).unwrap(),
-                            ));
-                            Json(serde_json::json!({}))
-                        }
-                    }
-                }),
+                capture_route("delete", captured.clone(), serde_json::json!({})),
             )
             .route(
                 "/key/generate",
-                post({
-                    let c = captured.clone();
-                    move |req: Request| {
-                        let c = c.clone();
-                        async move {
-                            let auth = req
-                                .headers()
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string();
-                            let body = axum::body::to_bytes(req.into_body(), 1 << 20)
-                                .await
-                                .unwrap();
-                            c.lock().unwrap().push((
-                                "key".into(),
-                                auth,
-                                String::from_utf8(body.to_vec()).unwrap(),
-                            ));
-                            Json(serde_json::json!({"key": "sk-virtual"}))
-                        }
-                    }
-                }),
+                capture_route(
+                    "key",
+                    captured.clone(),
+                    serde_json::json!({"key": "sk-virtual"}),
+                ),
+            )
+            .route(
+                "/key/delete",
+                capture_route(
+                    "revoke",
+                    captured.clone(),
+                    serde_json::json!({"deleted_keys": ["sk-old"]}),
+                ),
             )
             .route(
                 "/model/m-1/update",
@@ -321,26 +303,6 @@ mod tests {
                                 String::from_utf8(body.to_vec()).unwrap(),
                             ));
                             Json(serde_json::json!({}))
-                        }
-                    }
-                }),
-            )
-            .route(
-                "/key/delete",
-                post({
-                    let c = captured.clone();
-                    move |req: Request| {
-                        let c = c.clone();
-                        async move {
-                            let body = axum::body::to_bytes(req.into_body(), 1 << 20)
-                                .await
-                                .unwrap();
-                            c.lock().unwrap().push((
-                                "revoke".into(),
-                                String::new(),
-                                String::from_utf8(body.to_vec()).unwrap(),
-                            ));
-                            Json(serde_json::json!({"deleted_keys": ["sk-old"]}))
                         }
                     }
                 }),

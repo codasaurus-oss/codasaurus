@@ -156,20 +156,14 @@ pub async fn callers_of(
     repo: &str,
     symbol: &str,
 ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
-    sqlx::query(
+    query_tuples(
+        pool,
         "SELECT from_symbol, to_symbol, edge_kind FROM repo_edges
          WHERE repo_full_name = $1 AND to_symbol = $2
          ORDER BY from_symbol LIMIT 50",
+        &[repo, symbol],
     )
-    .bind(repo)
-    .bind(symbol)
-    .fetch_all(pool.as_pg())
     .await
-    .map(|rows| {
-        rows.into_iter()
-            .map(|r| (r.get(0), r.get(1), r.get(2)))
-            .collect()
-    })
 }
 
 /// Symbols defined in a file, so callers can be resolved by name.
@@ -178,18 +172,36 @@ pub async fn symbols_in_file(
     repo: &str,
     file_path: &str,
 ) -> Result<Vec<(String, String, i64)>, sqlx::Error> {
-    sqlx::query(
+    query_tuples(
+        pool,
         "SELECT symbol_name, kind, COALESCE(line, 0) FROM repo_symbols
          WHERE repo_full_name = $1 AND file_path = $2
          ORDER BY line",
+        &[repo, file_path],
     )
-    .bind(repo)
-    .bind(file_path)
-    .fetch_all(pool.as_pg())
     .await
-    .map(|rows| {
+}
+
+use sqlx::postgres::PgRow;
+
+/// Fixed-shape SELECT decoded positionally into tuples.
+async fn query_tuples<A, B, C>(
+    pool: &DbPool,
+    sql: &str,
+    args: &[&str],
+) -> Result<Vec<(A, B, C)>, sqlx::Error>
+where
+    A: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+    B: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+    C: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    let mut q = sqlx::query(sql);
+    for arg in args {
+        q = q.bind(arg);
+    }
+    q.fetch_all(pool.as_pg()).await.map(|rows| {
         rows.into_iter()
-            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .map(|r: PgRow| (r.get(0), r.get(1), r.get(2)))
             .collect()
     })
 }

@@ -26,7 +26,8 @@ fn cache_key(repo: &str, path: &str, git_ref: &str) -> String {
     format!("{repo}\0{path}\0{git_ref}")
 }
 
-fn decode_contents_json(path: &str, body: &serde_json::Value) -> Result<Option<String>> {
+/// Decode a Contents API body into text, rejecting non-files and oversized blobs.
+fn decode_file_content(path: &str, body: &serde_json::Value) -> Result<Option<String>> {
     if body.get("type").and_then(|t| t.as_str()) != Some("file") {
         return Ok(None);
     }
@@ -35,9 +36,8 @@ fn decode_contents_json(path: &str, body: &serde_json::Value) -> Result<Option<S
         tracing::debug!(path, size, "skipping oversized repo file");
         return Ok(None);
     }
-    let encoded = match body["content"].as_str() {
-        Some(c) => c,
-        None => return Ok(None),
+    let Some(encoded) = body["content"].as_str() else {
+        return Ok(None);
     };
     let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD
@@ -149,7 +149,7 @@ pub async fn fetch_repo_file(
         .unwrap_or("")
         .to_string();
     let body: serde_json::Value = resp.json().await?;
-    let content = decode_contents_json(path, &body)?;
+    let content = decode_file_content(path, &body)?;
     if let (Some(text), true) = (&content, !etag.is_empty()) {
         store_gh_cache(key, etag, text.clone());
     }
@@ -191,26 +191,14 @@ pub async fn fetch_repo_file_with_sha(
         return Ok(None);
     }
     let body: serde_json::Value = resp.json().await?;
-    if body.get("type").and_then(|t| t.as_str()) != Some("file") {
-        return Ok(None);
-    }
     let sha = body["sha"].as_str().unwrap_or("").to_string();
     if sha.is_empty() {
         return Ok(None);
     }
-    let size = body["size"].as_u64().unwrap_or(0) as usize;
-    if size > MAX_FILE_BYTES {
+    let Some(content) = decode_file_content(path, &body)? else {
         return Ok(None);
-    }
-    let encoded = match body["content"].as_str() {
-        Some(c) => c,
-        None => return Ok(None),
     };
-    let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(cleaned)
-        .map_err(|e| anyhow::anyhow!("base64 decode failed for {path}: {e}"))?;
-    Ok(Some((String::from_utf8_lossy(&bytes).into_owned(), sha)))
+    Ok(Some((content, sha)))
 }
 
 /// Create or update a file on a branch via Contents API.

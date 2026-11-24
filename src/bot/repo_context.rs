@@ -375,6 +375,13 @@ fn unique_keys(haystack: &str, re: &Regex, limit: usize) -> Vec<String> {
     out
 }
 
+fn issue_tracker_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// Parse Jira keys (`PROJ-123`) and Linear URLs/ids from PR title+body; fetch when credentials exist.
 pub async fn fetch_external_tickets(pr_title: &str, pr_body: &str) -> Vec<IssueContext> {
     let haystack = format!("{pr_title}\n{pr_body}");
@@ -415,13 +422,7 @@ pub async fn fetch_external_tickets(pr_title: &str, pr_body: &str) -> Vec<IssueC
         (jira_base.clone(), jira_email.clone(), jira_token.clone())
     {
         if crate::ssrf::validate_http_url(base.trim(), false).is_ok() {
-            let client = match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(8))
-                .build()
-            {
-                Ok(c) => c,
-                Err(_) => reqwest::Client::new(),
-            };
+            let client = issue_tracker_client();
             for key in &keys {
                 let url = format!("{}/rest/api/3/issue/{}", base.trim_end_matches('/'), key);
                 if let Ok(resp) = client
@@ -455,13 +456,7 @@ pub async fn fetch_external_tickets(pr_title: &str, pr_body: &str) -> Vec<IssueC
     }
 
     if let Some(api_key) = linear_key {
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => reqwest::Client::new(),
-        };
+        let client = issue_tracker_client();
         for id in &linear_ids {
             let from_url = linear_from_url.iter().any(|u| u == id);
             // `issue(id:)` accepts Linear identifiers like ENG-123 (and UUIDs).
