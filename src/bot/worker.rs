@@ -391,12 +391,13 @@ pub(crate) async fn release_claim_best_effort(repo: &str, pr_number: i64, head_s
 mod tests {
     #[tokio::test]
     async fn enqueue_notifies_ready_listeners() {
-        let url = std::env::var("DATABASE_URL")
-            .or_else(|_| std::env::var("CODASAURUS_TEST_DATABASE_URL"))
+        let url = std::env::var("CODASAURUS_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| {
                 "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
             });
-        let mut listener = sqlx::postgres::PgListener::connect(&url)
+        let pool = crate::db::create_pool(&url).await.expect("pool");
+        let mut listener = sqlx::postgres::PgListener::connect_with(pool.as_pg())
             .await
             .expect("listener connects");
         listener
@@ -405,7 +406,6 @@ mod tests {
             .expect("LISTEN succeeds");
 
         let repo = format!("acme/notify-{}", uuid::Uuid::new_v4().simple());
-        let pool = crate::db::create_pool(&url).await.expect("pool");
         let _ = sqlx::query("DELETE FROM review_jobs WHERE repo = $1")
             .bind(&repo)
             .execute(pool.as_pg())

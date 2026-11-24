@@ -174,10 +174,6 @@ impl LearningStore {
         )?)
     }
 
-    pub fn add_rule(&self, rule: &crate::learning::LearnedRule) -> Result<()> {
-        block_on(self.add_rule_async(rule))
-    }
-
     pub async fn add_rule_async(&self, rule: &crate::learning::LearnedRule) -> Result<()> {
         let repo = rule.repo_full_name.clone();
         db_execute!(

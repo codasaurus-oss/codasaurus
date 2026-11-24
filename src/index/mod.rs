@@ -6,7 +6,6 @@ pub mod semantic;
 pub mod store;
 
 use crate::config::IndexConfig;
-use extract::FileIndex;
 
 /// List every file path in the repo at `git_ref` via the Git Trees API
 /// (`GET /repos/{repo}/git/trees/{sha}?recursive=1`), capped by max_files.
@@ -49,63 +48,6 @@ pub async fn list_repo_files(
         .unwrap_or_default();
     paths.truncate(max_files);
     Ok(paths)
-}
-
-/// Build the index for one repo: list files, fetch + parse the ones whose
-/// language is enabled, persist. Returns the number of files indexed.
-pub async fn build_repo_index(
-    pool: &crate::db::DbPool,
-    client: &reqwest::Client,
-    headers: &reqwest::header::HeaderMap,
-    repo_full_name: &str,
-    git_ref: &str,
-    config: &IndexConfig,
-    llm_cfg: Option<&crate::llm::LlmConfig>,
-) -> Result<usize, anyhow::Error> {
-    let paths = list_repo_files(client, headers, repo_full_name, git_ref, config.max_files).await?;
-    let mut files: Vec<FileIndex> = Vec::new();
-
-    for path in &paths {
-        let Some(lang) = extract::language_name(path) else {
-            continue;
-        };
-        if !config.languages.iter().any(|l| l == lang) {
-            continue;
-        }
-        if path.starts_with("vendor/")
-            || path.starts_with("node_modules/")
-            || path.starts_with(".git/")
-            || path.starts_with("target/")
-        {
-            continue;
-        }
-        let content = crate::bot::github_files::fetch_repo_file(
-            client,
-            headers,
-            repo_full_name,
-            path,
-            git_ref,
-        )
-        .await;
-        let Ok(Some(content)) = content else {
-            continue;
-        };
-        if let Some(idx) = extract::extract_file(path, &content) {
-            files.push(idx);
-        }
-    }
-
-    store::replace_repo_index(pool, repo_full_name, &files).await?;
-
-    if let Some(llm_cfg) = llm_cfg {
-        if let Err(e) =
-            semantic::reindex_repo_embeddings(pool, llm_cfg, repo_full_name, &files).await
-        {
-            tracing::warn!(error = %e, repo = repo_full_name, "semantic index embedding failed");
-        }
-    }
-
-    Ok(files.len())
 }
 
 /// Whole-repo callers of symbols defined in `paths`, as compact markdown.

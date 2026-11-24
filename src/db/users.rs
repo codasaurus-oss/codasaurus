@@ -175,11 +175,6 @@ pub async fn verify_password(
     }
 }
 
-/// True if at least one owner (or legacy admin) exists.
-pub async fn admin_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    owner_exists(pool).await
-}
-
 pub async fn owner_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
     let count: i64 = db_scalar!(
         pool,
