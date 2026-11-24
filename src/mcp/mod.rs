@@ -13,13 +13,8 @@ use crate::db::DbPool;
 use anyhow::{bail, Result};
 use serde_json::Value;
 
-/// Heuristic classification of a tool as state-mutating from its name. There is no
-/// standard MCP field for this, and remote servers are third-party (GitHub, Linear,
-/// Notion, Jira, Sentry, or an operator-supplied custom URL) — so tool calls are
-/// steerable by whatever a reviewing PR's diff/description says, including a
-/// jailbroken or hallucinating model. Default-deny anything that looks like a write
-/// so a prompt-injected diff can only ever reach read-only tools; this is a
-/// heuristic safety net, not a substitute for per-tool allowlisting by the operator.
+/// Default-deny write-looking tools because PR content can steer the model.
+/// This is a heuristic safety net, not a replacement for operator allowlisting.
 fn is_write_tool(name: &str) -> bool {
     const WRITE_PREFIXES: &[&str] = &[
         "create",
@@ -70,9 +65,11 @@ fn is_write_tool(name: &str) -> bool {
         "unpin",
     ];
     let lower = name.to_ascii_lowercase();
-    WRITE_PREFIXES
-        .iter()
-        .any(|p| lower.starts_with(p) || lower.contains(&format!("_{p}")))
+    lower.split('_').any(|segment| {
+        WRITE_PREFIXES
+            .iter()
+            .any(|prefix| segment.starts_with(prefix))
+    })
 }
 
 /// One tool exposed to the LLM, qualified with its server so names never collide.
@@ -218,9 +215,8 @@ pub async fn call_tool(pool: &DbPool, qualified_name: &str, arguments: &Value) -
         bail!("malformed MCP tool name: {qualified_name}");
     };
 
-    // Re-check the live allowlist before executing: the model can emit a tool
-    // name lifted from injected PR content, or call a server disabled after
-    // tools were offered for this review.
+    // Re-check the live allowlist: injected content or a config change can
+    // introduce a tool name that was unavailable when tools were offered.
     let config = server_configs(pool).await;
     let server = list_servers_from_config(&config)
         .into_iter()
@@ -254,4 +250,31 @@ pub async fn call_tool(pool: &DbPool, qualified_name: &str, arguments: &Value) -
     };
     let truncated: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
     Ok(truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_tool_classification_covers_prefixes_and_segments() {
+        for name in [
+            "create_issue",
+            "UpdateIssue",
+            "repo__delete_branch",
+            "foo_set_status",
+            "execute_command",
+        ] {
+            assert!(is_write_tool(name), "{name}");
+        }
+
+        for name in [
+            "get_issue",
+            "search_docs",
+            "list_repositories",
+            "fetch_summary",
+        ] {
+            assert!(!is_write_tool(name), "{name}");
+        }
+    }
 }
