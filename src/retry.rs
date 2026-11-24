@@ -35,10 +35,11 @@ impl RetryConfig {
     }
 
     fn delay(&self, attempt: u32) -> Duration {
-        let ms = self.base_delay_ms * (1u64 << attempt);
+        let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+        let ms = self.base_delay_ms.saturating_mul(factor);
         // Add simple jitter (±25%) without requiring the rand crate.
         let jitter = (ms / 4).saturating_mul((attempt as u64 % 3) + 1) / 3;
-        Duration::from_millis((ms + jitter).min(30_000))
+        Duration::from_millis(ms.saturating_add(jitter).min(30_000))
     }
 }
 
@@ -189,5 +190,15 @@ mod tests {
         let cfg = RetryConfig::api_default();
         assert!(cfg.delay(0).as_millis() >= 1000);
         assert!(cfg.delay(10).as_millis() <= 30_000);
+    }
+
+    #[test]
+    fn huge_attempt_delay_caps_without_overflow() {
+        let cfg = RetryConfig {
+            max_retries: 0,
+            base_delay_ms: u64::MAX,
+        };
+
+        assert_eq!(cfg.delay(64), Duration::from_secs(30));
     }
 }

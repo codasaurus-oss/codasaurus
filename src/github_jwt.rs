@@ -21,8 +21,12 @@ pub fn resolve_private_key_from_env() -> Option<String> {
     if b64.trim().is_empty() {
         return None;
     }
+    decode_private_key_b64(&b64)
+}
+
+fn decode_private_key_b64(b64: &str) -> Option<String> {
     base64::engine::general_purpose::STANDARD
-        .decode(b64.as_bytes())
+        .decode(b64.trim().as_bytes())
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
 }
@@ -106,5 +110,15 @@ PLACEHOLDER
         let key = resolve_private_key_from_env().expect("raw pem");
         assert!(key.contains("BEGIN RSA"));
         std::env::remove_var("GITHUB_APP_PRIVATE_KEY");
+    }
+
+    #[test]
+    fn base64_private_key_tolerates_surrounding_whitespace() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"private-key");
+
+        assert_eq!(
+            decode_private_key_b64(&format!("  {encoded}\n")),
+            Some("private-key".to_string())
+        );
     }
 }
