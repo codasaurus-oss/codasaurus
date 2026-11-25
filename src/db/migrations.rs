@@ -589,6 +589,12 @@ async fn migrate_v23_dismissed_findings_repo_key(pool: &PgPool) -> Result<(), sq
     Ok(())
 }
 
+/// Version 22 must re-run when its table never got created, even if later
+/// migrations already advanced `schema_version`.
+fn v22_needs_run(current: Option<i64>, table_exists: bool) -> bool {
+    !(current.unwrap_or(0) >= 22 && table_exists)
+}
+
 /// v22: pgvector-backed semantic index on top of the v19 symbol graph. Fails
 /// open (warns, skips) when the `vector` extension isn't installed, so a
 /// plain Postgres instance stays fully functional without it.
@@ -596,7 +602,11 @@ async fn migrate_v22_symbol_embeddings(pool: &PgPool) -> Result<(), sqlx::Error>
     let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
         .fetch_one(pool)
         .await?;
-    if current.unwrap_or(0) >= 22 {
+    let table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('repo_symbol_embeddings') IS NOT NULL")
+            .fetch_one(pool)
+            .await?;
+    if !v22_needs_run(current, table_exists) {
         return Ok(());
     }
     if let Err(e) = sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
@@ -1255,7 +1265,7 @@ fn split_sql(sql: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_sql;
+    use super::{split_sql, v22_needs_run};
 
     #[test]
     fn schema_splits_into_single_statements() {
@@ -1267,6 +1277,22 @@ mod tests {
                 "multi-command chunk would fail on a fresh database:\n{stmt}"
             );
         }
+    }
+
+    #[test]
+    fn v22_is_skipped_only_when_version_and_table_agree() {
+        assert!(!v22_needs_run(Some(29), true));
+        assert!(!v22_needs_run(Some(22), true));
+    }
+
+    #[test]
+    fn v22_reruns_after_a_failed_extension_install() {
+        // A failed CREATE EXTENSION used to skip recording version 22, so a
+        // later version made the >= 22 guard hide the missing table forever.
+        assert!(v22_needs_run(Some(29), false));
+        assert!(v22_needs_run(Some(5), false));
+        assert!(v22_needs_run(Some(5), true));
+        assert!(v22_needs_run(None, false));
     }
 
     #[test]
