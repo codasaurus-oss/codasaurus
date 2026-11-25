@@ -42,12 +42,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build dashboard
-        env:
-          DASHBOARD_REF: ${{ vars.DASHBOARD_REF || 'main' }}
         run: |
-          git clone --depth 1 --branch "$DASHBOARD_REF" \
-            https://github.com/codasaurus-oss/codasaurus-frontend.git /tmp/codasaurus-frontend
-          cd /tmp/codasaurus-frontend
+          cd codasaurus-frontend
           npm ci
           npm run build
           mkdir -p "$GITHUB_WORKSPACE/svelte-dashboard"
