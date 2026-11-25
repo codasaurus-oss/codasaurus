@@ -2,7 +2,7 @@
 
 Thank you for your interest in improving Codasaurus. This document explains how to set up a development environment, what we expect in pull requests, and how contributions are licensed.
 
-> **Security issues:** do not open a public issue or PR. Follow [SECURITY.md](SECURITY.md).
+> **Security issues:** contact the maintainers privately; do not open a public issue or PR.
 
 ## Code of conduct
 
@@ -124,4 +124,4 @@ By submitting a contribution, you agree that your changes are licensed under the
 ## Questions
 
 - Product / docs: open a GitHub Discussion or Issue
-- Security: [SECURITY.md](SECURITY.md) only
+- Security: contact the maintainers privately

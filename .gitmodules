@@ -1,0 +1,3 @@
+[submodule "codasaurus-frontend"]
+	path = codasaurus-frontend
+	url = https://github.com/codasaurus-oss/codasaurus-frontend.git

@@ -52,14 +52,16 @@ Fail-closed offline mode. Finding provenance. Learning from dismissals. Air-gap 
 
 ## Quick start
 
-One clone builds the entire stack. The dashboard source lives in `codasaurus-frontend/` in this repository, so Docker does not fetch a second repo:
+One clone builds the entire stack. The dashboard is a git submodule at `codasaurus-frontend/`, linked to the [frontend repository](https://github.com/codasaurus-oss/codasaurus-frontend), so Docker builds from the pinned source without fetching a separate repo at build time:
 
 ```bash
-git clone https://github.com/codasaurus-oss/codasaurus.git
+git clone --recurse-submodules https://github.com/codasaurus-oss/codasaurus.git
 cd codasaurus
 cp .env.example .env
 docker compose up -d
 ```
+
+If you already cloned without the flag: `git submodule update --init --recursive`.
 
 Open [http://localhost:3000](http://localhost:3000) and finish the three-step wizard:
 
@@ -71,17 +73,15 @@ After setup, trigger a review by commenting `codasaurus review` on a pull reques
 
 ## Dashboard source and sync
 
-`codasaurus-frontend/` is a squashed git subtree of the [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) repository. UI work can be done either in the upstream repo or directly in this monorepo.
+`codasaurus-frontend/` is a git submodule pointing at the [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) repository. GitHub shows the directory as a link to that repository. UI work happens upstream; this repo pins the commit that ships.
 
 ```bash
-# Pull upstream UI work into the monorepo
-git subtree pull --prefix=codasaurus-frontend https://github.com/codasaurus-oss/codasaurus-frontend.git main --squash
-
-# Push monorepo-only UI work back to a frontend branch, then open a PR there
-git subtree push --prefix=codasaurus-frontend https://github.com/codasaurus-oss/codasaurus-frontend.git <branch>
+# Advance the pinned dashboard to the latest upstream main
+git submodule update --remote codasaurus-frontend
+git add codasaurus-frontend && git commit -m "chore: update dashboard submodule"
 ```
 
-Backend CI runs the dashboard lint, unit tests, and build from `codasaurus-frontend/`.
+Backend CI checks out the submodule recursively and runs the dashboard lint, unit tests, and build from `codasaurus-frontend/`.
 
 Want **$0 forever** (no trials)? [Run on always-free infra](https://codasaurus-oss.github.io/run-for-free/): Render free web + Aiven Free Postgres (or Neon). LLM optional / off.
 
@@ -142,7 +142,7 @@ Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding co
 
 | Repository | Contents |
 | --- | --- |
-| [codasaurus](https://github.com/codasaurus-oss/codasaurus) | Review engine, HTTP API, webhook handler, deployment, and vendored dashboard at `codasaurus-frontend/` |
+| [codasaurus](https://github.com/codasaurus-oss/codasaurus) | Review engine, HTTP API, webhook handler, deployment, and dashboard submodule at `codasaurus-frontend/` |
 | [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Upstream React + shadcn dashboard source mirrored into the monorepo |
 | [docs](https://github.com/codasaurus-oss/docs) | Documentation site (Astro Starlight), published at <https://codasaurus-oss.github.io/> |
 
@@ -203,7 +203,7 @@ CODASAURUS_SKIP_FRONTEND_BUILD=1 cargo test
 cargo build --release
 ```
 
-Security reports: [SECURITY.md](SECURITY.md). Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
+Security reports: contact the maintainers privately. Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
 
 ---
 

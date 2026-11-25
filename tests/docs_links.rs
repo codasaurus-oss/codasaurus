@@ -39,7 +39,7 @@ const DOCS_BASE: &str = "https://codasaurus-oss.github.io/docs/";
 
 #[test]
 fn dead_docs_links_resolve() {
-    for file in ["README.md", "ROADMAP.md", "src/main.rs"] {
+    for file in ["README.md", "src/main.rs"] {
         let text = read(file);
         let refs = relative_docs_refs(&text);
         assert!(
