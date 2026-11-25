@@ -203,7 +203,7 @@ CODASAURUS_SKIP_FRONTEND_BUILD=1 cargo test
 cargo build --release
 ```
 
-Security reports: [SECURITY.md](SECURITY.md). Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
+Security reports: contact the maintainers privately. Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
 
 ---
 
