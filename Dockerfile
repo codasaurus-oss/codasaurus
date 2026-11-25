@@ -1,18 +1,21 @@
 # syntax=docker/dockerfile:1
 
-# ── Stage 1: Build the SPA from codasaurus-frontend ─────────────
+# ── Stage 1: Build the SPA from the vendored codasaurus-frontend ─
 FROM node:22-alpine AS frontend
-ARG DASHBOARD_REF=main
 ARG SKIP_FRONTEND=0
-RUN apk add --no-cache git
 WORKDIR /app
+COPY codasaurus-frontend/package.json codasaurus-frontend/package-lock.json ./codasaurus-frontend/
+RUN if [ "$SKIP_FRONTEND" != "1" ]; then \
+      cd codasaurus-frontend && npm ci --ignore-scripts; \
+    fi
+COPY codasaurus-frontend/ ./codasaurus-frontend/
 RUN if [ "$SKIP_FRONTEND" = "1" ]; then \
       mkdir -p svelte-dashboard/dist && \
       printf '<!doctype html><title>Codasaurus</title>' > svelte-dashboard/dist/index.html; \
     else \
-      git clone --depth 1 --branch "${DASHBOARD_REF}" \
-        https://github.com/codasaurus-oss/codasaurus-frontend.git svelte-dashboard && \
-      cd svelte-dashboard && npm ci --ignore-scripts && npm run build; \
+      cd codasaurus-frontend && npm run build && \
+      mkdir -p /app/svelte-dashboard && \
+      cp -r dist /app/svelte-dashboard/dist; \
     fi
 
 # ── Stage 2: Build Rust binary ──────────────────────────────────
