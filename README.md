@@ -52,14 +52,22 @@ Fail-closed offline mode. Finding provenance. Learning from dismissals. Air-gap 
 
 ## Quick start
 
+Run the backend, dashboard, PostgreSQL, Redis, and LiteLLM gateway with one command:
+
 ```bash
 git clone https://github.com/codasaurus-oss/codasaurus.git
 cd codasaurus
-cp .env.example .env   # optional
-docker compose up
+cp .env.example .env
+docker compose up -d
 ```
 
-Open [http://localhost:3000](http://localhost:3000), finish the [onboarding wizard](https://codasaurus-oss.github.io/setup-onboarding/) (~5 min), install the GitHub App.
+Open [http://localhost:3000](http://localhost:3000) and finish the three-step wizard:
+
+1. **Inference** is optional. Skip it for Tier-1 checks, or choose a provider and models. The API key and model list are entered in the wizard, not in config files.
+2. **GitHub App** registers the app that receives pull-request webhooks. Use a public HTTPS URL for callbacks when running away from localhost.
+3. **Admin** creates the first owner. The setup secret is the `CODASAURUS_BOOTSTRAP_SECRET` value you set on the server. Generate one with `openssl rand -hex 32` and add it to `.env` before the first run.
+
+After setup, trigger a review by commenting `codasaurus review` on a pull request. You do not need to run the separate frontend repository for normal use; Compose builds the dashboard into the backend image.
 
 Want **$0 forever** (no trials)? [Run on always-free infra](https://codasaurus-oss.github.io/run-for-free/): Render free web + Aiven Free Postgres (or Neon). LLM optional / off.
 
