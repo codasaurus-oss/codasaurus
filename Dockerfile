@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ── Stage 1: Build the SPA from the vendored codasaurus-frontend ─
-FROM node:22-alpine AS frontend
+FROM node:26-alpine AS frontend
 ARG SKIP_FRONTEND=0
 WORKDIR /app
 COPY codasaurus-frontend/package.json codasaurus-frontend/package-lock.json ./codasaurus-frontend/
