@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.7-pg19-trixie
     ports:
       - "127.0.0.1:5432:5432"
     environment:
@@ -8,13 +8,20 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-codasaurus}
       POSTGRES_DB: codasaurus
     volumes:
-      - codasaurus-pg:/var/lib/postgresql/data
+      # PG18+ keeps PGDATA under /var/lib/postgresql/<major>/docker. Mounting
+      # /var/lib/postgresql/data would put data in an anonymous volume.
+      - codasaurus-pg:/var/lib/postgresql
       - ./docker/litellm-init.sql:/docker-entrypoint-initdb.d/01-litellm.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codasaurus"]
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   redis:
@@ -27,6 +34,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   litellm-migrate:
@@ -58,7 +70,7 @@ services:
       litellm-migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:4000/health/readiness')"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -67,6 +79,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     deploy:
       resources:
@@ -82,6 +99,8 @@ services:
       - "3000:3000"
     environment:
       - DATABASE_URL=postgres://codasaurus:${POSTGRES_PASSWORD:-codasaurus}@postgres:5432/codasaurus
+      # Required to create the first owner on an empty database.
+      - CODASAURUS_BOOTSTRAP_SECRET=${CODASAURUS_BOOTSTRAP_SECRET:-}
       - REDIS_URL=redis://redis:6379
       - CODASAURUS_TRUSTED_PROXIES=${CODASAURUS_TRUSTED_PROXIES:-127.0.0.0/8,::1/128}
       - CODASAURUS_DATA_DIR=/data
@@ -111,6 +130,7 @@ services:
     tmpfs:
       - /tmp:size=64M,mode=1777
     init: true
+    stop_grace_period: 30s
     restart: unless-stopped
     read_only: true
     security_opt:
@@ -129,7 +149,8 @@ services:
     healthcheck:
       test: ["CMD", "codasaurus", "health", "--ready"]
       interval: 30s
-      timeout: 5s
+      # Keep above the CLI's own 5s HTTP timeout to avoid false "unhealthy".
+      timeout: 10s
       start_period: 90s
       retries: 3
     logging:
