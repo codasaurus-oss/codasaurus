@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_allows_public_host() {
-        let r = validate_llm_base_url_resolved("https://api.example.com/v1", false).await;
+        let r = validate_llm_base_url_resolved("https://example.com/v1", false).await;
         assert!(r.is_ok(), "{r:?}");
     }
 

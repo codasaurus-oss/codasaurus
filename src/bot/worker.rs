@@ -372,6 +372,7 @@ pub(crate) async fn release_claim_best_effort(repo: &str, pr_number: i64, head_s
 mod tests {
     #[tokio::test]
     async fn enqueue_notifies_ready_listeners() {
+        let _guard = crate::db::TEST_POOL_LOCK.lock().await;
         let url = std::env::var("CODASAURUS_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| {

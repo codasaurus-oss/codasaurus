@@ -16,6 +16,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::time::Duration;
 
+#[cfg(test)]
+pub static TEST_POOL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// PostgreSQL connection pool (sole durable store).
 #[derive(Clone)]
 pub struct DbPool(PgPool);

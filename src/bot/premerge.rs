@@ -218,6 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_persist_keeps_the_latest_result_per_check() {
+        let _guard = crate::db::TEST_POOL_LOCK.lock().await;
         let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
         });
