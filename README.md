@@ -52,7 +52,7 @@ Fail-closed offline mode. Finding provenance. Learning from dismissals. Air-gap 
 
 ## Quick start
 
-Run the backend, dashboard, PostgreSQL, Redis, and LiteLLM gateway with one command:
+One clone builds the entire stack. The dashboard source lives in `codasaurus-frontend/` in this repository, so Docker does not fetch a second repo:
 
 ```bash
 git clone https://github.com/codasaurus-oss/codasaurus.git
@@ -67,7 +67,21 @@ Open [http://localhost:3000](http://localhost:3000) and finish the three-step wi
 2. **GitHub App** registers the app that receives pull-request webhooks. Use a public HTTPS URL for callbacks when running away from localhost.
 3. **Admin** creates the first owner. The setup secret is the `CODASAURUS_BOOTSTRAP_SECRET` value you set on the server. Generate one with `openssl rand -hex 32` and add it to `.env` before the first run.
 
-After setup, trigger a review by commenting `codasaurus review` on a pull request. You do not need to run the separate frontend repository for normal use; Compose builds the dashboard into the backend image.
+After setup, trigger a review by commenting `codasaurus review` on a pull request. You do not need a separate frontend checkout; Compose builds `codasaurus-frontend/` into the backend image.
+
+## Dashboard source and sync
+
+`codasaurus-frontend/` is a squashed git subtree of the [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) repository. UI work can be done either in the upstream repo or directly in this monorepo.
+
+```bash
+# Pull upstream UI work into the monorepo
+git subtree pull --prefix=codasaurus-frontend https://github.com/codasaurus-oss/codasaurus-frontend.git main --squash
+
+# Push monorepo-only UI work back to a frontend branch, then open a PR there
+git subtree push --prefix=codasaurus-frontend https://github.com/codasaurus-oss/codasaurus-frontend.git <branch>
+```
+
+Backend CI runs the dashboard lint, unit tests, and build from `codasaurus-frontend/`.
 
 Want **$0 forever** (no trials)? [Run on always-free infra](https://codasaurus-oss.github.io/run-for-free/): Render free web + Aiven Free Postgres (or Neon). LLM optional / off.
 
@@ -128,8 +142,8 @@ Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding co
 
 | Repository | Contents |
 | --- | --- |
-| [codasaurus](https://github.com/codasaurus-oss/codasaurus) | Review engine, HTTP API, webhook handler, deployment |
-| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Svelte dashboard; built `dist/` is served by the backend |
+| [codasaurus](https://github.com/codasaurus-oss/codasaurus) | Review engine, HTTP API, webhook handler, deployment, and vendored dashboard at `codasaurus-frontend/` |
+| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Upstream React + shadcn dashboard source mirrored into the monorepo |
 | [docs](https://github.com/codasaurus-oss/docs) | Documentation site (Astro Starlight), published at <https://codasaurus-oss.github.io/> |
 
 ## vs the field
