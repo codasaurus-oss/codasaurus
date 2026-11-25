@@ -3,10 +3,11 @@
 Web dashboard for [Codasaurus](https://github.com/codasaurus-oss/codasaurus), a Rust
 service that reviews pull requests with LLM agents and reports repository risk.
 
-This repository is the React + shadcn interface. It is a static single-page app:
-the Rust backend serves the built `dist/` and exposes the API it calls. You do not
-need this repository to run Codasaurus; the backend Compose stack builds and
-serves the dashboard. Only clone and run it when developing the UI.
+This repository is the upstream source for the React + shadcn interface. It is a
+static single-page app: the Rust backend serves the built `dist/` and exposes the
+API it calls. The source is mirrored into the backend monorepo at
+`codasaurus/codasaurus-frontend`; Docker users do not need this repository
+separately. Clone and run this repo only when developing UI upstream.
 
 ## Stack
 
@@ -62,13 +63,13 @@ Run the backend with `codasaurus serve` from the
 `npm run build` writes the static bundle to `dist/`. The backend does not build
 this repo at runtime:
 
-- The release workflow clones this repository at the ref named by the
-  `DASHBOARD_REF` variable, runs `npm ci` and `npm run build`, then copies
-  `dist` to `svelte-dashboard/dist`.
+- The backend release workflow builds the vendored `codasaurus-frontend/` tree,
+  then copies `dist` to `svelte-dashboard/dist`.
 - The backend Dockerfile does the same in a Node stage and copies the result to
   `/app/svelte-dashboard/dist` in the runtime image.
 
-Set `DASHBOARD_REF` to the branch or tag whose build should ship.
+Keep this repository and the monorepo subtree in sync with `git subtree pull`
+and `git subtree push`; the commands are documented in the backend README.
 
 ## Routes
 
