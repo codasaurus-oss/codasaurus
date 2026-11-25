@@ -42,9 +42,6 @@ regex = "1"
 # Multi-pattern string matching
 aho-corasick = "1"
 
-# Directory traversal (repo context helpers / tests)
-walkdir = "2"
-
 # Web server (for GitHub App bot)
 axum = "0.8"
 tower-http = { version = "0.6", features = ["compression-gzip", "fs", "limit", "trace"] }
@@ -54,6 +51,10 @@ tower = { version = "0.5", features = ["timeout", "util"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "chrono"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Shared state (rate limiter counters, OIDC verifiers)
+redis = { version = "1.8.2", default-features = false, features = ["tokio-comp", "connection-manager"] }
+ipnet = "2"
 
 # Observability
 tracing = "0.1"
@@ -89,6 +90,9 @@ rsa = { version = "0.9", features = ["pem"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+[lints.rust]
+warnings = "deny"
 
 [profile.release]
 strip = true

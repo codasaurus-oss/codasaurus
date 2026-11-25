@@ -29,19 +29,10 @@ pub(crate) fn collect_registry_pairs(files: &[crate::parser::ParsedFile]) -> Vec
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for file in files {
-        let registry = match file.language.as_str() {
-            "javascript" | "typescript" | "tsx" | "jsx" => "npm",
-            "python" => "pypi",
-            "rust" => "crates.io",
-            _ => continue,
+        let Some(registry) = crate::detectors::registry_for_language(&file.language) else {
+            continue;
         };
-        for import in &file.imports {
-            let Some(package) = crate::detectors::extract_package_name(&import.name) else {
-                continue;
-            };
-            if package.starts_with('.') || package.starts_with('/') {
-                continue;
-            }
+        for (_, package) in crate::detectors::external_imports(file) {
             if crate::detectors::hallucinated_imports::is_builtin(&package, registry) {
                 continue;
             }
@@ -121,13 +112,7 @@ pub(crate) fn merge_vulnerability_findings(
 
 pub(crate) fn is_critical_full_file_path(path: &str) -> bool {
     let lower = path.to_lowercase();
-    lower.contains("auth")
-        || lower.contains("crypto")
-        || lower.contains("secret")
-        || lower.contains("password")
-        || lower.contains("middleware")
-        || lower.contains("rbac")
-        || lower.contains("permission")
+    crate::util::is_security_sensitive_path(path)
         || lower.contains(".github/workflows")
         || lower.ends_with("dockerfile")
         || lower.contains("dockerfile.")
@@ -229,6 +214,28 @@ mod tests {
             Some("Complete it"),
         ));
         assert!(body.contains("Unfinished TODO") || body.contains("TODO"));
+    }
+
+    #[test]
+    fn registry_prefetch_skips_python_stdlib() {
+        let file = crate::parser::parse_file("main.py", "import os\nimport requests\n").unwrap();
+        assert_eq!(
+            collect_registry_pairs(&[file]),
+            vec![("pypi".to_string(), "requests".to_string())]
+        );
+    }
+
+    #[test]
+    fn registry_prefetch_keeps_full_go_module_paths() {
+        let file = crate::parser::parse_file(
+            "main.go",
+            "package main\nimport \"fmt\"\nimport \"github.com/gorilla/mux\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            collect_registry_pairs(&[file]),
+            vec![("go".to_string(), "github.com/gorilla/mux".to_string())]
+        );
     }
 
     #[test]

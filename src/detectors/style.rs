@@ -36,7 +36,7 @@ pub fn detect_boilerplate(parsed_files: &[ParsedFile]) -> Vec<Finding> {
         let lines: Vec<&str> = content.lines().collect();
         let line_count = lines.len();
 
-        if let Some(finding) = check_long_functions(&file.path, content) {
+        if let Some(finding) = check_long_functions(&file.path, &lines) {
             findings.push(finding);
         }
 
@@ -79,30 +79,26 @@ pub fn detect_boilerplate(parsed_files: &[ParsedFile]) -> Vec<Finding> {
 }
 
 fn check_single_impl_interface(path: &str, lines: &[&str]) -> Option<Finding> {
-    let trait_count = lines
-        .iter()
-        .filter(|l| {
-            let t = l.trim();
-            if t.starts_with("//") || t.starts_with('#') {
-                return false;
-            }
-            t.contains("trait ") && (t.starts_with("pub") || t.starts_with("trait"))
-        })
-        .count();
-
-    let impl_count = lines
-        .iter()
-        .filter(|l| {
-            let t = l.trim();
-            if t.starts_with("//") || t.starts_with('#') {
-                return false;
-            }
-            t.starts_with("impl ")
-                || t.starts_with("pub impl ")
-                || t.starts_with("unsafe impl ")
-                || t.starts_with("pub unsafe impl ")
-        })
-        .count();
+    let (trait_count, impl_count) = lines.iter().fold((0, 0), |(traits, impls), line| {
+        let line = line.trim();
+        if line.starts_with("//") || line.starts_with('#') {
+            return (traits, impls);
+        }
+        (
+            traits
+                + usize::from(
+                    line.contains("trait ")
+                        && (line.starts_with("pub") || line.starts_with("trait")),
+                ),
+            impls
+                + usize::from(
+                    line.starts_with("impl ")
+                        || line.starts_with("pub impl ")
+                        || line.starts_with("unsafe impl ")
+                        || line.starts_with("pub unsafe impl "),
+                ),
+        )
+    });
 
     if trait_count == 1 && impl_count == 1 {
         return Some(Finding {
@@ -195,7 +191,7 @@ fn check_unnecessary_factory(path: &str, content: &str) -> Option<Finding> {
         .count();
 
     // Factory with very few types is over-engineering
-    if total_types <= 3 && has_factory {
+    if total_types <= 3 {
         Some(Finding {
             detector: "over-engineering".to_string(),
             severity: "warning",
@@ -261,9 +257,8 @@ fn check_abstraction_overload(path: &str, content: &str) -> Option<Finding> {
     }
 }
 
-fn check_long_functions(path: &str, content: &str) -> Option<Finding> {
-    let mut long_funcs = Vec::new();
-    let lines: Vec<&str> = content.lines().collect();
+fn check_long_functions(path: &str, lines: &[&str]) -> Option<Finding> {
+    let mut first_long = None;
     let mut i = 0;
 
     while i < lines.len() {
@@ -296,8 +291,8 @@ fn check_long_functions(path: &str, content: &str) -> Option<Finding> {
                 depth = depth.saturating_sub(l.bytes().filter(|&b| b == b'}').count());
                 if depth == 0 && j > start {
                     let func_lines = j - start;
-                    if func_lines > 60 {
-                        long_funcs.push((start + 1, func_lines));
+                    if func_lines > 60 && first_long.is_none() {
+                        first_long = Some((start + 1, func_lines));
                     }
                     i = j;
                     found_body = true;
@@ -312,7 +307,7 @@ fn check_long_functions(path: &str, content: &str) -> Option<Finding> {
         }
     }
 
-    if let Some(&(line, count)) = long_funcs.first() {
+    if let Some((line, count)) = first_long {
         Some(Finding {
             detector: "boilerplate".to_string(),
             severity: "warning",
@@ -340,7 +335,7 @@ fn check_long_functions(path: &str, content: &str) -> Option<Finding> {
 fn check_repeated_code(path: &str, lines: &[&str]) -> Option<Finding> {
     // O(n) detection via HashMap of 3-line block fingerprints instead of O(n²) sliding window.
     // Uses a hash of the text content to avoid borrowing slices into the source.
-    let mut blocks: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    let mut blocks: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     use std::hash::{Hash, Hasher};
 
     let mut i = 0;
@@ -349,15 +344,11 @@ fn check_repeated_code(path: &str, lines: &[&str]) -> Option<Finding> {
         for line in &lines[i..i + 3] {
             line.hash(&mut hasher);
         }
-        blocks.entry(hasher.finish()).or_default().push(i);
+        *blocks.entry(hasher.finish()).or_default() += 1;
         i += 1;
     }
 
-    let repeats: usize = blocks
-        .values()
-        .filter(|v| v.len() > 1)
-        .map(|v| v.len())
-        .sum();
+    let repeats: usize = blocks.values().filter(|&&count| count > 1).sum();
 
     if repeats > 3 {
         Some(Finding {
@@ -390,8 +381,6 @@ fn count_comment_lines(lines: &[&str]) -> usize {
                 || t.starts_with('#')
                 || t.starts_with("/*")
                 || t.starts_with('*')
-                || t.starts_with("///")
-                || t.starts_with("/**")
                 || t.starts_with("<!--")
         })
         .count()
@@ -435,67 +424,33 @@ fn check_boilerplate_getters_setters(path: &str, content: &str) -> Option<Findin
 mod tests {
     use super::*;
 
+    fn file(content: &str) -> ParsedFile {
+        crate::parser::parse_file("test.rs", content).unwrap()
+    }
+
     #[test]
     fn test_detect_over_engineering_single_trait() {
-        let content = "pub trait MyTrait { fn foo(&self); }\nstruct X;\nimpl MyTrait for X { fn foo(&self) {} }";
-        let file = ParsedFile {
-            path: "test.rs".to_string(),
-            language: "rust".to_string(),
-            raw_content: content.to_string(),
-            lines: content
-                .lines()
-                .enumerate()
-                .map(|(i, l)| crate::parser::SourceLine {
-                    number: i + 1,
-                    content: l.to_string(),
-                })
-                .collect(),
-            imports: vec![],
-        };
+        let file = file(
+            "pub trait MyTrait { fn foo(&self); }\nstruct X;\nimpl MyTrait for X { fn foo(&self) {} }",
+        );
         let findings = detect_over_engineering(&[file]);
         assert!(!findings.is_empty(), "should detect single-impl trait");
     }
 
     #[test]
     fn test_detect_boilerplate_long_function() {
-        let mut lines = vec![];
-        lines.push("fn foo() {".to_string());
+        let mut lines = vec!["fn foo() {".to_string()];
         for i in 0..70 {
             lines.push(format!("    let x_{i} = {i};"));
         }
         lines.push("}".to_string());
-        let content = lines.join("\n");
-        let file = ParsedFile {
-            path: "test.rs".to_string(),
-            language: "rust".to_string(),
-            raw_content: content,
-            lines: lines
-                .iter()
-                .enumerate()
-                .map(|(i, l)| crate::parser::SourceLine {
-                    number: i + 1,
-                    content: l.to_string(),
-                })
-                .collect(),
-            imports: vec![],
-        };
-        let findings = detect_boilerplate(&[file]);
+        let findings = detect_boilerplate(&[file(&lines.join("\n"))]);
         assert!(!findings.is_empty(), "should detect long function");
     }
 
     #[test]
     fn test_clean_code_no_style_findings() {
-        let content = "fn add(a: i32, b: i32) -> i32 { a + b }";
-        let file = ParsedFile {
-            path: "test.rs".to_string(),
-            language: "rust".to_string(),
-            raw_content: content.to_string(),
-            lines: vec![crate::parser::SourceLine {
-                number: 1,
-                content: content.to_string(),
-            }],
-            imports: vec![],
-        };
+        let file = file("fn add(a: i32, b: i32) -> i32 { a + b }");
         let findings_o = detect_over_engineering(std::slice::from_ref(&file));
         let findings_b = detect_boilerplate(&[file]);
         assert!(

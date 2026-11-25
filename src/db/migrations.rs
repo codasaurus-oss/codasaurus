@@ -278,6 +278,173 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     migrate_v24_learning_scope_indexes(pool).await?;
     migrate_v25_rule_hit_telemetry(pool).await?;
     migrate_v26_findings_fingerprint_per_review(pool).await?;
+    migrate_v27_review_queue_hardening(pool).await?;
+    migrate_v28_queue_lease_recovery(pool).await?;
+    migrate_v29_query_indexes(pool).await?;
+    Ok(())
+}
+
+/// v29: EXPLAIN ANALYZE with 50k reviews showed the list endpoints scanning
+/// `idx_reviews_created` and discarding most rows. Add covering composite
+/// indexes for the actual predicates, plus the learning-scope lookups.
+async fn migrate_v29_query_indexes(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 29 {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(931847263)")
+        .execute(&mut *tx)
+        .await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(&mut *tx)
+        .await?;
+    if current.unwrap_or(0) >= 29 {
+        tx.commit().await?;
+        return Ok(());
+    }
+    for sql in [
+        "CREATE INDEX IF NOT EXISTS idx_reviews_status_created
+           ON reviews (status, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_reviews_repo_status_created
+           ON reviews (repo_id, status, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_dismissed_scope_maintainer
+           ON dismissed_findings (detector, is_maintainer, COALESCE(repo_full_name, ''))",
+        "CREATE INDEX IF NOT EXISTS idx_learned_scope_approved
+           ON learned_rules (detector, status, COALESCE(repo_full_name, ''))",
+    ] {
+        sqlx::query(sql).execute(&mut *tx).await?;
+    }
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (29) ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// v28: rows that were `running` when v27 shipped have a NULL lease and can
+/// never be reclaimed; make them immediately claimable and align the ready
+/// index with the claim predicate, which also considers `failed` rows.
+async fn migrate_v28_queue_lease_recovery(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 28 {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(931847263)")
+        .execute(&mut *tx)
+        .await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(&mut *tx)
+        .await?;
+    if current.unwrap_or(0) >= 28 {
+        tx.commit().await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE review_jobs SET leased_until = COALESCE(updated_at, NOW())
+          WHERE status = 'running' AND leased_until IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DROP INDEX IF EXISTS idx_review_jobs_ready")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX idx_review_jobs_ready
+           ON review_jobs (queue_name, priority, run_at, id)
+          WHERE status IN ('pending', 'failed')",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (28) ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// v27: the review queue needs explicit ownership and scheduling so a stalled
+/// worker cannot be reclaimed while still running, and retries can back off
+/// instead of immediately re-hitting a rate-limited provider.
+async fn migrate_v27_review_queue_hardening(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 27 {
+        return Ok(());
+    }
+    // Concurrent processes (tests, replicas) can start migrations together.
+    // Serialize DDL and re-check the version under the lock.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(931847263)")
+        .execute(&mut *tx)
+        .await?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(&mut *tx)
+        .await?;
+    if current.unwrap_or(0) >= 27 {
+        tx.commit().await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "ALTER TABLE review_jobs
+           ADD COLUMN IF NOT EXISTS lease_id UUID,
+           ADD COLUMN IF NOT EXISTS leased_until TIMESTAMPTZ,
+           ADD COLUMN IF NOT EXISTS run_at TIMESTAMPTZ,
+           ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 5,
+           ADD COLUMN IF NOT EXISTS priority SMALLINT NOT NULL DEFAULT 100,
+           ADD COLUMN IF NOT EXISTS queue_name TEXT NOT NULL DEFAULT 'reviews'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE review_jobs SET run_at = COALESCE(updated_at, created_at) WHERE run_at IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_jobs
+           ALTER COLUMN run_at SET DEFAULT NOW(),
+           ALTER COLUMN run_at SET NOT NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("ALTER TABLE review_jobs DROP CONSTRAINT IF EXISTS review_jobs_status_check")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE review_jobs ADD CONSTRAINT review_jobs_status_check
+           CHECK (status IN ('pending', 'running', 'done', 'failed', 'dead'))",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_review_jobs_ready
+           ON review_jobs (queue_name, priority, run_at, id) WHERE status = 'pending'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_review_jobs_dead
+           ON review_jobs (queue_name, status, updated_at) WHERE status = 'dead'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (27) ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1039,11 +1206,9 @@ fn split_sql(sql: &str) -> Vec<String> {
     let mut chars = sql.chars().peekable();
 
     while let Some(c) = chars.next() {
-        // A `--` comment runs to end of line and is not SQL. Scanning it as SQL
-        // let an apostrophe in prose ("the review's batch") open a string that
-        // never closed, so every following `;` was swallowed and the rest of the
-        // schema arrived as one multi-statement query — which Postgres rejects
-        // outright, breaking migrations on a fresh database.
+        // `--` comments are not SQL: an apostrophe in prose left a string open,
+        // swallowing later `;` and sending the rest of the schema as one query,
+        // which Postgres rejects on a fresh database.
         if in_line_comment {
             if c == '\n' {
                 in_line_comment = false;

@@ -96,6 +96,42 @@ fn cache_put(key: &str, value: Option<String>) {
     });
 }
 
+fn cache_put_many(entries: &[(&str, &str)]) {
+    if entries.is_empty() || cache_ttl().is_none() {
+        return;
+    }
+    let now = Instant::now();
+    with_cache_write(|cache| {
+        for (key, value) in entries {
+            cache.entries.insert(
+                (*key).to_string(),
+                CacheEntry {
+                    value: Some((*value).to_string()),
+                    loaded_at: now,
+                },
+            );
+        }
+    });
+}
+
+fn cache_delete_many(keys: &[&str]) {
+    if keys.is_empty() || cache_ttl().is_none() {
+        return;
+    }
+    let now = Instant::now();
+    with_cache_write(|cache| {
+        for key in keys {
+            cache.entries.insert(
+                (*key).to_string(),
+                CacheEntry {
+                    value: None,
+                    loaded_at: now,
+                },
+            );
+        }
+    });
+}
+
 /// Drop one key, or the whole map when `key` is `None`.
 pub fn invalidate_config_cache(key: Option<&str>) {
     with_cache_write(|cache| match key {
@@ -172,6 +208,22 @@ pub async fn get_config(pool: &DbPool, key: &str) -> Result<Option<String>, sqlx
     Ok(value)
 }
 
+/// Read several settings from one cached snapshot.
+pub async fn get_configs(
+    pool: &DbPool,
+    keys: &[&str],
+) -> Result<HashMap<String, String>, sqlx::Error> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let entries = get_all_config(pool).await?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| keys.contains(&entry.key.as_str()))
+        .map(|entry| (entry.key, entry.value))
+        .collect())
+}
+
 /// Prefer a non-empty DB-backed setting, fall back to an environment variable.
 pub async fn config_or_env(pool: &DbPool, db_key: &str, env_key: &str) -> Option<String> {
     if let Ok(Some(v)) = get_config(pool, db_key).await {
@@ -196,8 +248,33 @@ pub async fn set_config(pool: &DbPool, key: &str, value: &str) -> Result<(), sql
 }
 
 pub async fn delete_config(pool: &DbPool, key: &str) -> Result<(), sqlx::Error> {
-    db_execute!(pool, "DELETE FROM app_config WHERE key = ?", key)?;
-    cache_put(key, None);
+    delete_configs(pool, &[key]).await
+}
+
+pub async fn delete_configs(pool: &DbPool, keys: &[&str]) -> Result<(), sqlx::Error> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    db_execute!(pool, "DELETE FROM app_config WHERE key = ANY(?)", keys)?;
+    cache_delete_many(keys);
+    Ok(())
+}
+
+pub async fn set_configs(pool: &DbPool, entries: &[(&str, &str)]) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut query = sqlx::QueryBuilder::new("INSERT INTO app_config (key, value, updated_at) ");
+    query.push_values(entries, |mut row, (key, value)| {
+        row.push_bind(*key)
+            .push_bind(*value)
+            .push("CURRENT_TIMESTAMP");
+    });
+    query.push(
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+    );
+    query.build().execute(pool.as_pg()).await?;
+    cache_put_many(entries);
     Ok(())
 }
 
@@ -212,11 +289,6 @@ pub async fn get_all_config(pool: &DbPool) -> Result<Vec<AppConfig>, sqlx::Error
     )?;
     cache_put_all(&entries);
     Ok(entries)
-}
-
-/// Prefetch the full map into the process cache (boot / after bulk writes).
-pub async fn warm_config_cache(pool: &DbPool) {
-    let _ = get_all_config(pool).await;
 }
 
 /// Dashboard keys that mirror process environment variables.
@@ -248,17 +320,15 @@ pub const ENV_MIRROR_KEYS: &[(&str, &str)] = &[
         "CODASAURUS_AUTO_IMPROVE_MAX_FILES",
     ),
     ("auto_improve_max_diff", "CODASAURUS_AUTO_IMPROVE_MAX_DIFF"),
-    ("allow_local_llm", "CODASAURUS_ALLOW_LOCAL_LLM"),
     ("insecure_cookies", "CODASAURUS_INSECURE_COOKIES"),
     ("secure_cookies", "CODASAURUS_SECURE_COOKIES"),
     ("llm_daily_budget_usd", "CODASAURUS_LLM_DAILY_BUDGET_USD"),
     ("offline_mode", "CODASAURUS_OFFLINE"),
     // LLM — so `@codasaurus ask` and workers see dashboard keys without restart.
-    ("llm_provider", "CODASAURUS_LLM_PROVIDER"),
-    ("openrouter_api_key", "OPENROUTER_API_KEY"),
+    ("llm_api_key", "CODASAURUS_API_KEY"),
     ("llm_model", "CODASAURUS_MODEL"),
     ("llm_model_cheap", "CODASAURUS_MODEL_CHEAP"),
-    ("llm_base_url", "CODASAURUS_BASE_URL"),
+    ("llm_embedding_model", "CODASAURUS_EMBEDDING_MODEL"),
     ("github_app_slug", "GITHUB_APP_SLUG"),
     ("jira_base_url", "JIRA_BASE_URL"),
     ("jira_email", "JIRA_EMAIL"),
@@ -321,16 +391,30 @@ pub fn apply_setting_to_env(db_key: &str, value: &str) {
 
 /// Seed DB from env when the DB key is missing (ephemeral disk / compose boots).
 pub async fn sync_env_mirrors_to_db(pool: &DbPool) {
+    let Ok(entries) = get_all_config(pool).await else {
+        return;
+    };
+    let existing: std::collections::HashSet<&str> =
+        entries.iter().map(|entry| entry.key.as_str()).collect();
+    let mut pending: Vec<(&'static str, String)> = Vec::new();
     for (db_key, env_key) in ENV_MIRROR_KEYS {
-        if let Ok(val) = std::env::var(env_key) {
-            if val.is_empty() {
-                continue;
-            }
-            if get_config(pool, db_key).await.ok().flatten().is_none() {
-                let _ = set_config(pool, db_key, &val).await;
+        if existing.contains(db_key) {
+            continue;
+        }
+        if let Ok(value) = std::env::var(env_key) {
+            if !value.is_empty() {
+                pending.push((*db_key, value));
             }
         }
     }
+    if pending.is_empty() {
+        return;
+    }
+    let refs: Vec<(&str, &str)> = pending
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let _ = set_configs(pool, &refs).await;
 }
 
 #[cfg(test)]

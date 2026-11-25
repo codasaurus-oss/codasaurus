@@ -37,10 +37,6 @@ fn all_checks_config() -> Config {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Integration: Clean code produces no findings
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_clean_rust_file_no_findings() {
     let content = r#"
@@ -96,10 +92,6 @@ function add(a, b) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Integration: Security detector (secrets + todo-leaks)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_detects_api_key_leak() {
     let content = r#"
@@ -152,10 +144,6 @@ AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE";
         .collect();
     assert!(!secret_findings.is_empty(), "should detect AWS access key");
 }
-
-// ---------------------------------------------------------------------------
-// Integration: Stale API detection
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_detects_stale_react_api() {
@@ -210,10 +198,6 @@ fn test_detects_stale_urllib2() {
     assert!(!stale_findings.is_empty(), "should detect urllib2 import");
 }
 
-// ---------------------------------------------------------------------------
-// Integration: Over-engineering detection
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_detects_single_impl_trait() {
     let content = r#"
@@ -264,10 +248,6 @@ class User {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Integration: Boilerplate detection
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_detects_long_function() {
     let mut lines = vec!["fn process() {".to_string()];
@@ -288,10 +268,6 @@ fn test_detects_long_function() {
         "should detect long function as boilerplate"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Integration: Phantom deps (local-only, no network)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_phantom_deps_missing_from_package_json() {
@@ -374,10 +350,6 @@ fn test_no_phantom_dep_when_declared() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Integration: Severity counting
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_severity_counting() {
     let content = r#"
@@ -400,10 +372,6 @@ class User {
         "should have at least blocking or warning findings, got: {by_severity:?}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Integration: Mixed detector output
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_mixed_findings_from_multiple_detectors() {
@@ -441,10 +409,6 @@ class MyComponent {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Integration: Finding structure validation
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_finding_has_required_fields() {
     let content = "const AWS_KEY = \"AKIAIOSFODNN7EXAMPLE\";\n";
@@ -468,10 +432,6 @@ fn test_finding_has_required_fields() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// Integration: Multiple clean files across languages
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_multi_language_clean_files() {

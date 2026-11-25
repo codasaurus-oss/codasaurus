@@ -25,14 +25,6 @@ pub async fn create_repo(pool: &DbPool, repo: &RepoCreate) -> Result<Repo, sqlx:
     create_repo_with_active(pool, repo, false).await
 }
 
-/// Register a repo from an installation webhook with reviews enabled by default.
-pub async fn create_repo_from_installation(
-    pool: &DbPool,
-    repo: &RepoCreate,
-) -> Result<Repo, sqlx::Error> {
-    create_repo_with_active(pool, repo, true).await
-}
-
 async fn create_repo_with_active(
     pool: &DbPool,
     repo: &RepoCreate,
@@ -61,6 +53,65 @@ async fn create_repo_with_active(
         repo.private,
         active
     )
+}
+
+/// Bulk version of [`create_repo`] for installation syncs.
+/// Falls back to per-row writes only if a batch fails, preserving the old
+/// best-effort behavior for malformed or conflicting GitHub rows.
+pub async fn upsert_repos(pool: &DbPool, repos: &[RepoCreate]) -> Result<u64, sqlx::Error> {
+    upsert_repos_with_active(pool, repos, false).await
+}
+
+/// Bulk registration for installation webhooks, which activate repos by default.
+pub async fn upsert_repos_from_installation(
+    pool: &DbPool,
+    repos: &[RepoCreate],
+) -> Result<u64, sqlx::Error> {
+    upsert_repos_with_active(pool, repos, true).await
+}
+
+async fn upsert_repos_with_active(
+    pool: &DbPool,
+    repos: &[RepoCreate],
+    active: bool,
+) -> Result<u64, sqlx::Error> {
+    let mut total = 0u64;
+    for chunk in repos.chunks(500) {
+        let mut query = sqlx::QueryBuilder::new(
+            "INSERT INTO repos (github_id, full_name, owner, name, default_branch, installation_id, private, active) ",
+        );
+        query.push_values(chunk, |mut row, repo| {
+            row.push_bind(repo.github_id)
+                .push_bind(&repo.full_name)
+                .push_bind(&repo.owner)
+                .push_bind(&repo.name)
+                .push_bind(&repo.default_branch)
+                .push_bind(repo.installation_id)
+                .push_bind(repo.private)
+                .push_bind(active);
+        });
+        query.push(
+            " ON CONFLICT(full_name) DO UPDATE SET
+               github_id = excluded.github_id,
+               installation_id = excluded.installation_id,
+               private = excluded.private,
+               default_branch = COALESCE(excluded.default_branch, repos.default_branch),
+               active = repos.active OR excluded.active,
+               updated_at = CURRENT_TIMESTAMP",
+        );
+        match query.build().execute(pool.as_pg()).await {
+            Ok(result) => total += result.rows_affected(),
+            Err(error) => {
+                tracing::warn!(error = %error, "bulk repo upsert failed; retrying rows");
+                for repo in chunk {
+                    if create_repo_with_active(pool, repo, active).await.is_ok() {
+                        total += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(total)
 }
 
 pub async fn update_repo(

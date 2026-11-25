@@ -1,5 +1,13 @@
 use crate::db::models::*;
-use crate::db::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, db_scalar, DbPool};
+use crate::db::{db_fetch_all, db_fetch_one, db_fetch_optional, DbPool};
+use sqlx::FromRow;
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ReviewWithRepo {
+    #[sqlx(flatten)]
+    pub review: Review,
+    pub repo_full_name: String,
+}
 
 pub async fn list_reviews(
     pool: &DbPool,
@@ -7,49 +15,51 @@ pub async fn list_reviews(
     status: Option<&str>,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Review>, sqlx::Error> {
-    match (repo_id, status) {
-        (Some(rid), Some(st)) => db_fetch_all!(
-            pool,
-            Review,
-            "SELECT * FROM reviews WHERE repo_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            rid,
-            st,
-            limit,
-            offset
-        ),
-        (Some(rid), None) => db_fetch_all!(
-            pool,
-            Review,
-            "SELECT * FROM reviews WHERE repo_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            rid,
-            limit,
-            offset
-        ),
-        (None, Some(st)) => db_fetch_all!(
-            pool,
-            Review,
-            "SELECT * FROM reviews WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            st,
-            limit,
-            offset
-        ),
-        (None, None) => db_fetch_all!(
-            pool,
-            Review,
-            "SELECT * FROM reviews ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            limit,
-            offset
-        ),
+) -> Result<Vec<ReviewWithRepo>, sqlx::Error> {
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT r.*, COALESCE(repo.full_name, '') AS repo_full_name
+         FROM reviews r LEFT JOIN repos repo ON repo.id = r.repo_id",
+    );
+    let mut filtered = false;
+    if let Some(repo_id) = repo_id {
+        query.push(" WHERE r.repo_id = ").push_bind(repo_id);
+        filtered = true;
     }
+    if let Some(status) = status {
+        query
+            .push(if filtered {
+                " AND r.status = "
+            } else {
+                " WHERE r.status = "
+            })
+            .push_bind(status);
+    }
+    query
+        .push(" ORDER BY r.created_at DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = query.build().fetch_all(pool.as_pg()).await?;
+    rows.into_iter()
+        .map(|row| ReviewWithRepo::from_row(&row))
+        .collect()
 }
 
-pub async fn get_review(pool: &DbPool, id: i64) -> Result<Option<Review>, sqlx::Error> {
-    db_fetch_optional!(pool, Review, "SELECT * FROM reviews WHERE id = ?", id)
+pub async fn get_review_with_repo(
+    pool: &DbPool,
+    id: i64,
+) -> Result<Option<ReviewWithRepo>, sqlx::Error> {
+    db_fetch_optional!(
+        pool,
+        ReviewWithRepo,
+        "SELECT r.*, repo.full_name AS repo_full_name
+         FROM reviews r JOIN repos repo ON repo.id = r.repo_id
+         WHERE r.id = ?",
+        id
+    )
 }
 
 pub async fn create_review(pool: &DbPool, review: &ReviewCreate) -> Result<Review, sqlx::Error> {
-    let sha = review.pr_head_sha.clone().unwrap_or_default();
     db_fetch_one!(
         pool,
         Review,
@@ -71,13 +81,31 @@ pub async fn create_review(pool: &DbPool, review: &ReviewCreate) -> Result<Revie
         &review.pr_author,
         &review.pr_base_branch,
         &review.pr_head_branch,
-        &sha
+        review.pr_head_sha.as_deref().unwrap_or("")
     )
 }
 
-pub async fn delete_findings_for_review(pool: &DbPool, review_id: i64) -> Result<(), sqlx::Error> {
-    db_execute!(pool, "DELETE FROM findings WHERE review_id = ?", review_id)?;
+async fn delete_findings_on(
+    conn: &mut sqlx::PgConnection,
+    review_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM findings WHERE review_id = $1")
+        .bind(review_id)
+        .execute(&mut *conn)
+        .await?;
     Ok(())
+}
+
+pub async fn replace_findings(
+    pool: &DbPool,
+    review_id: i64,
+    findings: &[FindingCreate],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.as_pg().begin().await?;
+    delete_findings_on(&mut tx, review_id).await?;
+    insert_findings_on(&mut tx, findings).await?;
+    // An uncommitted transaction rolls back on drop, preserving prior findings on error.
+    tx.commit().await
 }
 
 pub async fn update_review(
@@ -85,74 +113,38 @@ pub async fn update_review(
     id: i64,
     update: &ReviewUpdate,
 ) -> Result<(), sqlx::Error> {
-    match (
-        update.status.as_deref(),
-        update.summary_json.as_deref(),
-        update.completed_at,
-    ) {
-        (Some(status), Some(sj), Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ?, summary_json = ?, completed_at = ? WHERE id = ?",
-                status,
-                sj,
-                ca,
-                id
-            )?;
-        }
-        (Some(status), Some(sj), None) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ?, summary_json = ? WHERE id = ?",
-                status,
-                sj,
-                id
-            )?;
-        }
-        (Some(status), None, Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ?, completed_at = ? WHERE id = ?",
-                status,
-                ca,
-                id
-            )?;
-        }
-        (Some(status), None, None) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET status = ? WHERE id = ?",
-                status,
-                id
-            )?;
-        }
-        (None, Some(sj), Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET summary_json = ?, completed_at = ? WHERE id = ?",
-                sj,
-                ca,
-                id
-            )?;
-        }
-        (None, Some(sj), None) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET summary_json = ? WHERE id = ?",
-                sj,
-                id
-            )?;
-        }
-        (None, None, Some(ca)) => {
-            db_execute!(
-                pool,
-                "UPDATE reviews SET completed_at = ? WHERE id = ?",
-                ca,
-                id
-            )?;
-        }
-        (None, None, None) => {}
+    if update.status.is_none() && update.summary_json.is_none() && update.completed_at.is_none() {
+        return Ok(());
     }
+    let mut query = sqlx::QueryBuilder::new("UPDATE reviews SET ");
+    let mut first = true;
+    if let Some(status) = update.status.as_deref() {
+        query
+            .push(if first { "status = " } else { ", status = " })
+            .push_bind(status);
+        first = false;
+    }
+    if let Some(summary) = update.summary_json.as_deref() {
+        query
+            .push(if first {
+                "summary_json = "
+            } else {
+                ", summary_json = "
+            })
+            .push_bind(summary);
+        first = false;
+    }
+    if let Some(completed_at) = update.completed_at {
+        query
+            .push(if first {
+                "completed_at = "
+            } else {
+                ", completed_at = "
+            })
+            .push_bind(completed_at);
+    }
+    query.push(" WHERE id = ").push_bind(id);
+    query.build().execute(pool.as_pg()).await?;
     Ok(())
 }
 
@@ -168,20 +160,24 @@ pub async fn get_findings_for_review(
     )
 }
 
-/// Most recent completed review for a PR (any SHA). Used for resolve / still-open / new deltas.
-pub async fn get_latest_completed_review_for_pr(
+/// Findings from the most recent completed review for a PR, in one query.
+pub async fn get_latest_completed_findings_for_pr(
     pool: &DbPool,
     repo_id: i64,
     pr_number: i64,
-) -> Result<Option<Review>, sqlx::Error> {
-    db_fetch_optional!(
+) -> Result<Vec<Finding>, sqlx::Error> {
+    db_fetch_all!(
         pool,
-        Review,
-        "SELECT * FROM reviews
-         WHERE repo_id = ? AND pr_number = ?
-           AND status IN ('passed', 'failed')
-         ORDER BY completed_at DESC NULLS LAST, created_at DESC
-         LIMIT 1",
+        Finding,
+        "SELECT f.* FROM findings f
+         WHERE f.review_id = (
+           SELECT r.id FROM reviews r
+           WHERE r.repo_id = ? AND r.pr_number = ?
+             AND r.status IN ('passed', 'failed')
+           ORDER BY r.completed_at DESC NULLS LAST, r.created_at DESC
+           LIMIT 1
+         )
+         ORDER BY f.severity, f.file_path",
         repo_id,
         pr_number
     )
@@ -189,6 +185,14 @@ pub async fn get_latest_completed_review_for_pr(
 
 pub async fn create_findings_batch(
     pool: &DbPool,
+    findings: &[FindingCreate],
+) -> Result<(), sqlx::Error> {
+    let mut conn = pool.as_pg().acquire().await?;
+    insert_findings_on(&mut conn, findings).await
+}
+
+async fn insert_findings_on(
+    conn: &mut sqlx::PgConnection,
     findings: &[FindingCreate],
 ) -> Result<(), sqlx::Error> {
     if findings.is_empty() {
@@ -211,6 +215,8 @@ pub async fn create_findings_batch(
     let mut code_snippets: Vec<Option<String>> = Vec::with_capacity(findings.len());
     let mut contexts: Vec<Option<String>> = Vec::with_capacity(findings.len());
     let mut categories: Vec<Option<String>> = Vec::with_capacity(findings.len());
+    let mut confidences: Vec<Option<i32>> = Vec::with_capacity(findings.len());
+    let mut judge_rationales: Vec<Option<String>> = Vec::with_capacity(findings.len());
 
     for f in findings {
         review_ids.push(f.review_id);
@@ -228,18 +234,22 @@ pub async fn create_findings_batch(
         code_snippets.push(f.code_snippet.clone());
         contexts.push(f.context.clone());
         categories.push(f.category.clone());
+        confidences.push(f.confidence);
+        judge_rationales.push(f.judge_rationale.clone());
     }
 
     sqlx::query(
         "INSERT INTO findings (
             review_id, fingerprint, file_path, line_start, line_end,
             column_start, column_end, severity, detector, rule_id,
-            message, suggested_fix, code_snippet, context, category
+            message, suggested_fix, code_snippet, context, category,
+            confidence, judge_rationale
          )
          SELECT * FROM UNNEST(
             $1::bigint[], $2::text[], $3::text[], $4::int4[], $5::int4[],
             $6::int4[], $7::int4[], $8::text[], $9::text[], $10::text[],
-            $11::text[], $12::text[], $13::text[], $14::text[], $15::text[]
+            $11::text[], $12::text[], $13::text[], $14::text[], $15::text[],
+            $16::int4[], $17::text[]
          )
          ON CONFLICT DO NOTHING",
     )
@@ -258,63 +268,52 @@ pub async fn create_findings_batch(
     .bind(&code_snippets)
     .bind(&contexts)
     .bind(&categories)
-    .execute(pool.as_pg())
+    .bind(&confidences)
+    .bind(&judge_rationales)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())
 }
 
 pub async fn get_stats(pool: &DbPool) -> Result<serde_json::Value, sqlx::Error> {
-    let total_repos: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM repos WHERE active = ?",
-        true
-    )?;
+    #[derive(sqlx::FromRow)]
+    struct StatsRow {
+        total_repos: i64,
+        total_reviews_today: i64,
+        pass_rate: Option<f64>,
+        total_findings: i64,
+        reviews_last_7_days: i64,
+        dismissals_last_7_days: i64,
+    }
 
-    let total_reviews_today: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM reviews
-         WHERE created_at >= CURRENT_DATE
-           AND created_at < CURRENT_DATE + INTERVAL '1 day'"
-    )?;
-
-    // Cast: bare `100.0` is NUMERIC in Postgres, which sqlx won't decode as f64.
-    let pass_rate: Option<f64> = db_scalar!(
-        pool,
-        Option<f64>,
-        "SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
-         FROM reviews
-         WHERE created_at >= NOW() - INTERVAL '30 days'"
-    )?;
-
-    let total_findings: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM findings f
-         INNER JOIN reviews r ON r.id = f.review_id
-         WHERE r.created_at >= NOW() - INTERVAL '30 days'"
-    )?;
-
-    let reviews_last_7_days: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days'"
-    )?;
-
-    let dismissals_last_7_days: i64 = db_scalar!(
-        pool,
-        i64,
-        "SELECT COUNT(*) FROM dismissed_findings WHERE dismissed_at >= NOW() - INTERVAL '7 days'"
-    )?;
+    let stats: StatsRow = sqlx::query_as(
+        "SELECT
+           (SELECT COUNT(*) FROM repos WHERE active = $1) AS total_repos,
+           (SELECT COUNT(*) FROM reviews
+            WHERE created_at >= CURRENT_DATE
+              AND created_at < CURRENT_DATE + INTERVAL '1 day') AS total_reviews_today,
+           (SELECT AVG(CASE WHEN status = 'passed' THEN 100.0 WHEN status = 'failed' THEN 0.0 ELSE NULL END)::float8
+            FROM reviews
+            WHERE created_at >= NOW() - INTERVAL '30 days') AS pass_rate,
+           (SELECT COUNT(*) FROM findings f
+            INNER JOIN reviews r ON r.id = f.review_id
+            WHERE r.created_at >= NOW() - INTERVAL '30 days') AS total_findings,
+           (SELECT COUNT(*) FROM reviews
+            WHERE created_at >= NOW() - INTERVAL '7 days') AS reviews_last_7_days,
+           (SELECT COUNT(*) FROM dismissed_findings
+            WHERE dismissed_at >= NOW() - INTERVAL '7 days') AS dismissals_last_7_days",
+    )
+    .bind(true)
+    .fetch_one(pool.as_pg())
+    .await?;
 
     Ok(serde_json::json!({
-        "total_repos": total_repos,
-        "total_reviews_today": total_reviews_today,
-        "pass_rate": pass_rate,
-        "total_findings": total_findings,
-        "reviews_last_7_days": reviews_last_7_days,
-        "dismissals_last_7_days": dismissals_last_7_days,
+        "total_repos": stats.total_repos,
+        "total_reviews_today": stats.total_reviews_today,
+        "pass_rate": stats.pass_rate,
+        "total_findings": stats.total_findings,
+        "reviews_last_7_days": stats.reviews_last_7_days,
+        "dismissals_last_7_days": stats.dismissals_last_7_days,
     }))
 }

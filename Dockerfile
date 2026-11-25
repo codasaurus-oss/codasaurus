@@ -1,32 +1,41 @@
+# syntax=docker/dockerfile:1
+
 # ── Stage 1: Build the SPA from codasaurus-frontend ─────────────
-FROM node:20-alpine AS frontend
+FROM node:22-alpine AS frontend
 ARG DASHBOARD_REF=main
+ARG SKIP_FRONTEND=0
 RUN apk add --no-cache git
 WORKDIR /app
-RUN git clone --depth 1 --branch "${DASHBOARD_REF}" \
-      https://github.com/codasaurus-oss/codasaurus-frontend.git svelte-dashboard
-WORKDIR /app/svelte-dashboard
-RUN npm ci --ignore-scripts
-RUN npm run build
+RUN if [ "$SKIP_FRONTEND" = "1" ]; then \
+      mkdir -p svelte-dashboard/dist && \
+      printf '<!doctype html><title>Codasaurus</title>' > svelte-dashboard/dist/index.html; \
+    else \
+      git clone --depth 1 --branch "${DASHBOARD_REF}" \
+        https://github.com/codasaurus-oss/codasaurus-frontend.git svelte-dashboard && \
+      cd svelte-dashboard && npm ci --ignore-scripts && npm run build; \
+    fi
 
 # ── Stage 2: Build Rust binary ──────────────────────────────────
 FROM rust:1.90-slim-bookworm AS backend
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 ENV CODASAURUS_SKIP_FRONTEND_BUILD=1
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/app/target \
+    mkdir -p src && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
     && cargo build --release --locked 2>&1 | tail -1 \
     && rm -rf src
 
 COPY . .
 COPY --from=frontend /app/svelte-dashboard/dist/ svelte-dashboard/dist/
-RUN cargo build --release --locked \
-    && strip /app/target/release/codasaurus
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/app/target \
+    cargo build --release --locked \
+    && cp target/release/codasaurus /app/codasaurus \
+    && strip /app/codasaurus
 
 # ── Stage 3: Runtime ────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -39,7 +48,7 @@ RUN apt-get update \
     && chown -R 65532:65532 /data /tmp/codasaurus
 WORKDIR /app
 COPY --from=frontend /app/svelte-dashboard/dist/ /app/svelte-dashboard/dist/
-COPY --from=backend /app/target/release/codasaurus /usr/local/bin/codasaurus
+COPY --from=backend /app/codasaurus /usr/local/bin/codasaurus
 USER 65532:65532
 ENV PORT=3000 \
     CODASAURUS_DATA_DIR=/data \

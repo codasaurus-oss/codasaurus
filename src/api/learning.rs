@@ -25,10 +25,7 @@ pub(crate) async fn list_rules(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
     let store = LearningStore::from_pool(&state.pool);
-    let rules = store
-        .list_rules()
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rules = store.list_rules().await.map_err(ApiError::internal_error)?;
     let items: Vec<serde_json::Value> = rules
         .into_iter()
         .map(|r| {
@@ -49,53 +46,52 @@ pub(crate) async fn list_rules(
     Ok(Json(json!({ "rules": items })))
 }
 
-async fn approve_rule(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
+/// Shared 200/404 mapping for rule mutations: auth stays in the caller
+/// (it must run before the store write), this only maps the outcome.
+fn rule_outcome(
+    id: String,
+    changed: Result<bool, anyhow::Error>,
+    not_found: &str,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    super::rbac::require_maintainer(&state, &headers).await?;
-    let store = LearningStore::from_pool(&state.pool);
-    let updated = store
-        .approve_rule(&id)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    if !updated {
-        return Err(ApiError::not_found("rule not found or not suggested"));
+    if changed.map_err(ApiError::internal_error)? {
+        Ok(Json(json!({ "status": "ok", "id": id })))
+    } else {
+        Err(ApiError::not_found(not_found))
     }
-    Ok(Json(json!({ "status": "ok", "id": id })))
 }
 
-async fn archive_rule(
+#[utoipa::path(post, path = "/api/learning/rules/{id}/approve", tag = "learning", params(("id" = String, Path, description = "Rule id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn approve_rule(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
     let store = LearningStore::from_pool(&state.pool);
-    let updated = store
-        .archive_rule(&id)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    if !updated {
-        return Err(ApiError::not_found("rule not found"));
-    }
-    Ok(Json(json!({ "status": "ok", "id": id })))
+    let changed = store.approve_rule(&id).await;
+    rule_outcome(id, changed, "rule not found or not suggested")
 }
 
-async fn delete_rule(
+#[utoipa::path(post, path = "/api/learning/rules/{id}/archive", tag = "learning", params(("id" = String, Path, description = "Rule id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn archive_rule(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
     let store = LearningStore::from_pool(&state.pool);
-    let deleted = store
-        .delete_rule(&id)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    if !deleted {
-        return Err(ApiError::not_found("rule not found"));
-    }
-    Ok(Json(json!({ "status": "ok", "id": id })))
+    let changed = store.archive_rule(&id).await;
+    rule_outcome(id, changed, "rule not found")
+}
+
+#[utoipa::path(delete, path = "/api/learning/rules/{id}", tag = "learning", params(("id" = String, Path, description = "Rule id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn delete_rule(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_maintainer(&state, &headers).await?;
+    let store = LearningStore::from_pool(&state.pool);
+    let changed = store.delete_rule(&id).await;
+    rule_outcome(id, changed, "rule not found")
 }

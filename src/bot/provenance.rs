@@ -22,7 +22,7 @@ fn evidence_url(f: &Finding) -> Option<String> {
     match f.detector.as_str() {
         "hallucinated-imports" | "phantom-deps" => {
             let pkg = f.message.split('`').nth(1)?;
-            let enc = urlencoding_lite(pkg);
+            let enc = crate::util::url_encode(pkg);
             let lower = f.file.to_lowercase();
             let url = if lower.ends_with(".rs") || lower.contains("cargo.toml") {
                 format!("https://crates.io/search?q={enc}")
@@ -50,15 +50,6 @@ fn evidence_url(f: &Finding) -> Option<String> {
     }
 }
 
-fn urlencoding_lite(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            _ => format!("%{:02X}", c as u8),
-        })
-        .collect()
-}
-
 /// True when `candidate` matches a known PR path with path-component boundaries
 /// (avoids `app.ts` matching `not-app.ts`).
 fn path_matches(known: &str, candidate: &str) -> bool {
@@ -77,14 +68,7 @@ fn confidence_rank(conf: &str) -> u8 {
     }
 }
 
-/// Drop LLM issues that fail path / evidence / confidence gates before auto-post.
-///
-/// Keeps false positives out of PR threads:
-/// - unknown path → drop
-/// - `confidence=low` or missing → drop
-/// - empty/short rationale → drop
-/// - non-info without a line citation → drop
-/// - `critical`/`blocking` at medium confidence → downgrade to `warning`
+/// Drop ungrounded LLM issues and downgrade medium-confidence blocking claims.
 pub fn reverify_llm_issues(
     issues: &[crate::llm::LlmIssue],
     known_paths: &[String],
@@ -283,8 +267,8 @@ mod tests {
         assert!(kept.is_empty());
     }
 
-    #[test]
-    fn drops_replacement_when_original_not_verbatim() {
+    /// Same unwrap issue for both replacement tests; only the file content differs.
+    fn replacement_issue() -> crate::llm::LlmIssue {
         let mut i = issue(
             "src/a.rs",
             "high",
@@ -296,6 +280,12 @@ mod tests {
             original: "let x = value.unwrap();".into(),
             replacement: "let x = value?;".into(),
         });
+        i
+    }
+
+    #[test]
+    fn drops_replacement_when_original_not_verbatim() {
+        let i = replacement_issue();
         let contents = [("src/a.rs".to_string(), "fn f() { let y = 1; }".to_string())];
         let kept = reverify_llm_issues(&issues_slice(&i), &["src/a.rs".into()], &contents);
         assert_eq!(kept.len(), 1);
@@ -304,17 +294,7 @@ mod tests {
 
     #[test]
     fn keeps_replacement_when_original_matches_verbatim() {
-        let mut i = issue(
-            "src/a.rs",
-            "high",
-            "warning",
-            3,
-            "unwrap on user-controlled option value",
-        );
-        i.replacement = Some(crate::llm::LlmReplacement {
-            original: "let x = value.unwrap();".into(),
-            replacement: "let x = value?;".into(),
-        });
+        let i = replacement_issue();
         let contents = [(
             "src/a.rs".to_string(),
             "fn f() { let x = value.unwrap(); }".to_string(),

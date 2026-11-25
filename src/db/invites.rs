@@ -83,21 +83,6 @@ pub async fn get_pending_by_token(
     )
 }
 
-pub async fn get_pending_by_email(
-    pool: &DbPool,
-    email: &str,
-) -> Result<Option<Invite>, sqlx::Error> {
-    db_fetch_optional!(
-        pool,
-        Invite,
-        "SELECT * FROM invites
-         WHERE lower(email) = lower(?) AND accepted_at IS NULL AND expires_at > NOW()
-         ORDER BY created_at DESC
-         LIMIT 1",
-        email
-    )
-}
-
 pub async fn revoke(pool: &DbPool, id: i64) -> Result<bool, sqlx::Error> {
     let n = db_execute!(
         pool,
@@ -107,15 +92,6 @@ pub async fn revoke(pool: &DbPool, id: i64) -> Result<bool, sqlx::Error> {
     Ok(n > 0)
 }
 
-pub async fn mark_accepted(pool: &DbPool, id: i64) -> Result<(), sqlx::Error> {
-    db_execute!(
-        pool,
-        "UPDATE invites SET accepted_at = NOW() WHERE id = ?",
-        id
-    )?;
-    Ok(())
-}
-
 /// Accept a local invite: atomically claim invite, then create user (single transaction).
 pub async fn accept_local(
     pool: &DbPool,
@@ -123,6 +99,7 @@ pub async fn accept_local(
     email: &str,
     password: &str,
 ) -> Result<User, sqlx::Error> {
+    let password_hash = crate::db::users::hash_password(password)?;
     let mut tx = pool.as_pg().begin().await?;
 
     let claimed: Option<Invite> = sqlx::query_as(
@@ -138,7 +115,6 @@ pub async fn accept_local(
         sqlx::Error::Protocol("Invite not found, expired, or already accepted".into())
     })?;
 
-    let password_hash = crate::db::users::hash_password(password)?;
     let user: User = sqlx::query_as(
         "INSERT INTO users (email, password_hash, role, auth_provider, is_bootstrap)
          VALUES ($1, $2, $3, 'local', false)

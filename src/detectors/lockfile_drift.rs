@@ -1,14 +1,15 @@
 use crate::detectors::Finding;
 use crate::parser::ParsedFile;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
     let mut findings = Vec::new();
     let manifests = collect_manifests(parsed_files);
 
-    for (dir, manifest) in manifests {
+    for manifest in manifests {
         let spec = manifest.kind.lockfile();
-        if let Some(lockfile) = find_lockfile(parsed_files, &dir, spec.name) {
+        let dir = directory_of(&manifest.path);
+        if let Some(lockfile) = find_lockfile(parsed_files, dir, spec.name) {
             let locked = (spec.extract)(&lockfile.raw_content);
             for dep in &manifest.deps {
                 if !locked.contains(dep) {
@@ -48,29 +49,28 @@ impl ManifestKind {
 
 struct Manifest {
     path: String,
-    deps: HashSet<String>,
+    deps: Vec<String>,
     kind: ManifestKind,
 }
 
-fn collect_manifests(parsed_files: &[ParsedFile]) -> HashMap<String, Manifest> {
-    let mut manifests = HashMap::new();
+fn collect_manifests(parsed_files: &[ParsedFile]) -> Vec<Manifest> {
+    let mut manifests = Vec::new();
     for file in parsed_files {
         let path = file.path.to_lowercase();
         let Some((kind, extract)) = manifest_kind_for(&path) else {
             continue;
         };
-        let deps = extract(&file.raw_content);
+        let mut deps = extract(&file.raw_content);
         if deps.is_empty() {
             continue;
         }
-        manifests.insert(
-            directory_of(&file.path),
-            Manifest {
-                path: file.path.clone(),
-                deps: deps.into_iter().collect(),
-                kind,
-            },
-        );
+        deps.sort();
+        deps.dedup();
+        manifests.push(Manifest {
+            path: file.path.clone(),
+            deps,
+            kind,
+        });
     }
     manifests
 }
@@ -87,11 +87,8 @@ fn manifest_kind_for(path: &str) -> Option<(ManifestKind, ManifestExtractor)> {
     }
 }
 
-fn directory_of(path: &str) -> String {
-    match path.rsplit_once('/') {
-        Some((dir, _)) => dir.to_string(),
-        None => String::new(),
-    }
+fn directory_of(path: &str) -> &str {
+    path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
 }
 
 fn find_lockfile<'a>(
@@ -100,8 +97,8 @@ fn find_lockfile<'a>(
     filename: &str,
 ) -> Option<&'a ParsedFile> {
     parsed_files.iter().find(|f| {
-        let fdir = directory_of(&f.path);
-        fdir == dir && f.path.rsplit('/').next().unwrap_or("") == filename
+        f.path.rsplit('/').next() == Some(filename)
+            && f.path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("") == dir
     })
 }
 
@@ -231,5 +228,19 @@ mod tests {
         let findings = detect(&files);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].message.contains("gorilla/mux"));
+    }
+
+    #[test]
+    fn checks_all_manifests_in_the_same_directory() {
+        let files = [
+            parse("package.json", r#"{"dependencies": {"react": "^18.0.0"}}"#),
+            parse("Cargo.toml", "[dependencies]\nserde = \"1.0\"\n"),
+            parse("package-lock.json", r#"{"packages": {}}"#),
+            parse("Cargo.lock", ""),
+        ];
+        let findings = detect(&files);
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().any(|f| f.message.contains("react")));
+        assert!(findings.iter().any(|f| f.message.contains("serde")));
     }
 }

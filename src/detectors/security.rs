@@ -161,12 +161,16 @@ fn is_in_string_context(line: &str) -> bool {
         }
         return true;
     }
-    // Line starts in a comment context containing example/sample keywords
-    if (trimmed.starts_with("// ") || trimmed.starts_with("# ") || trimmed.starts_with("<!--"))
-        && (trimmed[3..].to_ascii_lowercase().contains("example")
-            || trimmed[3..].to_ascii_lowercase().contains("sample"))
-    {
-        return true;
+    // Example comments describe samples rather than live credentials or TODOs.
+    let comment = trimmed
+        .strip_prefix("// ")
+        .or_else(|| trimmed.strip_prefix("# "))
+        .or_else(|| trimmed.strip_prefix("<!--"));
+    if let Some(comment) = comment {
+        let lower = comment.to_ascii_lowercase();
+        if lower.contains("example") || lower.contains("sample") {
+            return true;
+        }
     }
     false
 }
@@ -324,5 +328,11 @@ mod tests {
                 "{prefix} slack token missed"
             );
         }
+    }
+
+    #[test]
+    fn unicode_example_comment_does_not_panic() {
+        let file = parse_file("notes.md", "# é example TODO: finish\n").unwrap();
+        assert!(detect_todos(&[file]).is_empty());
     }
 }

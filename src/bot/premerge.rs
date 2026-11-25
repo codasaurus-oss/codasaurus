@@ -22,27 +22,36 @@ pub async fn run_pre_merge_checks(
     checks: &[PreMergeCheck],
     offline: bool,
 ) -> Vec<PreMergeCheckResult> {
-    let mut results = Vec::new();
-    for check in checks {
-        if check.mode == "off" {
-            continue;
-        }
-        if let Some(scope) = check.scope.as_deref() {
-            if !changed_paths.iter().any(|p| glob_match(scope, p)) {
-                continue;
-            }
-        }
-
+    let applicable: Vec<&PreMergeCheck> = checks
+        .iter()
+        .filter(|check| {
+            check.mode != "off"
+                && check
+                    .scope
+                    .as_deref()
+                    .is_none_or(|scope| changed_paths.iter().any(|path| glob_match(scope, path)))
+        })
+        .collect();
+    if applicable.is_empty() {
+        return Vec::new();
+    }
+    let llm_cfg = if offline {
+        None
+    } else {
+        crate::llm::LlmConfig::from_db_or_env(pool).await
+    };
+    let mut results = Vec::with_capacity(applicable.len());
+    for check in applicable {
         let (status, reasoning) = if offline {
             (
                 "inconclusive".to_string(),
                 "LLM disabled (offline mode); inconclusive checks never block".to_string(),
             )
-        } else if let Some(llm_cfg) = crate::llm::LlmConfig::from_db_or_env(pool).await {
-            match crate::llm::premerge_check(&check.name, &check.instructions, diff, &llm_cfg).await
+        } else if let Some(llm_cfg) = &llm_cfg {
+            match crate::llm::premerge_check(&check.name, &check.instructions, diff, llm_cfg).await
             {
-                Ok((s, r)) => (s, r),
-                Err(e) => ("inconclusive".to_string(), format!("LLM error: {e}")),
+                Ok((status, reasoning)) => (status, reasoning),
+                Err(error) => ("inconclusive".to_string(), format!("LLM error: {error}")),
             }
         } else {
             (
@@ -51,7 +60,6 @@ pub async fn run_pre_merge_checks(
             )
         };
 
-        persist(pool, repo, pr_number, check, &status, &reasoning).await;
         results.push(PreMergeCheckResult {
             name: check.name.clone(),
             mode: check.mode.clone(),
@@ -59,32 +67,46 @@ pub async fn run_pre_merge_checks(
             reasoning,
         });
     }
+    persist(pool, repo, pr_number, &results).await;
     results
 }
 
-/// Best-effort record of the run (dashboard + audit trail).
+/// Best-effort batch record of the run for the dashboard.
 async fn persist(
     pool: Option<&DbPool>,
     repo: &str,
     pr_number: i64,
-    check: &PreMergeCheck,
-    status: &str,
-    reasoning: &str,
+    results: &[PreMergeCheckResult],
 ) {
-    let Some(pool) = pool else {
+    let (Some(pool), false) = (pool, results.is_empty()) else {
         return;
     };
+    let mut latest = std::collections::BTreeMap::new();
+    for result in results {
+        latest.insert(result.name.as_str(), result);
+    }
+    let names: Vec<&str> = latest.keys().copied().collect();
+    let modes: Vec<&str> = latest.values().map(|result| result.mode.as_str()).collect();
+    let statuses: Vec<&str> = latest
+        .values()
+        .map(|result| result.status.as_str())
+        .collect();
+    let reasoning: Vec<&str> = latest
+        .values()
+        .map(|result| result.reasoning.as_str())
+        .collect();
     let _ = sqlx::query(
         "INSERT INTO pre_merge_check_runs (repo_full_name, pr_number, check_name, mode, status, reasoning, evaluated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         SELECT $1, $2, name, mode, status, reasoning, NOW()
+         FROM UNNEST($3::text[], $4::text[], $5::text[], $6::text[]) AS t(name, mode, status, reasoning)
          ON CONFLICT (repo_full_name, pr_number, check_name)
          DO UPDATE SET status = EXCLUDED.status, reasoning = EXCLUDED.reasoning, evaluated_at = NOW()",
     )
     .bind(repo)
     .bind(pr_number)
-    .bind(&check.name)
-    .bind(&check.mode)
-    .bind(status)
+    .bind(names)
+    .bind(modes)
+    .bind(statuses)
     .bind(reasoning)
     .execute(pool.as_pg())
     .await;
@@ -192,5 +214,59 @@ mod tests {
         ));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, "inconclusive");
+    }
+
+    #[tokio::test]
+    async fn batch_persist_keeps_the_latest_result_per_check() {
+        let _guard = crate::db::TEST_POOL_LOCK.lock().await;
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
+        });
+        let pool = crate::db::create_pool(&url).await.expect("pool");
+        let repo = format!("acme/premerge-{}", uuid::Uuid::new_v4().simple());
+        let checks = vec![
+            PreMergeCheck {
+                name: "same".into(),
+                mode: "error".into(),
+                scope: None,
+                instructions: "first".into(),
+            },
+            PreMergeCheck {
+                name: "other".into(),
+                mode: "warning".into(),
+                scope: None,
+                instructions: "other".into(),
+            },
+            PreMergeCheck {
+                name: "same".into(),
+                mode: "warning".into(),
+                scope: None,
+                instructions: "last".into(),
+            },
+        ];
+
+        let results = run_pre_merge_checks(Some(&pool), &repo, 1, "diff", &[], &checks, true).await;
+        assert_eq!(results.len(), 3);
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT check_name, mode FROM pre_merge_check_runs
+             WHERE repo_full_name = $1 AND pr_number = 1
+             ORDER BY check_name",
+        )
+        .bind(&repo)
+        .fetch_all(pool.as_pg())
+        .await
+        .expect("premerge rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("other".into(), "warning".into()),
+                ("same".into(), "warning".into())
+            ]
+        );
+        sqlx::query("DELETE FROM pre_merge_check_runs WHERE repo_full_name = $1")
+            .bind(&repo)
+            .execute(pool.as_pg())
+            .await
+            .expect("cleanup");
     }
 }

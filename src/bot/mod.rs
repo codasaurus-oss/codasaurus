@@ -30,7 +30,9 @@ pub(crate) mod related_prs;
 pub(crate) mod repo_context;
 mod review;
 mod threads;
-pub(crate) use review::{github_api_headers, next_github_link, GITHUB_CLIENT};
+pub(crate) use review::{
+    github_api_headers, github_get, github_post, next_github_link, GITHUB_CLIENT,
+};
 pub(crate) mod strictness;
 pub(crate) mod title_fix;
 mod verify;
@@ -55,11 +57,12 @@ pub(crate) async fn pr_lock(repo: &str, pr_number: i64) -> Arc<Mutex<()>> {
 }
 
 /// Drop idle PR lock entries so the map does not grow forever on long-lived serve.
-pub(crate) async fn prune_pr_lock(repo: &str, pr_number: i64) {
+/// The caller's `Arc` must be passed in so it is released before counting holders.
+pub(crate) async fn prune_pr_lock(repo: &str, pr_number: i64, held: Arc<Mutex<()>>) {
+    drop(held);
     let key = format!("{repo}:{pr_number}");
     let mut map = PR_LOCKS.lock().await;
     if let Some(lock) = map.get(&key) {
-        // Only this map entry holds the Arc (no active holders).
         if Arc::strong_count(lock) == 1 {
             map.remove(&key);
         }
@@ -160,27 +163,25 @@ pub(crate) fn bot_db_pool() -> Option<&'static crate::db::DbPool> {
     CONFIG_POOL.get()
 }
 
-/// An opt-in boolean feature gate: org-wide DB config, overridden by the repo's
-/// own `config_json` when it names the key.
-///
-/// Both layers are settable from the dashboard (Settings and Repository detail),
-/// so a gate that consults only one silently ignores half the UI. Defaults to
-/// `false`: every caller is an opt-in that writes to the user's repo.
+/// Opt-in org flag, overridden by an explicit repo `config_json` value.
 pub(crate) async fn repo_or_global_flag(
     pool: &crate::db::DbPool,
     repo_full_name: &str,
     key: &str,
 ) -> bool {
-    let mut enabled = crate::db::config::get_config(pool, key)
-        .await
+    let (global, repo) = tokio::join!(
+        crate::db::config::get_config(pool, key),
+        crate::db::repos::get_repo_by_full_name(pool, repo_full_name),
+    );
+    let mut enabled = global
         .ok()
         .flatten()
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"));
-    if let Ok(Some(repo)) = crate::db::repos::get_repo_by_full_name(pool, repo_full_name).await {
-        if let Some(cfg) = repo.config_json.as_deref() {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(cfg) {
-                if let Some(b) = val.get(key).and_then(|v| v.as_bool()) {
-                    enabled = b;
+        .is_some_and(|value| crate::util::flag_truthy(&value));
+    if let Ok(Some(repo)) = repo {
+        if let Some(config) = repo.config_json.as_deref() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(config) {
+                if let Some(flag) = value.get(key).and_then(serde_json::Value::as_bool) {
+                    enabled = flag;
                 }
             }
         }
@@ -190,20 +191,18 @@ pub(crate) async fn repo_or_global_flag(
 
 async fn reload_bot_config() -> Option<BotConfig> {
     let pool = CONFIG_POOL.get()?;
-    let app_id = db::config::get_config(pool, "github_app_id")
-        .await
-        .ok()
-        .flatten()?;
-    let private_key = db::config::get_config(pool, "github_private_key")
-        .await
-        .ok()
-        .flatten()
-        .filter(|k| !k.trim().is_empty())
+    let entries = db::config::get_all_config(pool).await.ok()?;
+    let value = |key: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.value.clone())
+    };
+    let app_id = value("github_app_id")?;
+    let private_key = value("github_private_key")
+        .filter(|key| !key.trim().is_empty())
         .or_else(crate::github_jwt::resolve_private_key_from_env)?;
-    let webhook_secret = db::config::get_config(pool, "github_webhook_secret")
-        .await
-        .ok()
-        .flatten()
+    let webhook_secret = value("github_webhook_secret")
         .or_else(|| std::env::var("GITHUB_WEBHOOK_SECRET").ok())
         .unwrap_or_default();
     Some(BotConfig {
@@ -248,6 +247,27 @@ pub(crate) struct WebhookPayload {
     after: Option<String>,
     /// `push` event commits
     commits: Option<Vec<serde_json::Value>>,
+}
+
+impl WebhookPayload {
+    /// Minimal payload for programmatic reviews that only carry the PR object.
+    pub(crate) fn for_pull_request(pull_request: Option<serde_json::Value>) -> Self {
+        Self {
+            action: String::new(),
+            pull_request,
+            repo: None,
+            installation: None,
+            comment: None,
+            issue: None,
+            reaction: None,
+            thread: None,
+            sender: None,
+            repositories: None,
+            repositories_added: None,
+            after: None,
+            commits: None,
+        }
+    }
 }
 
 /// Paths added/modified across all commits of a `push` event payload.
@@ -365,17 +385,14 @@ fn author_can_command(payload: &WebhookPayload) -> bool {
 }
 
 /// Who may dismiss findings via emoji reactions (same trust bar as slash commands).
-fn reactor_can_dismiss(payload: &WebhookPayload) -> bool {
-    let assoc = payload
-        .reaction
-        .as_ref()
-        .and_then(|r| r.get("author_association"))
-        .and_then(|a| a.as_str())
-        .unwrap_or("");
-    let login = payload
-        .reaction
-        .as_ref()
-        .and_then(|r| r.pointer("/user/login"))
+/// Login of the object's author, falling back to the webhook sender.
+fn actor_login<'a>(
+    object: Option<&'a serde_json::Value>,
+    user_path: &str,
+    payload: &'a WebhookPayload,
+) -> Option<&'a str> {
+    object
+        .and_then(|o| o.pointer(user_path))
         .and_then(|v| v.as_str())
         .or_else(|| {
             payload
@@ -383,7 +400,21 @@ fn reactor_can_dismiss(payload: &WebhookPayload) -> bool {
                 .as_ref()
                 .and_then(|s| s.get("login"))
                 .and_then(|v| v.as_str())
-        });
+        })
+}
+
+fn reactor_can_dismiss(payload: &WebhookPayload) -> bool {
+    let assoc = payload
+        .reaction
+        .as_ref()
+        .and_then(|r| r.get("author_association"))
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    let login = actor_login(payload.reaction.as_ref(), "/user/login", payload);
+    dismissal_allowed(payload, assoc, login)
+}
+
+fn dismissal_allowed(payload: &WebhookPayload, assoc: &str, login: Option<&str>) -> bool {
     actor_can_dismiss(
         assoc,
         login,
@@ -400,24 +431,8 @@ fn thread_resolver_can_dismiss(payload: &WebhookPayload) -> bool {
         .and_then(|t| t.pointer("/comments/0/author_association"))
         .and_then(|a| a.as_str())
         .unwrap_or("");
-    let login = payload
-        .thread
-        .as_ref()
-        .and_then(|t| t.pointer("/comments/0/user/login"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            payload
-                .sender
-                .as_ref()
-                .and_then(|s| s.get("login"))
-                .and_then(|v| v.as_str())
-        });
-    actor_can_dismiss(
-        assoc,
-        login,
-        repo_owner_login(payload),
-        pr_author_login(payload),
-    )
+    let login = actor_login(payload.thread.as_ref(), "/comments/0/user/login", payload);
+    dismissal_allowed(payload, assoc, login)
 }
 
 fn actor_can_dismiss(assoc: &str, login: Option<&str>, repo_owner: &str, pr_author: &str) -> bool {
@@ -672,22 +687,17 @@ pub(crate) async fn handle_webhook(
                 else {
                     return;
                 };
-                for path in &changed {
-                    if let Err(e) = crate::index::reindex_file(
-                        pool,
-                        client,
-                        &headers,
-                        &repo_full_name,
-                        &after_sha,
-                        path,
-                        &index_cfg,
-                        llm_cfg.as_ref(),
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %e, path, "incremental index failed");
-                    }
-                }
+                crate::index::reindex_files(
+                    pool,
+                    client,
+                    &headers,
+                    &repo_full_name,
+                    &after_sha,
+                    &changed,
+                    &index_cfg,
+                    llm_cfg.as_ref(),
+                )
+                .await;
             });
         }
     } else if event == "issue_comment" && payload.action == "created" {
@@ -851,6 +861,33 @@ pub(crate) static REVIEW_PERMITS: std::sync::LazyLock<tokio::sync::Semaphore> =
         tokio::sync::Semaphore::new(n.max(1))
     });
 
+/// Shared repo-sync loop for `installation.created` and `installation_repositories.added`.
+async fn sync_installation_repos(
+    pool: &crate::db::DbPool,
+    inst_id: i64,
+    repos: &[serde_json::Value],
+) {
+    let creates: Vec<RepoCreate> = repos
+        .iter()
+        .filter_map(|repo| {
+            let full_name = repo["full_name"].as_str()?;
+            let (owner, name) = full_name.split_once('/')?;
+            Some(RepoCreate {
+                github_id: repo["id"].as_i64(),
+                full_name: full_name.to_string(),
+                owner: owner.to_string(),
+                name: name.to_string(),
+                default_branch: repo["default_branch"].as_str().map(str::to_string),
+                installation_id: inst_id,
+                private: repo["private"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect();
+    if let Err(error) = db::repos::upsert_repos_from_installation(pool, &creates).await {
+        tracing::error!(error = %error, repos = creates.len(), "failed to sync repos");
+    }
+}
+
 async fn handle_installation_created(
     installation: Option<InstallationInfo>,
     repos: Vec<serde_json::Value>,
@@ -866,38 +903,7 @@ async fn handle_installation_created(
             return;
         }
     };
-    for repo in &repos {
-        let github_id = repo["id"].as_i64();
-        let full_name = match repo["full_name"].as_str() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let parts: Vec<&str> = full_name.splitn(2, '/').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let owner = parts[0].to_string();
-        let name = parts[1].to_string();
-        let default_branch = repo["default_branch"].as_str().map(|s| s.to_string());
-        let private = repo["private"].as_bool().unwrap_or(false);
-
-        if let Err(e) = db::repos::create_repo_from_installation(
-            pool,
-            &RepoCreate {
-                github_id,
-                full_name,
-                owner,
-                name,
-                default_branch,
-                installation_id: inst_id,
-                private,
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %e, "failed to save repo");
-        }
-    }
+    sync_installation_repos(pool, inst_id, &repos).await;
     let count = repos.len();
     if let Some(p) = bot_db_pool() {
         crate::db::audit::log_event(
@@ -954,38 +960,7 @@ async fn handle_repos_added(installation: Option<InstallationInfo>, repos: Vec<s
         Some(p) => p,
         None => return,
     };
-    for repo in &repos {
-        let github_id = repo["id"].as_i64();
-        let full_name = match repo["full_name"].as_str() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let parts: Vec<&str> = full_name.splitn(2, '/').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let owner = parts[0].to_string();
-        let name = parts[1].to_string();
-        let default_branch = repo["default_branch"].as_str().map(|s| s.to_string());
-        let private = repo["private"].as_bool().unwrap_or(false);
-
-        if let Err(e) = db::repos::create_repo_from_installation(
-            pool,
-            &RepoCreate {
-                github_id,
-                full_name,
-                owner,
-                name,
-                default_branch,
-                installation_id: inst_id,
-                private,
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %e, "failed to save repo");
-        }
-    }
+    sync_installation_repos(pool, inst_id, &repos).await;
     tracing::info!(count = repos.len(), "synced added repos");
 }
 

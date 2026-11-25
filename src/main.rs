@@ -49,6 +49,10 @@ enum Commands {
         ready: bool,
     },
 
+    /// Inspect and manage the review job queue
+    #[command(subcommand)]
+    Queue(QueueCommands),
+
     /// Reset a local dashboard user's password (emergency recovery; no email flow)
     ResetPassword {
         /// Account email
@@ -59,6 +63,52 @@ enum Commands {
         #[arg(long)]
         password: String,
     },
+}
+
+#[derive(Subcommand)]
+enum QueueCommands {
+    /// Replay a dead-lettered review job
+    Replay {
+        /// review_jobs.id
+        #[arg(long)]
+        id: i64,
+    },
+    /// Schedule a review job at a future time
+    Schedule {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        pr: i64,
+        #[arg(long)]
+        sha: String,
+        /// RFC 3339 timestamp, e.g. 2026-11-24T10:00:00Z
+        #[arg(long)]
+        at: String,
+        #[arg(long, default_value_t = 100)]
+        priority: i16,
+    },
+}
+
+const DEFAULT_DATABASE_URL: &str = "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus";
+
+fn resolve_database_url(value: Option<&str>, on_render: bool) -> Result<String> {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(value.to_string());
+    }
+    if on_render {
+        anyhow::bail!(
+            "DATABASE_URL is required on Render. Set it to a Neon Free \
+             (or other always-free) Postgres URI — not Render free Postgres \
+             (that plan expires). See https://codasaurus-oss.github.io/docs/run-for-free.html."
+        );
+    }
+    Ok(DEFAULT_DATABASE_URL.to_string())
+}
+
+fn database_url() -> Result<String> {
+    let on_render =
+        std::env::var_os("RENDER").is_some() || std::env::var_os("RENDER_SERVICE_ID").is_some();
+    resolve_database_url(std::env::var("DATABASE_URL").ok().as_deref(), on_render)
 }
 
 fn main() -> Result<()> {
@@ -72,24 +122,15 @@ fn main() -> Result<()> {
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(3000)
             });
-            let database_url = match std::env::var("DATABASE_URL") {
-                Ok(u) if !u.trim().is_empty() => u,
-                _ if std::env::var_os("RENDER").is_some()
-                    || std::env::var_os("RENDER_SERVICE_ID").is_some() =>
-                {
-                    anyhow::bail!(
-                        "DATABASE_URL is required on Render. Set it to a Neon Free \
-                         (or other always-free) Postgres URI — not Render free Postgres \
-                         (that plan expires). See docs/run-for-free.md."
-                    );
-                }
-                _ => "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into(),
-            };
+            let database_url = database_url()?;
 
-            let bot_config = if codasaurus::util::env_set("GITHUB_APP_ID") {
+            let app_id = std::env::var("GITHUB_APP_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty());
+            let bot_config = if let Some(app_id) = app_id {
                 match github_jwt::require_private_key_from_env() {
                     Ok(key) => Some(bot::BotConfig {
-                        app_id: std::env::var("GITHUB_APP_ID").unwrap(),
+                        app_id,
                         private_key: key,
                         webhook_secret: std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
                         host: host.clone(),
@@ -111,6 +152,44 @@ fn main() -> Result<()> {
         Commands::Version => {
             println!("codasaurus v{}", env!("CARGO_PKG_VERSION"));
         }
+        Commands::Queue(QueueCommands::Replay { id }) => {
+            let database_url = database_url()?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                let pool = db::create_pool(&database_url).await?;
+                let ok = codasaurus::bot::queue::replay_dead_job(&pool, *id).await?;
+                pool.close().await;
+                println!(
+                    "{}",
+                    if ok {
+                        format!("Requeued dead job {id}")
+                    } else {
+                        format!("No dead job with id {id}")
+                    }
+                );
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+        Commands::Queue(QueueCommands::Schedule {
+            repo,
+            pr,
+            sha,
+            at,
+            priority,
+        }) => {
+            let when = chrono::DateTime::parse_from_rfc3339(at)?.with_timezone(&chrono::Utc);
+            let database_url = database_url()?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                let pool = db::create_pool(&database_url).await?;
+                let id =
+                    codasaurus::bot::queue::schedule_review(&pool, repo, *pr, sha, when, *priority)
+                        .await?;
+                pool.close().await;
+                println!("Scheduled review job {id} for {when}");
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
         Commands::ResetPassword { email, password } => {
             let email = email.trim().to_lowercase();
             if email.is_empty() {
@@ -119,9 +198,7 @@ fn main() -> Result<()> {
             if password.len() < 10 {
                 anyhow::bail!("--password must be at least 10 characters");
             }
-            let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus".into()
-            });
+            let database_url = database_url()?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 let pool = db::create_pool(&database_url).await?;
@@ -163,4 +240,30 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_url_uses_default_outside_render() {
+        assert_eq!(
+            resolve_database_url(None, false).unwrap(),
+            "postgres://codasaurus:codasaurus@127.0.0.1:5432/codasaurus"
+        );
+    }
+
+    #[test]
+    fn database_url_trims_and_prefers_the_environment() {
+        assert_eq!(
+            resolve_database_url(Some("  postgres://db  "), false).unwrap(),
+            "postgres://db"
+        );
+    }
+
+    #[test]
+    fn database_url_is_required_on_render() {
+        assert!(resolve_database_url(None, true).is_err());
+    }
 }

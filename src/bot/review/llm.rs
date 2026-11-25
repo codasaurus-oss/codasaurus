@@ -3,11 +3,23 @@ use crate::state::ReviewState;
 use anyhow::Result;
 use std::fmt::Write;
 
-use super::github::{post_or_update_comment, review_exists_with_marker};
+use super::github::{post_or_update_comment, review_exists};
 
 /// Marks the body of the LLM auto-fix suggestion review so its own idempotency
 /// check never collides with the Tier-1 review already posted for the same commit.
 const AUTO_FIX_MARKER: &str = "<!-- codasaurus:auto-fix -->";
+
+/// Non-empty `(filename, patch)` pairs from a GitHub PR files response.
+fn patches_from_files(files: &[&serde_json::Value]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .filter_map(|f| {
+            let name = f["filename"].as_str()?.to_string();
+            let patch = f["patch"].as_str().unwrap_or("").to_string();
+            (!patch.is_empty()).then_some((name, patch))
+        })
+        .collect()
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn maybe_post_auto_improve(
@@ -49,18 +61,7 @@ pub(crate) async fn maybe_post_auto_improve(
     }
 
     let mut grounded_ctx = review_ctx.clone();
-    let patches: Vec<(String, String)> = llm_files
-        .iter()
-        .filter_map(|f| {
-            let name = f["filename"].as_str()?.to_string();
-            let patch = f["patch"].as_str().unwrap_or("").to_string();
-            if patch.is_empty() {
-                None
-            } else {
-                Some((name, patch))
-            }
-        })
-        .collect();
+    let patches = patches_from_files(&llm_files);
     let paths: Vec<String> = patches.iter().map(|(p, _)| p.clone()).collect();
     let mut grounding = crate::bot::grounding::build_grounding_block(&paths, &patches);
     if semantic_index_enabled {
@@ -110,18 +111,7 @@ pub(crate) async fn maybe_post_auto_improve(
         .iter()
         .filter_map(|f| f["filename"].as_str().map(str::to_string))
         .collect();
-    let file_contents: Vec<(String, String)> = llm_files
-        .iter()
-        .filter_map(|f| {
-            let name = f["filename"].as_str()?.to_string();
-            let patch = f["patch"].as_str().unwrap_or("").to_string();
-            if patch.is_empty() {
-                None
-            } else {
-                Some((name, patch))
-            }
-        })
-        .collect();
+    let file_contents = patches_from_files(&llm_files);
     let issues =
         crate::bot::provenance::reverify_llm_issues(&output.issues, &known_paths, &file_contents);
     if issues.is_empty() {
@@ -214,13 +204,13 @@ async fn post_auto_fix_suggestions(
         return Ok(());
     }
 
-    if review_exists_with_marker(
+    if review_exists(
         client,
         auth_header,
         repo_name,
         pr_number,
         head_sha,
-        AUTO_FIX_MARKER,
+        Some(AUTO_FIX_MARKER),
     )
     .await
     .unwrap_or(false)

@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -6,11 +6,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use crate::db;
+use crate::redis::StateStore;
 
 use super::errors::ApiError;
 use super::rbac;
@@ -21,19 +22,6 @@ const SESSION_MAX_AGE: &str = "604800"; // 7 days
 
 const LOGIN_RATE_LIMIT: u32 = 10;
 const LOGIN_RATE_WINDOW: Duration = Duration::from_secs(15 * 60);
-
-/// Per-process login rate limiter: `{ip}/{email}` → (attempt count, window start).
-///
-/// Not shared across replicas and resets on restart. Fine for single-node /
-/// Compose deploys. Behind a trusted reverse proxy, client IP comes from
-/// `X-Forwarded-For` (first hop). For multi-instance production, put a shared
-/// limiter in front (CDN / reverse proxy) — see `docs/configuration.md`.
-static LOGIN_ATTEMPTS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-// ---------------------------------------------------------------------------
-// Request / response types
-// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct LoginBody {
@@ -68,10 +56,6 @@ pub struct AcceptInviteBody {
     pub password: String,
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
@@ -83,10 +67,6 @@ pub fn router() -> Router<AppState> {
         .route("/invite/{token}", get(invite_info))
         .route("/invite/{token}/accept", post(accept_invite))
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Extract the session token from the Cookie header.
 pub(crate) fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -143,26 +123,31 @@ fn clear_cookie() -> String {
     cookie
 }
 
-pub(crate) use super::rate_limit::client_ip;
+fn auth_rate_key(peer: IpAddr, headers: &axum::http::HeaderMap, email: &str) -> String {
+    let ip = super::rate_limit::client_ip(peer, headers, super::rate_limit::trusted_proxies());
+    let digest = Sha256::digest(format!("{ip}\0{}", email.trim().to_lowercase()).as_bytes());
+    format!("rl:auth:{}", hex::encode(digest))
+}
 
-fn check_auth_rate_limit(headers: &axum::http::HeaderMap, email: &str) -> Result<(), ApiError> {
-    let key = format!("{}/{}", client_ip(headers), email.trim().to_lowercase());
-    let mut map = LOGIN_ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
-    let now = Instant::now();
-    map.retain(|_, (_, started)| now.duration_since(*started) < LOGIN_RATE_WINDOW);
-    let entry = map.entry(key).or_insert((0, now));
-    if now.duration_since(entry.1) >= LOGIN_RATE_WINDOW {
-        *entry = (0, now);
-    }
-    if entry.0 >= LOGIN_RATE_LIMIT {
-        let retry_after = LOGIN_RATE_WINDOW.saturating_sub(now.duration_since(entry.1));
-        return Err(ApiError::too_many_requests_after(
+async fn check_auth_rate_limit(
+    store: &StateStore,
+    peer: IpAddr,
+    headers: &axum::http::HeaderMap,
+    email: &str,
+) -> Result<(), ApiError> {
+    super::rate_limit::check(
+        store,
+        &auth_rate_key(peer, headers, email),
+        LOGIN_RATE_LIMIT,
+        LOGIN_RATE_WINDOW,
+    )
+    .await
+    .map_err(|retry_after| {
+        ApiError::too_many_requests_after(
             "Too many attempts. Try again in 15 minutes.",
             retry_after.as_secs().max(1),
-        ));
-    }
-    entry.0 += 1;
-    Ok(())
+        )
+    })
 }
 
 pub(crate) async fn require_session(
@@ -189,37 +174,35 @@ pub async fn auth_middleware(
     Ok(next.run(req).await)
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
 /// POST /api/auth/login
 #[utoipa::path(post, path = "/api/auth/login", tag = "auth", responses((status = 200, description = "OK")))]
 pub(crate) async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    check_auth_rate_limit(&headers, &body.email)?;
+    check_auth_rate_limit(&state.redis, peer.ip(), &headers, &body.email).await?;
 
     let user = db::users::verify_password(&state.pool, &body.email, &body.password)
         .await
         .map_err(|_| ApiError::unauthorized("Invalid email or password"))?
         .ok_or_else(|| ApiError::unauthorized("Invalid email or password"))?;
 
-    let cookie = if let Ok(token) = db::sessions::create_session(&state.pool, &user.email).await {
-        db::audit::log_event(
-            &state.pool,
-            "user.login",
-            Some(&user.email),
-            Some("user"),
-            None,
-        )
-        .await;
-        set_cookie(&token)
-    } else {
-        clear_cookie()
-    };
+    // A session row is the login — failing to create one must fail the
+    // request, not return 200 with a cleared cookie that looks logged out.
+    let token = db::sessions::create_session(&state.pool, &user.email)
+        .await
+        .map_err(ApiError::internal_error)?;
+    db::audit::log_event(
+        &state.pool,
+        "user.login",
+        Some(&user.email),
+        Some("user"),
+        None,
+    )
+    .await;
+    let cookie = set_cookie(&token);
 
     Ok((
         [(header::SET_COOKIE, cookie)],
@@ -241,28 +224,14 @@ pub(crate) async fn me(
     headers: axum::http::HeaderMap,
 ) -> Json<MeResponse> {
     if let Some(token) = extract_token(&headers) {
-        if let Ok(Some(email)) = db::sessions::get_session(&state.pool, &token).await {
-            let row: Option<(String, String, bool)> = {
-                let prepared = state.pool.prepare_sql(
-                    "SELECT role, auth_provider, is_bootstrap FROM users WHERE email = ?",
-                );
-                sqlx::query_as::<_, (String, String, bool)>(&prepared)
-                    .bind(&email)
-                    .fetch_optional(state.pool.as_pg())
-                    .await
-                    .ok()
-                    .flatten()
-            };
-            let (role, auth_provider, is_bootstrap) =
-                row.unwrap_or_else(|| ("viewer".into(), "local".into(), false));
-
+        if let Ok(Some(user)) = db::sessions::get_session_user(&state.pool, &token).await {
             return Json(MeResponse {
                 authenticated: true,
                 user: Some(UserInfo {
-                    email,
-                    role: rbac::normalize_role(&role).to_string(),
-                    auth_provider: Some(auth_provider),
-                    is_bootstrap,
+                    email: user.email,
+                    role: rbac::normalize_role(&user.role).to_string(),
+                    auth_provider: Some(user.auth_provider),
+                    is_bootstrap: user.is_bootstrap,
                 }),
             });
         }
@@ -289,27 +258,37 @@ pub(crate) async fn logout(
     )
 }
 
-async fn oidc_status() -> Json<serde_json::Value> {
+#[utoipa::path(get, path = "/api/auth/oidc/status", tag = "auth", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn oidc_status() -> Json<serde_json::Value> {
     Json(json!({ "enabled": crate::oidc::OidcConfig::enabled() }))
 }
 
-async fn oidc_login() -> Result<impl IntoResponse, ApiError> {
+fn oidc_login_error(err: impl std::fmt::Display) -> ApiError {
+    tracing::error!(error = %err, "failed to start OIDC sign-in");
+    ApiError::bad_request("Unable to start sign-in")
+}
+
+#[utoipa::path(get, path = "/api/auth/oidc/login", tag = "auth", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn oidc_login(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
     let cfg = crate::oidc::OidcConfig::from_env()
         .ok_or_else(|| ApiError::bad_request("OIDC is not configured"))?;
-    let (url, _state) = crate::oidc::authorization_url(&cfg)
+    let (url, _state) = crate::oidc::authorization_url(&cfg, &state.redis)
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        .map_err(oidc_login_error)?;
     Ok(axum::response::Redirect::temporary(&url))
 }
 
 #[derive(Deserialize)]
-struct OidcCallbackParams {
+pub(crate) struct OidcCallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
 }
 
-async fn oidc_callback(
+#[utoipa::path(get, path = "/api/auth/oidc/callback", tag = "auth", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn oidc_callback(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<OidcCallbackParams>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -322,7 +301,8 @@ async fn oidc_callback(
     let state_param = params
         .state
         .ok_or_else(|| ApiError::bad_request("missing state"))?;
-    let code_verifier = crate::oidc::take_pending(&state_param)
+    let code_verifier = crate::oidc::take_pending(&state.redis, &state_param)
+        .await
         .ok_or_else(|| ApiError::bad_request("invalid or expired OIDC state"))?;
     let cfg = crate::oidc::OidcConfig::from_env()
         .ok_or_else(|| ApiError::bad_request("OIDC is not configured"))?;
@@ -332,21 +312,21 @@ async fn oidc_callback(
 
     let existing = db::users::get_user_by_email(&state.pool, &email)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let user = if let Some(u) = existing {
-        u
-    } else {
+        .map_err(ApiError::internal_error)?;
+    // The user row is only needed for its side effect (create on first OIDC
+    // sign-in); the session below keys off the verified email.
+    if existing.is_none() {
         match db::invites::accept_oidc(&state.pool, &email)
             .await
-            .map_err(|e| ApiError::internal(e.to_string()))?
+            .map_err(ApiError::internal_error)?
         {
-            Some(u) => u,
+            Some(_) => {}
             None => {
                 let open_join = crate::util::env_flag("OIDC_ALLOW_OPEN_JOIN");
                 if open_join {
                     db::users::upsert_oidc_user(&state.pool, &email, "viewer")
                         .await
-                        .map_err(|e| ApiError::internal(e.to_string()))?
+                        .map_err(ApiError::internal_error)?;
                 } else {
                     return Err(ApiError::bad_request(
                         "No invite found for this email. Ask an admin for an invite link.",
@@ -354,11 +334,10 @@ async fn oidc_callback(
                 }
             }
         }
-    };
+    }
     let token = db::sessions::create_session(&state.pool, &email)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let _ = &user.role;
+        .map_err(ApiError::internal_error)?;
     db::audit::log_event(&state.pool, "user.login", Some(&email), Some("user"), None).await;
     let cookie = set_cookie(&token);
     Ok((
@@ -371,7 +350,8 @@ async fn oidc_callback(
 }
 
 /// GET /api/auth/invite/:token
-async fn invite_info(
+#[utoipa::path(get, path = "/api/auth/invite/{token}", tag = "auth", params(("token" = String, Path, description = "Invite token")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn invite_info(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -387,8 +367,10 @@ async fn invite_info(
 }
 
 /// POST /api/auth/invite/:token/accept
-async fn accept_invite(
+#[utoipa::path(post, path = "/api/auth/invite/{token}/accept", tag = "auth", params(("token" = String, Path, description = "Invite token")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn accept_invite(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Path(token): Path<String>,
     Json(body): Json<AcceptInviteBody>,
@@ -419,7 +401,7 @@ async fn accept_invite(
         e
     };
 
-    check_auth_rate_limit(&headers, &email)?;
+    check_auth_rate_limit(&state.redis, peer.ip(), &headers, &email).await?;
 
     if let Err(msg) = db::users::validate_password_policy(&body.password, &email) {
         return Err(ApiError::bad_request(msg));
@@ -447,12 +429,12 @@ async fn accept_invite(
                     return ApiError::bad_request(msg.clone());
                 }
             }
-            ApiError::internal(e.to_string())
+            ApiError::internal_error(e)
         })?;
 
     let session = db::sessions::create_session(&state.pool, &user.email)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::internal_error)?;
     db::audit::log_event(
         &state.pool,
         "user.accept",
@@ -476,11 +458,33 @@ async fn accept_invite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
 
     #[test]
     fn set_cookie_includes_httponly() {
         let c = set_cookie("abc");
         assert!(c.contains("HttpOnly"));
         assert!(c.contains("SameSite=Lax"));
+    }
+
+    #[tokio::test]
+    async fn oidc_login_redis_error_body_omits_detail() {
+        let err = oidc_login_error(anyhow::anyhow!("SENTINEL_OIDC_REDIS_DETAIL"));
+        let body = String::from_utf8(
+            err.into_response()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            !body.contains("SENTINEL_OIDC_REDIS_DETAIL"),
+            "response leaked Redis detail: {body}"
+        );
+        assert_eq!(body, r#"{"error":"Unable to start sign-in"}"#);
     }
 }

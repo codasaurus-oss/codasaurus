@@ -1,0 +1,15 @@
+# Provider-neutral gateway template. Codasaurus registers models at runtime through
+# the LiteLLM management API, so no model_list is committed here.
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: true
+router_settings:
+  num_retries: 0 # the app owns retry; do not double-retry
+  allowed_fails: 1
+  cooldown_time: 30
+  retry_after: 0
+litellm_settings:
+  request_timeout: 45 # must stay below the app's 60s client timeout
+  json_logs: true
+  drop_params: false # surface an unsupported response_format instead of silently dropping it
+  check_provider_endpoint: true

@@ -8,12 +8,12 @@ use crate::index::extract::FileIndex;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
+/// A semantically related symbol from another file.
+#[derive(Debug, Clone)]
 pub struct RelatedSymbol {
     pub file_path: String,
     pub symbol_name: String,
     pub line: i64,
-    pub signature: String,
-    pub distance: f64,
 }
 
 fn embed_text_for(symbol_name: &str, signature: Option<&str>) -> String {
@@ -44,6 +44,9 @@ fn vector_literal(v: &[f32]) -> String {
 /// Re-embed changed/new symbols for one repo, skipping unchanged ones via
 /// `content_hash`. Called from the same job that runs `store::replace_*_index`
 /// so embeddings never drift out of lockstep with the symbol graph.
+///
+/// # Errors
+/// Returns an error when the embedding provider request fails.
 pub async fn reindex_repo_embeddings(
     pool: &DbPool,
     llm_cfg: &crate::llm::LlmConfig,
@@ -60,9 +63,9 @@ pub async fn reindex_repo_embeddings(
 
     // One bulk read of the current hashes for these files, then O(1) lookups —
     // the per-symbol SELECT it replaces was one round-trip per symbol.
-    let file_paths: Vec<String> = files.iter().map(|f| f.file_path.clone()).collect();
+    let file_paths: Vec<&str> = files.iter().map(|file| file.file_path.as_str()).collect();
     let existing: std::collections::HashMap<(String, String, i64), String> = sqlx::query(
-        "SELECT file_path, symbol_name, line, content_hash FROM repo_symbol_embeddings
+        "SELECT file_path, symbol_name, line::bigint AS line, content_hash FROM repo_symbol_embeddings
          WHERE repo_full_name = $1 AND file_path = ANY($2)",
     )
     .bind(repo_full_name)
@@ -101,6 +104,40 @@ pub async fn reindex_repo_embeddings(
             });
         }
     }
+    let stale: Vec<(&str, &str, i32)> = existing
+        .keys()
+        .filter(|key| !seen.contains(*key))
+        .map(|(path, name, line)| {
+            (
+                path.as_str(),
+                name.as_str(),
+                i32::try_from(*line).unwrap_or(i32::MAX),
+            )
+        })
+        .collect();
+    if !stale.is_empty() {
+        let paths: Vec<&str> = stale.iter().map(|(path, _, _)| *path).collect();
+        let names: Vec<&str> = stale.iter().map(|(_, name, _)| *name).collect();
+        let lines: Vec<i32> = stale.iter().map(|(_, _, line)| *line).collect();
+        if let Err(error) = sqlx::query(
+            "DELETE FROM repo_symbol_embeddings
+             WHERE repo_full_name = $1
+               AND (file_path, symbol_name, line) IN (
+                   SELECT file_path, symbol_name, line
+                   FROM UNNEST($2::text[], $3::text[], $4::int[])
+                        AS stale(file_path, symbol_name, line)
+               )",
+        )
+        .bind(repo_full_name)
+        .bind(&paths)
+        .bind(&names)
+        .bind(&lines)
+        .execute(pool.as_pg())
+        .await
+        {
+            tracing::warn!(error = %error, repo = repo_full_name, "stale embedding cleanup failed");
+        }
+    }
     if pending.is_empty() {
         return Ok(());
     }
@@ -115,6 +152,11 @@ pub async fn reindex_repo_embeddings(
         if embeddings.len() != batch.len() {
             // Endpoint doesn't support embeddings, or returned a partial batch — fail
             // open for this batch rather than the whole review.
+            tracing::warn!(
+                expected = batch.len(),
+                received = embeddings.len(),
+                "embedding endpoint returned a partial batch; skipping persistence"
+            );
             continue;
         }
         let paths: Vec<String> = batch.iter().map(|p| p.file_path.to_string()).collect();
@@ -161,6 +203,9 @@ pub async fn reindex_repo_embeddings(
 /// Nearest neighbors (cosine distance) to `changed_symbols`, excluding the
 /// files the diff already touches. Caps `k` and drops weak matches so the
 /// grounding prompt doesn't fill up with noise.
+///
+/// # Errors
+/// Returns an error when the embedding provider request fails.
 pub async fn related_symbols(
     pool: &DbPool,
     llm_cfg: &crate::llm::LlmConfig,
@@ -193,7 +238,7 @@ pub async fn related_symbols(
     // the same symbol once per changed symbol, so the top-k could be k copies of one hit.
     let vectors: Vec<String> = embeddings.iter().map(|e| vector_literal(e)).collect();
     let rows = sqlx::query(
-        "SELECT nn.file_path, nn.symbol_name, nn.line, MIN(nn.distance) AS distance
+        "SELECT nn.file_path, nn.symbol_name, nn.line::bigint AS line, MIN(nn.distance) AS distance
          FROM UNNEST($1::text[]) AS q(vec),
          LATERAL (
              SELECT file_path, symbol_name, line, embedding <=> q.vec::vector AS distance
@@ -210,7 +255,7 @@ pub async fn related_symbols(
     .bind(&vectors)
     .bind(repo_full_name)
     .bind(changed_files)
-    .bind(k as i64)
+    .bind(i64::try_from(k).unwrap_or(i64::MAX))
     .bind(index_cfg.distance_threshold())
     .fetch_all(pool.as_pg())
     .await
@@ -225,8 +270,6 @@ pub async fn related_symbols(
             file_path: row.get("file_path"),
             symbol_name: row.get("symbol_name"),
             line: row.get("line"),
-            signature: String::new(),
-            distance: row.get("distance"),
         })
         .collect())
 }

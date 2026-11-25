@@ -24,7 +24,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Deserialize)]
-struct UpsertServerBody {
+pub(crate) struct UpsertServerBody {
     enabled: bool,
     /// Blank/omitted keeps the existing stored key unchanged.
     #[serde(default)]
@@ -36,35 +36,35 @@ struct UpsertServerBody {
     name: Option<String>,
 }
 
-async fn add_custom_server_id(pool: &db::DbPool, id: &str) -> Result<(), ApiError> {
-    let mut ids: Vec<String> = db::config::get_config(pool, "mcp_custom_server_ids")
-        .await?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    if !ids.iter().any(|i| i == id) {
-        ids.push(id.to_string());
+async fn update_custom_server_ids(pool: &db::DbPool, id: &str, add: bool) -> Result<(), ApiError> {
+    let raw = db::config::get_config(pool, "mcp_custom_server_ids").await?;
+    let mut ids: Vec<String> = match raw {
+        Some(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "mcp_custom_server_ids is corrupt; resetting");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+    let changed = if add {
+        if ids.iter().any(|i| i == id) {
+            false
+        } else {
+            ids.push(id.to_string());
+            true
+        }
+    } else {
+        let before = ids.len();
+        ids.retain(|i| i.as_str() != id);
+        ids.len() != before
+    };
+    if changed {
         db::config::set_config(
             pool,
             "mcp_custom_server_ids",
-            &serde_json::to_string(&ids).unwrap_or_default(),
+            &serde_json::to_string(&ids).expect("server id list is serializable"),
         )
         .await?;
     }
-    Ok(())
-}
-
-async fn remove_custom_server_id(pool: &db::DbPool, id: &str) -> Result<(), ApiError> {
-    let ids: Vec<String> = db::config::get_config(pool, "mcp_custom_server_ids")
-        .await?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    let filtered: Vec<&String> = ids.iter().filter(|i| i.as_str() != id).collect();
-    db::config::set_config(
-        pool,
-        "mcp_custom_server_ids",
-        &serde_json::to_string(&filtered).unwrap_or_default(),
-    )
-    .await?;
     Ok(())
 }
 
@@ -80,16 +80,16 @@ pub(crate) async fn list_servers(
 }
 
 /// PUT /api/mcp/servers/:id
-async fn upsert_server(
+#[utoipa::path(put, path = "/api/mcp/servers/{id}", tag = "mcp", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn upsert_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<UpsertServerBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
-
-    let is_custom = mcp::catalog::find(&id).is_none();
-    let base_url = if is_custom {
+    let custom = mcp::catalog::find(&id).is_none();
+    let base_url = if custom {
         let base_url = body
             .base_url
             .as_deref()
@@ -100,33 +100,38 @@ async fn upsert_server(
         crate::ssrf::validate_http_url_resolved(&base_url, false)
             .await
             .map_err(ApiError::bad_request)?;
-        db::config::set_config(&state.pool, &format!("mcp_{id}_base_url"), &base_url).await?;
+        Some(base_url)
+    } else {
+        None
+    };
+
+    let enabled_key = format!("mcp_{id}_enabled");
+    let api_key_key = format!("mcp_{id}_api_key");
+    let base_url_key = format!("mcp_{id}_base_url");
+    let name_key = format!("mcp_{id}_name");
+    let mut entries = vec![(
+        enabled_key.as_str(),
+        if body.enabled { "true" } else { "false" },
+    )];
+    if let Some(key) = body.api_key.as_deref() {
+        if !key.is_empty() && !key.contains('•') {
+            entries.push((api_key_key.as_str(), key));
+        }
+    }
+    if let Some(base_url) = base_url.as_deref() {
+        entries.push((base_url_key.as_str(), base_url));
         if let Some(name) = body
             .name
             .as_deref()
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            db::config::set_config(&state.pool, &format!("mcp_{id}_name"), name).await?;
+            entries.push((name_key.as_str(), name));
         }
-        add_custom_server_id(&state.pool, &id).await?;
-        base_url
-    } else {
-        String::new()
-    };
-    let _ = base_url;
-
-    db::config::set_config(
-        &state.pool,
-        &format!("mcp_{id}_enabled"),
-        if body.enabled { "true" } else { "false" },
-    )
-    .await?;
-
-    if let Some(key) = body.api_key.as_deref() {
-        if !key.is_empty() && !key.contains('•') {
-            db::config::set_config(&state.pool, &format!("mcp_{id}_api_key"), key).await?;
-        }
+    }
+    db::config::set_configs(&state.pool, &entries).await?;
+    if custom {
+        update_custom_server_ids(&state.pool, &id, true).await?;
     }
 
     db::audit::log_event(
@@ -142,19 +147,25 @@ async fn upsert_server(
 }
 
 /// DELETE /api/mcp/servers/:id
-async fn delete_server(
+#[utoipa::path(delete, path = "/api/mcp/servers/{id}", tag = "mcp", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn delete_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
-
-    db::config::delete_config(&state.pool, &format!("mcp_{id}_enabled")).await?;
-    db::config::delete_config(&state.pool, &format!("mcp_{id}_api_key")).await?;
-    if mcp::catalog::find(&id).is_none() {
-        db::config::delete_config(&state.pool, &format!("mcp_{id}_base_url")).await?;
-        db::config::delete_config(&state.pool, &format!("mcp_{id}_name")).await?;
-        remove_custom_server_id(&state.pool, &id).await?;
+    let custom = mcp::catalog::find(&id).is_none();
+    let enabled_key = format!("mcp_{id}_enabled");
+    let api_key_key = format!("mcp_{id}_api_key");
+    let base_url_key = format!("mcp_{id}_base_url");
+    let name_key = format!("mcp_{id}_name");
+    let mut keys = vec![enabled_key.as_str(), api_key_key.as_str()];
+    if custom {
+        keys.extend([base_url_key.as_str(), name_key.as_str()]);
+    }
+    db::config::delete_configs(&state.pool, &keys).await?;
+    if custom {
+        update_custom_server_ids(&state.pool, &id, false).await?;
     }
 
     db::audit::log_event(
@@ -170,21 +181,25 @@ async fn delete_server(
 }
 
 /// POST /api/mcp/:id/test — initialize + tools/list against the configured server.
-async fn test_server(
+#[utoipa::path(post, path = "/api/mcp/{id}/test", tag = "mcp", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn test_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
 
-    let base_url = db::config::get_config(&state.pool, &format!("mcp_{id}_base_url"))
-        .await?
+    let base_url_key = format!("mcp_{id}_base_url");
+    let api_key_key = format!("mcp_{id}_api_key");
+    let (stored_base_url, api_key) = tokio::join!(
+        db::config::get_config(&state.pool, &base_url_key),
+        db::config::get_config(&state.pool, &api_key_key),
+    );
+    let base_url = stored_base_url?
         .filter(|v| !v.is_empty())
         .or_else(|| mcp::catalog::find(&id).map(|e| e.base_url.to_string()))
         .ok_or_else(|| ApiError::bad_request("Server is not configured"))?;
-    let api_key = db::config::get_config(&state.pool, &format!("mcp_{id}_api_key"))
-        .await?
-        .unwrap_or_default();
+    let api_key = api_key?.unwrap_or_default();
 
     crate::ssrf::validate_http_url_resolved(&base_url, false)
         .await

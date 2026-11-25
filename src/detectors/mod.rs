@@ -299,26 +299,29 @@ pub fn run_all(parsed_files: &[ParsedFile], config: &Config, repo: Option<&str>)
     // Guidelines run via detect_remote on the bot path (GitHub Contents), not local git.
 
     // Prefer shared app DB pool so dismissals stick across replicas.
-    match LEARNING_STORE.lock() {
+    let store = match LEARNING_STORE.lock() {
         Ok(mut guard) => {
             if guard.is_none() {
                 if let Some(pool) = crate::bot::CONFIG_POOL.get() {
                     *guard = Some(LearningStore::from_pool(pool));
                 }
             }
-            if let Some(ref store) = *guard {
-                match store.filter_findings(&all.findings, repo) {
-                    Ok(filtered) => return Findings { findings: filtered },
-                    Err(e) => {
-                        eprintln!("Warning: learning store filter_findings failed: {e}; returning all unfiltered findings");
-                    }
-                }
-            }
+            guard.clone()
         }
         Err(e) => {
             eprintln!(
                 "Warning: LEARNING_STORE mutex poisoned: {e}; returning all unfiltered findings"
             );
+            None
+        }
+    };
+
+    if let Some(store) = store {
+        match store.filter_findings(&all.findings, repo) {
+            Ok(filtered) => return Findings { findings: filtered },
+            Err(e) => {
+                eprintln!("Warning: learning store filter_findings failed: {e}; returning all unfiltered findings");
+            }
         }
     }
 
@@ -415,21 +418,41 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
         || lower.contains("_spec.")
 }
 
-/// Extract the package name from an import statement. Handles @scoped/packages,
-/// submodule paths, Rust :: paths, and plain package names.
-pub(crate) fn extract_package_name(import: &str) -> Option<String> {
+pub(crate) fn registry_for_language(language: &str) -> Option<&'static str> {
+    match language {
+        "javascript" | "typescript" | "tsx" | "jsx" => Some("npm"),
+        "python" => Some("pypi"),
+        "rust" => Some("crates.io"),
+        "go" => Some("go"),
+        _ => None,
+    }
+}
+
+/// Extract the registry package or module name from an import statement.
+pub(crate) fn extract_package_name(import: &str, language: &str) -> Option<String> {
     let trimmed = import.trim();
     if trimmed.is_empty() {
         return None;
     }
 
     let trimmed = trimmed.strip_prefix("use ").unwrap_or(trimmed).trim();
-
-    // Strip leading :: for Rust (e.g. "::serde::Deserialize" -> "serde::Deserialize")
     let trimmed = trimmed.strip_prefix("::").unwrap_or(trimmed);
+    if trimmed.starts_with('.') || trimmed.starts_with('/') {
+        return None;
+    }
 
-    // Rust relative paths — these reference items within the current crate,
-    // not crates.io packages, so skip them entirely.
+    if language == "go" {
+        return Some(trimmed.to_string());
+    }
+    if language == "python" {
+        return trimmed
+            .split('.')
+            .next()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+    }
+
+    // Rust relative paths reference items within the current crate.
     if trimmed.starts_with("self::")
         || trimmed.starts_with("crate::")
         || trimmed.starts_with("super::")
@@ -437,20 +460,26 @@ pub(crate) fn extract_package_name(import: &str) -> Option<String> {
         return None;
     }
 
-    // @scoped/packages (npm)
     if trimmed.starts_with('@') {
-        let parts: Vec<&str> = trimmed.splitn(3, '/').collect();
-        if parts.len() >= 2 {
-            return Some(format!("{}/{}", parts[0], parts[1]));
+        let mut parts = trimmed.splitn(3, '/');
+        let scope = parts.next()?;
+        if let Some(package) = parts.next() {
+            return Some(format!("{scope}/{package}"));
         }
     }
 
-    // Rust :: paths ("std::collections::HashMap" -> "std")
     if trimmed.contains("::") {
-        return trimmed.split("::").next().map(|s| s.to_string());
+        return trimmed.split("::").next().map(str::to_string);
     }
 
-    // npm-style submodule paths ("lodash/fp" -> "lodash")
-    let parts: Vec<&str> = trimmed.splitn(2, '/').collect();
-    Some(parts[0].to_string())
+    trimmed.split('/').next().map(str::to_string)
+}
+
+pub(crate) fn external_imports(
+    file: &ParsedFile,
+) -> impl Iterator<Item = (&crate::parser::Import, String)> + '_ {
+    file.imports.iter().filter_map(|import| {
+        let package = extract_package_name(&import.name, &file.language)?;
+        Some((import, package))
+    })
 }

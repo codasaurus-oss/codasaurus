@@ -70,6 +70,12 @@ cargo build --release --locked
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests (with Postgres), `cargo deny`, actionlint, and a release-style build.
 
+### LLM gateway (LiteLLM)
+
+`docker compose up -d` starts the `litellm` sidecar alongside Postgres and Redis. Configure providers, models, credentials and the daily budget through Codasaurus onboarding or **Settings → LLM**. Codasaurus uses `LITELLM_MASTER_KEY` only for management calls; inference uses the model-scoped virtual key stored in the Codasaurus database. `litellm.config.yaml` carries gateway runtime settings only.
+
+LiteLLM uses a dedicated database on the same Postgres server. `LITELLM_SALT_KEY` cannot be rotated in place because doing so makes stored provider keys unreadable.
+
 ## Pull request guidelines
 
 ### Before you open a PR

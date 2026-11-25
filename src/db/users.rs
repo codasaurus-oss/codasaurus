@@ -81,6 +81,55 @@ async fn create_user_with_bootstrap(
     )
 }
 
+/// Serialize first-owner creation across processes; the advisory lock plus the
+/// in-transaction recheck keep concurrent requests from creating two owners.
+const FIRST_OWNER_LOCK: i64 = 0x636f6461_73617572;
+
+/// Create the first owner atomically, failing if an owner appeared after the
+/// caller's earlier check.
+pub async fn create_first_owner(
+    pool: &DbPool,
+    email: &str,
+    password: &str,
+) -> Result<User, sqlx::Error> {
+    let password_hash = hash_password(password)?;
+    let mut tx = pool.as_pg().begin().await?;
+    let user = create_first_owner_tx(&mut tx, email, &password_hash).await?;
+    tx.commit().await?;
+    Ok(user)
+}
+
+/// Insert the first owner inside an existing transaction. The advisory lock
+/// and recheck make a second call in any transaction fail while an owner is
+/// visible.
+pub async fn create_first_owner_tx(
+    conn: &mut sqlx::PgConnection,
+    email: &str,
+    password_hash: &str,
+) -> Result<User, sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(FIRST_OWNER_LOCK)
+        .execute(&mut *conn)
+        .await?;
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role IN ('owner', 'admin')")
+            .fetch_one(&mut *conn)
+            .await?;
+    if count > 0 {
+        return Err(sqlx::Error::Protocol("an owner already exists".into()));
+    }
+
+    sqlx::query_as(
+        "INSERT INTO users (email, password_hash, role, auth_provider, is_bootstrap)
+         VALUES ($1, $2, 'owner', 'local', TRUE) RETURNING *",
+    )
+    .bind(email)
+    .bind(password_hash)
+    .fetch_one(&mut *conn)
+    .await
+}
+
 pub async fn upsert_oidc_user(pool: &DbPool, email: &str, role: &str) -> Result<User, sqlx::Error> {
     if let Some(u) = db_fetch_optional!(pool, User, "SELECT * FROM users WHERE email = ?", email)? {
         return Ok(u);
@@ -107,12 +156,18 @@ pub async fn verify_password(
         Some(u) if u.password_hash.is_empty() => {
             return Ok(None); // OIDC-only user
         }
-        Some(u) => (
-            u.password_hash.clone(),
+        Some(User {
+            email,
+            role,
+            is_bootstrap,
+            password_hash,
+            ..
+        }) => (
+            password_hash,
             Some(UserView {
-                email: u.email,
-                role: u.role,
-                is_bootstrap: u.is_bootstrap,
+                email,
+                role,
+                is_bootstrap,
             }),
         ),
         None => (DUMMY_PASSWORD_HASH.clone(), None),
@@ -126,18 +181,12 @@ pub async fn verify_password(
     }
 }
 
-/// True if at least one owner (or legacy admin) exists.
-pub async fn admin_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    owner_exists(pool).await
-}
-
 pub async fn owner_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    let count: i64 = db_scalar!(
+    db_scalar!(
         pool,
-        i64,
-        "SELECT COUNT(*) FROM users WHERE role IN ('owner', 'admin')"
-    )?;
-    Ok(count > 0)
+        bool,
+        "SELECT EXISTS(SELECT 1 FROM users WHERE role IN ('owner', 'admin'))"
+    )
 }
 
 pub async fn owner_count(pool: &DbPool) -> Result<i64, sqlx::Error> {
@@ -176,18 +225,16 @@ pub async fn update_user_role(pool: &DbPool, id: i64, role: &str) -> Result<User
 
 /// Move the bootstrap flag to another user (must already be an owner).
 pub async fn transfer_bootstrap(pool: &DbPool, to_user_id: i64) -> Result<User, sqlx::Error> {
-    let mut tx = pool.as_pg().begin().await?;
-    sqlx::query("UPDATE users SET is_bootstrap = FALSE WHERE is_bootstrap = TRUE")
-        .execute(&mut *tx)
-        .await?;
-    let user: User = sqlx::query_as(
-        "UPDATE users SET is_bootstrap = TRUE, role = 'owner' WHERE id = $1 RETURNING *",
+    sqlx::query_as(
+        "WITH cleared AS (
+           UPDATE users SET is_bootstrap = FALSE WHERE is_bootstrap = TRUE
+         )
+         UPDATE users SET is_bootstrap = TRUE, role = 'owner'
+         WHERE id = $1 RETURNING *",
     )
     .bind(to_user_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(user)
+    .fetch_one(pool.as_pg())
+    .await
 }
 
 pub async fn delete_user(pool: &DbPool, id: i64) -> Result<bool, sqlx::Error> {

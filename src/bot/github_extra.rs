@@ -5,9 +5,36 @@ use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use anyhow::Result;
 use reqwest::header::HeaderMap;
 
-const USER_AGENT: &str = concat!("codasaurus/", env!("CARGO_PKG_VERSION"));
+use crate::bot::USER_AGENT;
 /// GitHub caps check-run annotations at 50.
 const MAX_ANNOTATIONS: usize = 50;
+
+/// POST JSON with the shared retry policy and GitHub auth headers.
+async fn post_json(
+    client: &reqwest::Client,
+    headers: &HeaderMap,
+    url: &str,
+    body: &serde_json::Value,
+    op: &'static str,
+) -> Result<reqwest::Response> {
+    retry_async(
+        &RetryConfig::api_default(),
+        op,
+        &is_reqwest_error_retryable,
+        || async {
+            client
+                .post(url)
+                .headers(headers.clone())
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/vnd.github+json")
+                .json(body)
+                .send()
+                .await
+                .map_err(Into::into)
+        },
+    )
+    .await
+}
 
 /// Split CODEOWNERS owners into user logins vs `org/team` slugs.
 pub fn split_reviewers(owners: &[String]) -> (Vec<String>, Vec<String>) {
@@ -96,22 +123,7 @@ pub async fn request_pull_reviewers(
         "team_reviewers": teams,
     });
 
-    let resp = retry_async(
-        &RetryConfig::api_default(),
-        "request_reviewers",
-        &is_reqwest_error_retryable,
-        || async {
-            client
-                .post(&url)
-                .headers(headers.clone())
-                .header("User-Agent", USER_AGENT)
-                .json(&body)
-                .send()
-                .await
-                .map_err(Into::into)
-        },
-    )
-    .await?;
+    let resp = post_json(client, headers, &url, &body, "request_reviewers").await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -248,23 +260,7 @@ pub async fn create_findings_check_run(
         "output": output,
     });
 
-    let resp = retry_async(
-        &RetryConfig::api_default(),
-        "create_check_run",
-        &is_reqwest_error_retryable,
-        || async {
-            client
-                .post(&url)
-                .headers(headers.clone())
-                .header("User-Agent", USER_AGENT)
-                .header("Accept", "application/vnd.github+json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(Into::into)
-        },
-    )
-    .await?;
+    let resp = post_json(client, headers, &url, &body, "create_check_run").await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -325,22 +321,7 @@ pub async fn apply_labels(
 
     let url = format!("https://api.github.com/repos/{repo}/issues/{pr_number}/labels");
     let body = serde_json::json!({ "labels": labels });
-    let resp = retry_async(
-        &RetryConfig::api_default(),
-        "apply_labels",
-        &is_reqwest_error_retryable,
-        || async {
-            client
-                .post(&url)
-                .headers(headers.clone())
-                .header("User-Agent", USER_AGENT)
-                .json(&body)
-                .send()
-                .await
-                .map_err(Into::into)
-        },
-    )
-    .await?;
+    let resp = post_json(client, headers, &url, &body, "apply_labels").await?;
     if !resp.status().is_success() {
         tracing::warn!(status = %resp.status(), "apply_labels failed");
     }

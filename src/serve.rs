@@ -1,13 +1,14 @@
 use anyhow::Result;
 use axum::{
     error_handling::HandleErrorLayer,
-    extract::Request,
+    extract::{ConnectInfo, Request},
     http::{header, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     BoxError, Router,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -24,6 +25,7 @@ use tower_http::{
 use crate::api::{self, AppState};
 use crate::bot;
 use crate::db;
+use crate::redis::StateStore;
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -43,7 +45,7 @@ const SYNC_KEYS: &[(&str, &str)] = &[
     // `github_jwt::resolve_private_key_from_env()`.
     ("GITHUB_WEBHOOK_SECRET", "github_webhook_secret"),
     ("GITHUB_APP_SLUG", "github_app_slug"),
-    ("OPENROUTER_API_KEY", "openrouter_api_key"),
+    ("CODASAURUS_API_KEY", "llm_api_key"),
 ];
 
 /// Start the unified server serving API + SPA + webhook on a single port.
@@ -90,7 +92,7 @@ pub async fn serve(
             .flatten();
         let db_on = db_off
             .as_deref()
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(crate::util::flag_truthy)
             .unwrap_or(false);
         let host_env_on = std::env::var_os("CODASAURUS_OFFLINE").is_some_and(|v| {
             matches!(
@@ -124,15 +126,33 @@ pub async fn serve(
         }
     }
 
-    let app = build_router(pool.clone(), bot_config);
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let redis = StateStore::connect(&redis_url).await?;
+    tracing::info!("Redis connected for shared rate limiting");
+
+    if !db::users::owner_exists(&pool).await? {
+        let secret = std::env::var("CODASAURUS_BOOTSTRAP_SECRET").unwrap_or_default();
+        if secret.len() < 16 {
+            anyhow::bail!(
+                "CODASAURUS_BOOTSTRAP_SECRET must be set to at least 16 characters \
+                 when no owner exists — set it before starting to enable first-owner creation"
+            );
+        }
+        api::bootstrap::arm(&redis, &secret, Duration::from_secs(900)).await?;
+    }
+
+    let app = build_router(pool.clone(), redis, bot_config);
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     println!("  Codasaurus server listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     // Drain the pool so Postgres sees clean disconnects on deploy/restart.
     pool.close().await;
@@ -140,8 +160,15 @@ pub async fn serve(
     Ok(())
 }
 
-fn build_router(pool: crate::db::DbPool, bot_config: Option<bot::BotConfig>) -> Router {
-    let state = AppState { pool: pool.clone() };
+pub fn build_router(
+    pool: crate::db::DbPool,
+    redis: StateStore,
+    bot_config: Option<bot::BotConfig>,
+) -> Router {
+    let state = AppState {
+        pool: pool.clone(),
+        redis: redis.clone(),
+    };
     let api = api::build_router(state);
 
     bot::set_config_pool(pool.clone());
@@ -174,11 +201,18 @@ fn build_router(pool: crate::db::DbPool, bot_config: Option<bot::BotConfig>) -> 
     // GitHub sends POST to /webhook/ (with trailing slash). Register both variants
     // to avoid any Axum trailing-slash normalization issues.
     let webhook_handler = post(
-        |headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
-            if let Err(err) = api::rate_limit::check_webhook_rate_limit(&headers) {
-                return err.into_response();
+        move |ConnectInfo(peer): ConnectInfo<SocketAddr>,
+              headers: axum::http::HeaderMap,
+              body: axum::body::Bytes| {
+            let redis = redis.clone();
+            async move {
+                if let Err(err) =
+                    api::rate_limit::check_webhook_rate_limit(&redis, peer.ip(), &headers).await
+                {
+                    return err.into_response();
+                }
+                bot::handle_webhook(headers, body).await.into_response()
             }
-            bot::handle_webhook(headers, body).await.into_response()
         },
     );
 
@@ -273,7 +307,7 @@ async fn security_headers_middleware(req: Request, next: Next) -> Response {
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
+                "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
             ),
         );
     }
@@ -288,7 +322,7 @@ async fn security_headers_middleware(req: Request, next: Next) -> Response {
     );
     // HSTS when forced, or when PUBLIC_URL (env/dashboard) is https.
     let hsts = std::env::var("CODASAURUS_HSTS")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| crate::util::flag_truthy(&v))
         .unwrap_or(false)
         || std::env::var("PUBLIC_URL")
             .map(|u| u.starts_with("https://"))
@@ -334,19 +368,22 @@ async fn resolve_bot_config(
     }
 
     // Try loading from DB (setup wizard stores here), with env var fallbacks
-    let app_id = db::config::get_config(pool, "github_app_id")
-        .await
+    let (stored_app_id, stored_private_key, stored_webhook_secret) = tokio::join!(
+        db::config::get_config(pool, "github_app_id"),
+        db::config::get_config(pool, "github_private_key"),
+        db::config::get_config(pool, "github_webhook_secret"),
+    );
+    let app_id = stored_app_id
         .ok()
         .flatten()
         .or_else(|| std::env::var("GITHUB_APP_ID").ok())?;
 
-    let private_key = match db::config::get_config(pool, "github_private_key").await {
+    let private_key = match stored_private_key {
         Ok(Some(key)) if !key.trim().is_empty() => key,
         _ => crate::github_jwt::resolve_private_key_from_env()?,
     };
 
-    let webhook_secret = db::config::get_config(pool, "github_webhook_secret")
-        .await
+    let webhook_secret = stored_webhook_secret
         .ok()
         .flatten()
         .or_else(|| std::env::var("GITHUB_WEBHOOK_SECRET").ok())
@@ -358,6 +395,14 @@ async fn resolve_bot_config(
         webhook_secret,
         host: host.to_string(),
         port,
+    })
+}
+
+/// A usable credential: non-empty and not a masked dashboard placeholder.
+fn has_llm_credential(db_key: Option<&str>, env_key: Option<&str>) -> bool {
+    [db_key, env_key].into_iter().flatten().any(|v| {
+        let v = v.trim();
+        !v.is_empty() && !v.contains('•') && !v.contains('*')
     })
 }
 
@@ -382,7 +427,7 @@ async fn health_response(require_db: bool) -> impl IntoResponse {
         false
     };
     let data_dir = crate::storage::data_dir();
-    let data_dir_ok = std::fs::create_dir_all(&data_dir).is_ok();
+    let data_dir_ok = tokio::fs::create_dir_all(&data_dir).await.is_ok();
     let status = if !data_dir_ok || (require_db && !db_ok) {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
@@ -391,25 +436,23 @@ async fn health_response(require_db: bool) -> impl IntoResponse {
 
     let mut offline = crate::bot::offline::offline_mode_from_env_and_db(None);
     let mut llm_disabled = false;
-    let mut has_llm_endpoint = false;
+    let mut db_llm_key = None;
     if let Some(pool) = crate::bot::CONFIG_POOL.get() {
-        let db_off = crate::db::config::get_config(pool, "offline_mode")
-            .await
-            .ok()
-            .flatten();
-        offline = crate::bot::offline::offline_mode_from_env_and_db(db_off.as_deref());
-        if let Ok(Some(p)) = crate::db::config::get_config(pool, "llm_provider").await {
-            llm_disabled = p.eq_ignore_ascii_case("disabled");
-        }
-        if let Ok(Some(url)) = crate::db::config::get_config(pool, "llm_base_url").await {
-            has_llm_endpoint = !url.trim().is_empty();
-        }
-        if let Ok(Some(key)) = crate::db::config::get_config(pool, "openrouter_api_key").await {
-            if !key.trim().is_empty() {
-                has_llm_endpoint = true;
-            }
-        }
+        let config =
+            db::config::get_configs(pool, &["offline_mode", "llm_provider", "llm_api_key"])
+                .await
+                .unwrap_or_default();
+        offline = crate::bot::offline::offline_mode_from_env_and_db(
+            config.get("offline_mode").map(String::as_str),
+        );
+        llm_disabled = config
+            .get("llm_provider")
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("disabled"));
+        db_llm_key = config.get("llm_api_key").cloned();
     }
+    // Compose injects the gateway key as env only, so a DB row is not guaranteed.
+    let env_llm_key = std::env::var("CODASAURUS_API_KEY").ok();
+    let has_llm_endpoint = has_llm_credential(db_llm_key.as_deref(), env_llm_key.as_deref());
     let profile =
         crate::bot::offline::resolve_egress_profile(offline, llm_disabled, has_llm_endpoint);
     let llm_allowed = !llm_disabled && has_llm_endpoint && !offline;
@@ -521,21 +564,76 @@ async fn shutdown_signal() {
 /// Needed on hosts without persistent disk so a fresh container still sees the same
 /// env the operator configured (wizard values survive via the next boot's env).
 async fn sync_env_to_db(pool: &db::DbPool) {
-    for (env_key, config_key) in SYNC_KEYS {
-        if let Ok(val) = std::env::var(env_key) {
-            if !val.is_empty() {
-                // Prefer an existing DB value over overwriting it
-                // (env vars win on a fresh container, but once the wizard
-                // stores something, let the DB value take over).
-                if db::config::get_config(pool, config_key)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_none()
-                {
-                    let _ = db::config::set_config(pool, config_key, &val).await;
-                }
-            }
+    let existing = match db::config::get_all_config(pool).await {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect::<HashMap<_, _>>(),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to read config while syncing env");
+            return;
         }
+    };
+    let candidates = SYNC_KEYS.iter().filter_map(|(env_key, config_key)| {
+        std::env::var(env_key)
+            .ok()
+            .map(|value| (*env_key, *config_key, value))
+    });
+    let missing = missing_env_sync_entries(&existing, candidates);
+    if missing.is_empty() {
+        return;
+    }
+    let entries = missing
+        .iter()
+        .map(|(_, config_key, value)| (*config_key, value.as_str()))
+        .collect::<Vec<_>>();
+    if let Err(error) = db::config::set_configs(pool, &entries).await {
+        tracing::warn!(error = %error, "failed to sync env config to database");
+    }
+}
+
+fn missing_env_sync_entries(
+    existing: &HashMap<String, String>,
+    candidates: impl IntoIterator<Item = (&'static str, &'static str, String)>,
+) -> Vec<(&'static str, &'static str, String)> {
+    candidates
+        .into_iter()
+        .filter(|(_, config_key, value)| !value.is_empty() && !existing.contains_key(*config_key))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn env_gateway_key_counts_as_llm_endpoint() {
+        assert!(has_llm_credential(None, Some("sk-env-key")));
+        assert!(has_llm_credential(Some("sk-db-key"), None));
+        assert!(!has_llm_credential(None, None));
+        assert!(!has_llm_credential(Some(""), Some("   ")));
+        assert!(!has_llm_credential(None, Some("••••••••")));
+    }
+
+    #[test]
+    fn env_sync_only_returns_missing_nonempty_values() {
+        let existing = HashMap::from([("github_app_id".to_string(), "stored".to_string())]);
+        let candidates = vec![
+            ("GITHUB_APP_ID", "github_app_id", "env".to_string()),
+            (
+                "GITHUB_WEBHOOK_SECRET",
+                "github_webhook_secret",
+                String::new(),
+            ),
+            ("CODASAURUS_API_KEY", "llm_api_key", "key".to_string()),
+        ];
+
+        let missing = missing_env_sync_entries(&existing, candidates);
+
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].0, "CODASAURUS_API_KEY");
+        assert_eq!(missing[0].1, "llm_api_key");
+        assert_eq!(missing[0].2, "key");
     }
 }

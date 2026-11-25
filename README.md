@@ -17,15 +17,15 @@
   <a href="https://github.com/codasaurus-oss/codasaurus/releases"><img src="https://img.shields.io/badge/release-v0.1.0-111827" alt="v0.1.0"></a>
   <a href="https://github.com/codasaurus-oss/codasaurus/actions/workflows/ci.yml"><img src="https://github.com/codasaurus-oss/codasaurus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.90+-dea584?logo=rust&logoColor=white" alt="Rust"></a>
-  <a href="docs/database.md"><img src="https://img.shields.io/badge/db-PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL"></a>
-  <a href="docs/run-for-free.md"><img src="https://img.shields.io/badge/host-run%20for%20%240-2ea44f" alt="Run for free"></a>
+  <a href="https://codasaurus-oss.github.io/docs/database.html"><img src="https://img.shields.io/badge/db-PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL"></a>
+  <a href="https://codasaurus-oss.github.io/docs/run-for-free.html"><img src="https://img.shields.io/badge/host-run%20for%20%240-2ea44f" alt="Run for free"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License"></a>
 </p>
 
 <p align="center">
-  <a href="docs/setup-onboarding.md"><img src="https://img.shields.io/badge/docs-onboarding-0ea5e9" alt="Onboarding"></a>
-  <a href="docs/commands.md"><img src="https://img.shields.io/badge/docs-codasaurus%20commands-8b5cf6" alt="Commands"></a>
-  <a href="docs/configuration.md"><img src="https://img.shields.io/badge/docs-config-64748b" alt="Config"></a>
+  <a href="https://codasaurus-oss.github.io/docs/setup-onboarding.html"><img src="https://img.shields.io/badge/docs-onboarding-0ea5e9" alt="Onboarding"></a>
+  <a href="https://codasaurus-oss.github.io/docs/commands.html"><img src="https://img.shields.io/badge/docs-codasaurus%20commands-8b5cf6" alt="Commands"></a>
+  <a href="https://codasaurus-oss.github.io/docs/configuration.html"><img src="https://img.shields.io/badge/docs-config-64748b" alt="Config"></a>
   <a href="https://github.com/codasaurus-oss/codasaurus/releases"><img src="https://img.shields.io/badge/changelog-releases-orange" alt="Changelog"></a>
 </p>
 
@@ -52,14 +52,22 @@ Fail-closed offline mode. Finding provenance. Learning from dismissals. Air-gap 
 
 ## Quick start
 
+Run the backend, dashboard, PostgreSQL, Redis, and LiteLLM gateway with one command:
+
 ```bash
 git clone https://github.com/codasaurus-oss/codasaurus.git
 cd codasaurus
-cp .env.example .env   # optional
-docker compose up
+cp .env.example .env
+docker compose up -d
 ```
 
-Open [http://localhost:3000](http://localhost:3000), finish the [onboarding wizard](https://codasaurus-oss.github.io/setup-onboarding/) (~5 min), install the GitHub App.
+Open [http://localhost:3000](http://localhost:3000) and finish the three-step wizard:
+
+1. **Inference** is optional. Skip it for Tier-1 checks, or choose a provider and models. The API key and model list are entered in the wizard, not in config files.
+2. **GitHub App** registers the app that receives pull-request webhooks. Use a public HTTPS URL for callbacks when running away from localhost.
+3. **Admin** creates the first owner. The setup secret is the `CODASAURUS_BOOTSTRAP_SECRET` value you set on the server. Generate one with `openssl rand -hex 32` and add it to `.env` before the first run.
+
+After setup, trigger a review by commenting `codasaurus review` on a pull request. You do not need to run the separate frontend repository for normal use; Compose builds the dashboard into the backend image.
 
 Want **$0 forever** (no trials)? [Run on always-free infra](https://codasaurus-oss.github.io/run-for-free/): Render free web + Aiven Free Postgres (or Neon). LLM optional / off.
 
@@ -74,9 +82,17 @@ Prebuilt Linux binary: [GitHub Releases](https://github.com/codasaurus-oss/codas
 
 ```text
 codasaurus serve | health | version | reset-password
+codasaurus queue replay --id <job-id>
+codasaurus queue schedule --repo <owner/repo> --pr 42 --sha <sha> --at 2026-11-25T10:00:00Z [--priority 100]
 ```
 
 ---
+
+## Testing note
+
+`cargo test` uses `DATABASE_URL`/`CODASAURUS_TEST_DATABASE_URL` and clears
+`review_jobs`. Stop the running app or use a separate test database before
+running the suite, otherwise live workers claim the test jobs.
 
 ## Docs
 
@@ -130,16 +146,20 @@ Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding co
 
 ## LLM (optional)
 
+Codasaurus talks to a [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) gateway that fronts every provider. Docker Compose starts the sidecar in database mode. Configure providers, models, provider credentials and the daily LLM budget in Codasaurus onboarding or **Settings → LLM**; Codasaurus registers the model through LiteLLM's management API and issues a model-scoped virtual key for inference. `litellm.config.yaml` contains gateway runtime settings only, not provider or model definitions.
+
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."
-# or Ollama / any OpenAI-compatible endpoint
-export CODASAURUS_BASE_URL="http://localhost:11434/v1"
-export CODASAURUS_MODEL="qwen2.5-coder:7b"
+export LITELLM_MASTER_KEY="sk-..."          # sidecar management only
+export LITELLM_DATABASE_URL="postgresql://..." # dedicated LiteLLM database
+export LITELLM_SALT_KEY="..."              # keep stable; rotating invalidates stored provider keys
+# Compose sets CODASAURUS_BASE_URL=http://litellm:4000/v1.
+# CODASAURUS_API_KEY is an optional legacy/direct-endpoint inference credential;
+# dashboard-managed setup stores a virtual key in the Codasaurus database.
 ```
 
-Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
+A positive `llm_daily_budget_usd` is enforced by LiteLLM on the virtual key with a one-day reset window. Empty or `0` means unlimited. Codasaurus spend figures are telemetry, not billing truth. Any OpenAI-compatible `/v1` endpoint still works for inference, but managed models and gateway-enforced budgets require the LiteLLM sidecar and its management database.
 
-**Multi-provider / fallback:** `CODASAURUS_BASE_URL` accepts any OpenAI-compatible `/v1` endpoint, including a self-hosted [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) proxy — point Codasaurus at LiteLLM and it handles routing across OpenAI/Anthropic/Azure/Bedrock/etc. For a lighter setup with no extra service, set `CODASAURUS_FALLBACK_BASE_URL` (+ optional `CODASAURUS_FALLBACK_API_KEY` / `CODASAURUS_FALLBACK_MODEL`) to a second provider — Codasaurus automatically retries there if the primary endpoint fails.
+Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
 
 ---
 

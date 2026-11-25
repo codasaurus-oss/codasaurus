@@ -81,7 +81,12 @@ pub fn parse_unified_diff(path: &str, patch: &str) -> Result<ParsedFile> {
     }
 
     if lines.is_empty() {
-        return parse_file(path, patch);
+        return Ok(parse_lines(
+            path,
+            detect_language(path),
+            String::new(),
+            Vec::new(),
+        ));
     }
 
     let language = detect_language(path);
@@ -141,6 +146,9 @@ fn detect_language(path: &str) -> String {
 
 /// Extract import statements from parsed lines using regex patterns per language
 fn extract_imports(language: &str, lines: &[SourceLine]) -> Vec<Import> {
+    if language == "go" {
+        return extract_go_imports(lines);
+    }
     let patterns = IMPORT_PATTERNS
         .get(language)
         .map(|v| v.as_slice())
@@ -173,6 +181,52 @@ fn extract_imports(language: &str, lines: &[SourceLine]) -> Vec<Import> {
     imports
 }
 
+fn extract_go_imports(lines: &[SourceLine]) -> Vec<Import> {
+    let mut imports = Vec::new();
+    let mut in_block = false;
+    for line in lines {
+        let trimmed = line.content.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed == "import (" {
+            in_block = true;
+            continue;
+        }
+        if in_block && trimmed == ")" {
+            in_block = false;
+            continue;
+        }
+        let declaration = if in_block {
+            trimmed
+        } else {
+            trimmed
+                .strip_prefix("import")
+                .and_then(|rest| {
+                    rest.chars()
+                        .next()
+                        .filter(|next| next.is_whitespace() || *next == '(')
+                        .map(|_| rest.trim())
+                })
+                .unwrap_or("")
+        };
+        let Some(path) = declaration.find('"').and_then(|start| {
+            declaration[start + 1..]
+                .find('"')
+                .map(|end| &declaration[start + 1..start + 1 + end])
+        }) else {
+            continue;
+        };
+        let byte_offset = line.content.find(path).unwrap_or(0);
+        imports.push(Import {
+            name: path.to_string(),
+            line: line.number,
+            column: line.content[..byte_offset].chars().count(),
+        });
+    }
+    imports
+}
+
 struct ImportPattern {
     regex: regex::Regex,
 }
@@ -185,40 +239,26 @@ impl ImportPattern {
     }
 }
 
+const JS_IMPORT_PATTERNS: &[&str] = &[
+    r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s+['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#,
+    r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#,
+    r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#,
+];
+
 static IMPORT_PATTERNS: LazyLock<HashMap<&'static str, Vec<ImportPattern>>> = LazyLock::new(|| {
     let mut m = HashMap::new();
-    m.insert("javascript", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
-    m.insert("jsx", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'']+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
-    m.insert("typescript", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
-    m.insert("tsx", vec![
-        ImportPattern::new(r#"(?:import|export)\s+(?:\w+\s*,?\s*)?\{\s*[\w\s,]*\}\s*from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\*\s+as\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"(?:const|let|var)\s+\w+\s*=\s*require\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s*\(\s*['"](?P<pkg>[^'"]+)['"]"#),
-        ImportPattern::new(r#"import\s+\w+\s+from\s+['"](?P<pkg>[^'"]+)['"]"#),
-    ]);
+    let js_patterns = || {
+        JS_IMPORT_PATTERNS
+            .iter()
+            .map(|p| ImportPattern::new(p))
+            .collect()
+    };
+    for lang in ["javascript", "jsx", "typescript", "tsx"] {
+        m.insert(lang, js_patterns());
+    }
     m.insert(
         "python",
         vec![
@@ -231,13 +271,6 @@ static IMPORT_PATTERNS: LazyLock<HashMap<&'static str, Vec<ImportPattern>>> = La
         vec![
             ImportPattern::new(r"^\s*use\s+(?:::)?(?P<pkg>[\w:]+)"),
             ImportPattern::new(r"^\s*extern\s+crate\s+(?P<pkg>\w+)"),
-        ],
-    );
-    m.insert(
-        "go",
-        vec![
-            ImportPattern::new(r#"^\s*import\s+["](?P<pkg>[^"]+)["]"#),
-            ImportPattern::new(r#"^\s*import\s+\w+\s+["](?P<pkg>[^"]+)["]"#),
         ],
     );
     m.insert(
@@ -357,5 +390,28 @@ const express = require('express');"#;
         assert!(!parsed.raw_content.contains("@@"));
         assert!(!parsed.raw_content.contains("+import"));
         assert!(parsed.lines.iter().any(|line| line.number == 22));
+    }
+
+    #[test]
+    fn deletion_only_diff_does_not_parse_patch_metadata_as_source() {
+        let patch = "@@ -1,2 +0,0 @@\n-old_call();\n-old_import();\n";
+        let parsed = parse_unified_diff("src/example.ts", patch).unwrap();
+
+        assert!(parsed.lines.is_empty());
+        assert!(parsed.raw_content.is_empty());
+        assert!(parsed.imports.is_empty());
+    }
+
+    #[test]
+    fn go_block_imports_include_aliases_and_blank_imports() {
+        let content = "package main\n\nimport (\n\t\"fmt\"\n\talias \"github.com/example/pkg\"\n\t_ \"embed\"\n)\n";
+        let parsed = parse_file("main.go", content).unwrap();
+        let names: Vec<&str> = parsed
+            .imports
+            .iter()
+            .map(|import| import.name.as_str())
+            .collect();
+
+        assert_eq!(names, vec!["fmt", "github.com/example/pkg", "embed"]);
     }
 }

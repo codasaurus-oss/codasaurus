@@ -1,8 +1,10 @@
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::net::SocketAddr;
+use std::time::Duration;
 
 use crate::bot;
 use crate::db;
@@ -19,25 +21,13 @@ async fn require_setup_open_or_admin(
 ) -> Result<(), ApiError> {
     let owner_exists = db::users::owner_exists(&state.pool)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::internal_error)?;
     if !owner_exists {
         return Ok(());
     }
     super::rbac::require_owner(state, headers).await?;
     Ok(())
 }
-
-/// Wizard detail endpoints: open before first owner; owner-only after bootstrap.
-async fn require_setup_wizard_access(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(), ApiError> {
-    require_setup_open_or_admin(state, headers).await
-}
-
-// ---------------------------------------------------------------------------
-// Request / response types
-// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct DatabaseBody {
@@ -47,15 +37,226 @@ pub struct DatabaseBody {
 
 #[derive(Deserialize)]
 pub struct LlmBody {
-    pub provider: String, // "openrouter" | "ollama" | "custom"
+    pub provider: String, // "litellm" | "disabled"
     pub api_key: Option<String>,
     pub model: Option<String>,
-    pub base_url: Option<String>,
+    pub model_cheap: Option<String>,
+    pub embedding_model: Option<String>,
+    /// Gateway-managed model definition. When present, Codasaurus registers it
+    /// in LiteLLM and stores only the alias plus a scoped virtual key.
+    #[serde(default)]
+    pub upstream_provider: Option<String>,
+    #[serde(default)]
+    pub upstream_model: Option<String>,
+    #[serde(default)]
+    pub upstream_model_cheap: Option<String>,
+    #[serde(default)]
+    pub upstream_model_embedding: Option<String>,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub model_alias: Option<String>,
+}
+
+/// LiteLLM needs an explicit provider prefix even for names containing `/`.
+fn upstream_model_name(provider: &str, upstream: &str) -> String {
+    let prefix = format!("{provider}/");
+    if upstream.starts_with(&prefix) {
+        upstream.to_string()
+    } else {
+        format!("{prefix}{upstream}")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ManagedModel {
+    alias: String,
+    id: String,
+    upstream: String,
+}
+
+#[derive(Debug)]
+struct ProvisionedModels {
+    primary: ManagedModel,
+    cheap: Option<ManagedModel>,
+    embedding: Option<ManagedModel>,
+    virtual_key: String,
+}
+
+/// Register each selected role and issue one virtual key scoped to all aliases.
+async fn provision_models(
+    client: &crate::llm::gateway::GatewayClient,
+    body: &LlmBody,
+    current_ids: [Option<&str>; 3],
+    old_key: Option<&str>,
+    daily_budget_usd: f64,
+) -> Result<ProvisionedModels, ApiError> {
+    let provider = body.upstream_provider.as_deref().unwrap_or("").trim();
+    let upstream = body.upstream_model.as_deref().unwrap_or("").trim();
+    let key = body.api_key.as_deref().unwrap_or("").trim();
+    if provider.is_empty() || upstream.is_empty() {
+        return Err(ApiError::bad_request(
+            "Provider and review model are required to register a model",
+        ));
+    }
+    if key.is_empty() {
+        return Err(ApiError::bad_request("A provider API key is required"));
+    }
+
+    let primary_alias = body
+        .model_alias
+        .as_deref()
+        .or(body.model.as_deref())
+        .unwrap_or("codasaurus-review")
+        .trim();
+    let mut selections = vec![(primary_alias.to_string(), upstream.to_string(), "text")];
+    if let Some(upstream) = body.upstream_model_cheap.as_deref().map(str::trim) {
+        if !upstream.is_empty() {
+            let alias = body
+                .model_cheap
+                .as_deref()
+                .unwrap_or("codasaurus-cheap")
+                .trim();
+            selections.push((alias.to_string(), upstream.to_string(), "text"));
+        }
+    }
+    if let Some(upstream) = body.upstream_model_embedding.as_deref().map(str::trim) {
+        if !upstream.is_empty() {
+            let alias = body
+                .embedding_model
+                .as_deref()
+                .unwrap_or("codasaurus-embedding")
+                .trim();
+            selections.push((alias.to_string(), upstream.to_string(), "embedding"));
+        }
+    }
+
+    let catalog = client
+        .discover_models(provider, key, body.api_base.as_deref())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "gateway model discovery failed");
+            ApiError::bad_request("Could not load the selected provider's models")
+        })?;
+    if selections
+        .iter()
+        .any(|(alias, _, _)| alias.trim().is_empty())
+    {
+        return Err(ApiError::bad_request("Model aliases cannot be blank"));
+    }
+    for (_, upstream, mode) in &selections {
+        let name = upstream
+            .strip_prefix(provider)
+            .and_then(|name| name.strip_prefix('/'))
+            .unwrap_or(upstream);
+        let selected_mode = catalog
+            .iter()
+            .find(|model| model.name == name)
+            .map(|model| model.mode.as_str());
+        let valid = match *mode {
+            "embedding" => selected_mode.is_some_and(crate::llm::gateway::is_embedding_model_mode),
+            _ => selected_mode.is_some_and(crate::llm::gateway::is_text_model_mode),
+        };
+        if !valid {
+            return Err(ApiError::bad_request(format!(
+                "The selected model is not available for this {mode} role"
+            )));
+        }
+    }
+
+    let api_base = body
+        .api_base
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut created = Vec::new();
+    let result: Result<ProvisionedModels, ApiError> = async {
+        let mut models = Vec::with_capacity(selections.len());
+        for (index, (alias, upstream, _)) in selections.into_iter().enumerate() {
+            let request = crate::llm::gateway::ModelRequest {
+                alias: alias.clone(),
+                upstream: upstream_model_name(provider, &upstream),
+                api_key: key.to_string(),
+                api_base: api_base.clone(),
+            };
+            let id = match current_ids[index] {
+                Some(id) => {
+                    client.update_model(id, request).await.map_err(|error| {
+                        tracing::error!(error = %error, "gateway model update failed");
+                        ApiError::bad_request("Could not update the model in the gateway")
+                    })?;
+                    id.to_string()
+                }
+                None => {
+                    let id = client.register_model(request).await.map_err(|error| {
+                        tracing::error!(error = %error, "gateway model registration failed");
+                        ApiError::bad_request("Could not register the model in the gateway")
+                    })?;
+                    created.push(id.clone());
+                    id
+                }
+            };
+            models.push(ManagedModel {
+                alias,
+                id,
+                upstream: upstream_model_name(provider, &upstream),
+            });
+        }
+        let aliases: Vec<String> = models.iter().map(|model| model.alias.clone()).collect();
+        let virtual_key = client
+            .issue_key_for_models(&aliases, daily_budget_usd)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "gateway key issuance failed");
+                ApiError::bad_request("Could not issue a gateway key for the models")
+            })?;
+        let mut models = models.into_iter();
+        Ok(ProvisionedModels {
+            primary: models
+                .next()
+                .expect("primary model selection is always present"),
+            cheap: models.next(),
+            embedding: models.next(),
+            virtual_key,
+        })
+    }
+    .await;
+    let provisioned = match result {
+        Ok(provisioned) => provisioned,
+        Err(error) => {
+            for id in created {
+                if let Err(cleanup_error) = client.delete_model(&id).await {
+                    tracing::warn!(error = %cleanup_error, "could not remove a partially registered model");
+                }
+            }
+            return Err(error);
+        }
+    };
+    if let Some(old) = old_key.filter(|key| !key.is_empty() && *key != provisioned.virtual_key) {
+        if let Err(error) = client.revoke_key(old).await {
+            tracing::warn!(error = %error, "could not revoke the previous gateway key");
+        }
+    }
+    Ok(provisioned)
+}
+
+#[derive(Deserialize)]
+pub struct LlmDiscoverBody {
+    pub provider: String,
+    pub api_key: String,
+    #[serde(default)]
+    pub api_base: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct LlmTestParams {
     pub test: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct LlmConfigParams {
+    pub provider: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -116,15 +317,12 @@ pub struct AdminBody {
     pub password: String,
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(setup_status))
         .route("/database", get(get_database_status).post(setup_database))
         .route("/llm", get(get_llm_config).post(setup_llm))
+        .route("/llm/discover", post(discover_llm_models))
         .route("/github/manifest-page", get(github_manifest_page))
         .route("/github/manifest-url", get(github_manifest_url))
         .route("/github", post(setup_github))
@@ -135,10 +333,6 @@ pub fn router() -> Router<AppState> {
         )
         .route("/admin", post(setup_admin))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct SetupStatus {
@@ -155,6 +349,15 @@ pub struct SetupStatus {
     pub public_url: String,
 }
 
+/// `llm_provider=disabled` is a deliberate opt-out and completes the step;
+/// every other case needs a config that can actually build (a model alias).
+fn llm_step_complete(provider: Option<&str>, configured: bool) -> bool {
+    match provider {
+        Some(p) if p.eq_ignore_ascii_case("disabled") => true,
+        _ => configured,
+    }
+}
+
 /// GET /api/setup/status — check which setup steps have been completed.
 #[utoipa::path(get, path = "/api/setup/status", tag = "setup", responses((status = 200, description = "OK")))]
 pub(crate) async fn setup_status(
@@ -163,41 +366,22 @@ pub(crate) async fn setup_status(
 ) -> Result<Json<SetupStatus>, ApiError> {
     use db::config::get_config;
 
-    // Serving implies Postgres is already connected; also honor wizard / env markers.
     let database = true;
-
-    // Check both DB config and env vars for GitHub. If GITHUB_APP_ID is set
-    // in the environment, the bot is already configured at startup — no need
-    // to create a new GitHub App through the manifest flow.
-    let github = get_config(&state.pool, "github_app_id")
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-        || crate::util::env_set("GITHUB_APP_ID");
-
-    let llm = get_config(&state.pool, "llm_provider")
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-        || crate::util::env_set("OPENROUTER_API_KEY");
-
-    let admin: bool = crate::db::db_scalar!(
-        &state.pool,
-        i64,
-        "SELECT COUNT(*) FROM users WHERE role IN ('owner', 'admin')"
-    )
-    .map(|count| count > 0)
-    .unwrap_or(false);
-
+    let (github_id, llm_provider, llm_configured, admin, slug, public_url) = tokio::join!(
+        get_config(&state.pool, "github_app_id"),
+        get_config(&state.pool, "llm_provider"),
+        crate::llm::LlmConfig::from_db_or_env(Some(&state.pool)),
+        db::users::owner_exists(&state.pool),
+        get_config(&state.pool, "github_app_slug"),
+        resolve_public_url(&state, &headers),
+    );
+    let github = github_id.ok().flatten().is_some() || crate::util::env_set("GITHUB_APP_ID");
+    let llm_provider = llm_provider.ok().flatten();
+    let llm = llm_step_complete(llm_provider.as_deref(), llm_configured.is_some());
+    let admin = admin?;
     let complete = database && llm && github && admin;
 
-    let owner_exists = admin;
-    // Slug lives in DB after the manifest flow; env-configured deploys may
-    // only have GITHUB_APP_SLUG until the next boot syncs it into the DB.
-    let mut github_install_url = get_config(&state.pool, "github_app_slug")
-        .await
+    let mut github_install_url = slug
         .ok()
         .flatten()
         .or_else(|| {
@@ -207,7 +391,7 @@ pub(crate) async fn setup_status(
                 .filter(|s| !s.is_empty())
         })
         .map(|slug| format!("https://github.com/apps/{slug}/installations/new"));
-    if owner_exists
+    if admin
         && super::rbac::current_user(&state.pool, &headers)
             .await
             .is_err()
@@ -222,26 +406,27 @@ pub(crate) async fn setup_status(
         admin,
         complete,
         github_install_url,
-        public_url: resolve_public_url(&state, &headers).await,
+        public_url,
     }))
 }
 
 /// GET /api/setup/database — live Postgres connection summary for the wizard.
-async fn get_database_status(
+#[utoipa::path(get, path = "/api/setup/database", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_database_status(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_setup_wizard_access(&state, &headers).await?;
+    require_setup_open_or_admin(&state, &headers).await?;
     state
         .pool
         .ping()
         .await
-        .map_err(|e| ApiError::internal(format!("Postgres ping failed: {e}")))?;
+        .map_err(|e| ApiError::internal_error(format!("Postgres ping failed: {e}")))?;
 
     let (version,): (String,) = sqlx::query_as("SELECT version()")
         .fetch_one(state.pool.as_pg())
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::internal_error)?;
 
     let short_version = version
         .split_whitespace()
@@ -286,7 +471,8 @@ fn redact_pg_url(raw: &str) -> (String, String) {
 }
 
 /// POST /api/setup/database
-async fn setup_database(
+#[utoipa::path(post, path = "/api/setup/database", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_database(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<DatabaseBody>,
@@ -345,169 +531,381 @@ async fn setup_database(
 }
 
 /// GET /api/setup/llm — return current LLM config from DB + env vars.
-async fn get_llm_config(
+#[utoipa::path(get, path = "/api/setup/llm", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn get_llm_config(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(params): Query<LlmConfigParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_setup_wizard_access(&state, &headers).await?;
-    use db::config::get_config;
-
-    let provider = get_config(&state.pool, "llm_provider")
+    require_setup_open_or_admin(&state, &headers).await?;
+    let entries = db::config::get_all_config(&state.pool)
         .await
-        .ok()
-        .flatten()
-        .or_else(|| {
-            if crate::util::env_set("OPENROUTER_API_KEY") {
-                Some("openrouter".into())
-            } else if crate::util::env_set("CODASAURUS_BASE_URL") {
-                Some("custom".into())
-            } else {
-                None
+        .unwrap_or_default();
+    let value = |key: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.value.as_str())
+    };
+    let setting = |key: &str, env: &str| {
+        value(key)
+            .map(str::trim)
+            .filter(|value| crate::llm::usable_secret(value))
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::var(env)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| crate::llm::usable_secret(value))
+            })
+    };
+
+    let gateway = crate::llm::gateway::GatewayClient::from_env();
+    let selected_provider = params
+        .provider
+        .map(|provider| provider.trim().to_string())
+        .filter(|provider| !provider.is_empty())
+        .or_else(|| value("llm_upstream_provider").map(str::to_string));
+    let (models, providers, catalog) = tokio::join!(
+        async {
+            match gateway.as_ref() {
+                Some(client) => client
+                    .list_models()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|model| json!({"id": model.id, "name": model.name}))
+                    .collect(),
+                None => Vec::new(),
             }
-        });
-
-    let api_key = get_config(&state.pool, "openrouter_api_key")
-        .await
-        .ok()
-        .flatten()
-        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-        .map(|_| "••••••••".to_string()); // never expose full key
-
-    let model = get_config(&state.pool, "llm_model")
-        .await
-        .ok()
-        .flatten()
-        .or_else(|| std::env::var("CODASAURUS_MODEL").ok());
-
-    let base_url = get_config(&state.pool, "llm_base_url")
-        .await
-        .ok()
-        .flatten()
-        .or_else(|| std::env::var("CODASAURUS_BASE_URL").ok());
+        },
+        async {
+            match gateway.as_ref() {
+                Some(client) => client
+                    .list_providers()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|provider| json!({"id": provider.id, "name": provider.name}))
+                    .collect(),
+                None => Vec::new(),
+            }
+        },
+        async {
+            match (gateway.as_ref(), selected_provider.as_deref()) {
+                (Some(client), Some(provider)) => client
+                    .list_model_catalog(provider)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|model| json!({"name": model.name, "mode": model.mode}))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        },
+    );
+    let provider = match value("llm_provider") {
+        Some(provider) if provider.eq_ignore_ascii_case("disabled") => Some("disabled".to_string()),
+        Some(_) => Some("litellm".to_string()),
+        None if crate::util::env_set("CODASAURUS_API_KEY")
+            || crate::util::env_set("CODASAURUS_BASE_URL") =>
+        {
+            Some("litellm".to_string())
+        }
+        None => None,
+    };
+    let api_key = value("llm_api_key").is_some_and(crate::llm::usable_secret)
+        || std::env::var("CODASAURUS_API_KEY").is_ok_and(|value| crate::llm::usable_secret(&value));
+    let api_key = api_key.then(|| "••••••••".to_string());
 
     Ok(Json(json!({
         "provider": provider,
         "api_key": api_key,
-        "model": model,
-        "base_url": base_url,
+        "model": setting("llm_model", "CODASAURUS_MODEL"),
+        "model_cheap": setting("llm_model_cheap", "CODASAURUS_MODEL_CHEAP"),
+        "embedding_model": setting("llm_embedding_model", "CODASAURUS_EMBEDDING_MODEL"),
+        "upstream_provider": value("llm_upstream_provider"),
+        "upstream_model": value("llm_upstream_model"),
+        "upstream_model_cheap": value("llm_upstream_model_cheap"),
+        "upstream_model_embedding": value("llm_upstream_model_embedding"),
+        "models": models,
+        "providers": providers,
+        "catalog": catalog,
+    })))
+}
+
+/// POST /api/setup/llm/discover — list the selected provider's models through LiteLLM.
+#[utoipa::path(post, path = "/api/setup/llm/discover", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn discover_llm_models(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<LlmDiscoverBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_setup_open_or_admin(&state, &headers).await?;
+    let provider = body.provider.trim();
+    let api_key = body.api_key.trim();
+    if provider.is_empty() || api_key.is_empty() {
+        return Err(ApiError::bad_request(
+            "Provider and API key are required to load models",
+        ));
+    }
+    let client = crate::llm::gateway::GatewayClient::from_env().ok_or_else(|| {
+        ApiError::bad_request(
+            "Gateway management is not configured. Set LITELLM_MASTER_KEY and CODASAURUS_BASE_URL.",
+        )
+    })?;
+    let models = client
+        .discover_models(provider, api_key, body.api_base.as_deref())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "gateway model discovery failed");
+            ApiError::bad_request("Could not load models from the selected provider")
+        })?;
+    Ok(Json(json!({
+        "models": models
+            .into_iter()
+            .map(|model| json!({"name": model.name, "mode": model.mode}))
+            .collect::<Vec<_>>(),
     })))
 }
 
 /// POST /api/setup/llm?test=true
-async fn setup_llm(
+#[utoipa::path(post, path = "/api/setup/llm", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_llm(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<LlmTestParams>,
     Json(body): Json<LlmBody>,
 ) -> Result<Json<SetupResponse>, ApiError> {
     require_setup_open_or_admin(&state, &headers).await?;
-    let base_url = body.base_url.as_deref().unwrap_or("");
+    let provider = match body.provider.as_str() {
+        "litellm" | "disabled" => body.provider.as_str(),
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "Unsupported LLM provider: {other}. Use litellm or disabled."
+            )))
+        }
+    };
     let api_key = body.api_key.as_deref().unwrap_or("");
 
-    // SSRF guard for user-supplied endpoints
-    if !base_url.is_empty() {
-        let allow_loopback = body.provider == "ollama";
-        ssrf::validate_llm_base_url_resolved(base_url, allow_loopback)
-            .await
-            .map_err(ApiError::bad_request)?;
+    let (stored_model_id, stored_cheap_id, stored_embedding_id, stored_key, daily_budget_usd) = tokio::join!(
+        db::config::get_config(&state.pool, "llm_gateway_model_id"),
+        db::config::get_config(&state.pool, "llm_gateway_model_id_cheap"),
+        db::config::get_config(&state.pool, "llm_gateway_model_id_embedding"),
+        db::config::get_config(&state.pool, "llm_api_key"),
+        crate::llm::budget::daily_budget_usd(Some(&state.pool)),
+    );
+    let stored_model_id = stored_model_id
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty());
+    let stored_cheap_id = stored_cheap_id
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty());
+    let stored_embedding_id = stored_embedding_id
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty());
+    let stored_key = stored_key.ok().flatten();
+    let wants_managed = body.upstream_provider.is_some()
+        || body.upstream_model.is_some()
+        || body.upstream_model_cheap.is_some()
+        || body.upstream_model_embedding.is_some();
+
+    // Gateway-managed setup: register/update the selected roles and keep only a scoped virtual key.
+    let managed = if provider == "litellm" && wants_managed {
+        let client = crate::llm::gateway::GatewayClient::from_env().ok_or_else(|| {
+            ApiError::bad_request(
+                "Gateway management is not configured. Set LITELLM_MASTER_KEY and CODASAURUS_BASE_URL.",
+            )
+        })?;
+        Some(
+            provision_models(
+                &client,
+                &body,
+                [
+                    stored_model_id.as_deref(),
+                    stored_cheap_id.as_deref(),
+                    stored_embedding_id.as_deref(),
+                ],
+                stored_key.as_deref(),
+                daily_budget_usd,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    if provider == "disabled" {
+        let mut deleted = true;
+        for id in [&stored_model_id, &stored_cheap_id, &stored_embedding_id]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(client) = crate::llm::gateway::GatewayClient::from_env() {
+                if let Err(error) = client.delete_model(id).await {
+                    tracing::warn!(error = %error, "could not delete managed gateway model");
+                    deleted = false;
+                }
+            }
+        }
+        if deleted {
+            if let (Some(client), Some(key)) = (
+                crate::llm::gateway::GatewayClient::from_env(),
+                stored_key.as_deref().filter(|key| !key.is_empty()),
+            ) {
+                if let Err(error) = client.revoke_key(key).await {
+                    tracing::warn!(error = %error, "could not revoke gateway key on disable");
+                }
+            }
+            db::config::set_configs(
+                &state.pool,
+                &[
+                    ("llm_gateway_model_id", ""),
+                    ("llm_gateway_model_id_cheap", ""),
+                    ("llm_gateway_model_id_embedding", ""),
+                    ("llm_api_key", ""),
+                ],
+            )
+            .await?;
+            db::config::apply_setting_to_env("llm_api_key", "");
+        }
     }
 
-    // Always store the config (+ mirror into process env for immediate ask/review use).
-    db::config::set_config(&state.pool, "llm_provider", &body.provider).await?;
-    if !api_key.is_empty() {
-        db::config::set_config(&state.pool, "openrouter_api_key", api_key).await?;
-        db::config::apply_setting_to_env("openrouter_api_key", api_key);
+    let mut entries = vec![("llm_provider", provider)];
+    if let Some(managed) = &managed {
+        let cheap_alias = managed
+            .cheap
+            .as_ref()
+            .map(|model| model.alias.as_str())
+            .unwrap_or("");
+        let embedding_alias = managed
+            .embedding
+            .as_ref()
+            .map(|model| model.alias.as_str())
+            .unwrap_or("");
+        let cheap_id = managed
+            .cheap
+            .as_ref()
+            .map(|model| model.id.as_str())
+            .unwrap_or("");
+        let embedding_id = managed
+            .embedding
+            .as_ref()
+            .map(|model| model.id.as_str())
+            .unwrap_or("");
+        let upstream_provider = body.upstream_provider.as_deref().unwrap_or("").trim();
+        entries.extend([
+            ("llm_model", managed.primary.alias.as_str()),
+            ("llm_model_cheap", cheap_alias),
+            ("llm_embedding_model", embedding_alias),
+            ("llm_api_key", managed.virtual_key.as_str()),
+            ("llm_gateway_model_id", managed.primary.id.as_str()),
+            ("llm_gateway_model_id_cheap", cheap_id),
+            ("llm_gateway_model_id_embedding", embedding_id),
+            ("llm_upstream_provider", upstream_provider),
+            ("llm_upstream_model", managed.primary.upstream.as_str()),
+            (
+                "llm_upstream_model_cheap",
+                managed
+                    .cheap
+                    .as_ref()
+                    .map(|model| model.upstream.as_str())
+                    .unwrap_or(""),
+            ),
+            (
+                "llm_upstream_model_embedding",
+                managed
+                    .embedding
+                    .as_ref()
+                    .map(|model| model.upstream.as_str())
+                    .unwrap_or(""),
+            ),
+        ]);
+        db::config::apply_setting_to_env("llm_model", &managed.primary.alias);
+        db::config::apply_setting_to_env("llm_model_cheap", cheap_alias);
+        db::config::apply_setting_to_env("llm_embedding_model", embedding_alias);
+        db::config::apply_setting_to_env("llm_api_key", &managed.virtual_key);
+    } else {
+        // A masked placeholder from GET /api/setup/llm must not overwrite the real key.
+        if crate::llm::usable_secret(api_key) {
+            entries.push(("llm_api_key", api_key));
+            db::config::apply_setting_to_env("llm_api_key", api_key);
+        }
+        if let Some(model) = &body.model {
+            entries.push(("llm_model", model.as_str()));
+            db::config::apply_setting_to_env("llm_model", model);
+        }
+        if let Some(model_cheap) = &body.model_cheap {
+            entries.push(("llm_model_cheap", model_cheap.trim()));
+            db::config::apply_setting_to_env("llm_model_cheap", model_cheap.trim());
+        }
+        if let Some(embedding_model) = &body.embedding_model {
+            entries.push(("llm_embedding_model", embedding_model.trim()));
+            db::config::apply_setting_to_env("llm_embedding_model", embedding_model.trim());
+        }
     }
-    if let Some(model) = &body.model {
-        db::config::set_config(&state.pool, "llm_model", model).await?;
-        db::config::apply_setting_to_env("llm_model", model);
-    }
-    if !base_url.is_empty() {
-        db::config::set_config(&state.pool, "llm_base_url", base_url).await?;
-        db::config::apply_setting_to_env("llm_base_url", base_url);
+    db::config::set_configs(&state.pool, &entries).await?;
+
+    if let Some(managed) = &managed {
+        let current_ids = [
+            Some(managed.primary.id.as_str()),
+            managed.cheap.as_ref().map(|model| model.id.as_str()),
+            managed.embedding.as_ref().map(|model| model.id.as_str()),
+        ];
+        for old_id in [&stored_model_id, &stored_cheap_id, &stored_embedding_id]
+            .into_iter()
+            .flatten()
+        {
+            if !current_ids.contains(&Some(old_id.as_str())) {
+                if let Some(client) = crate::llm::gateway::GatewayClient::from_env() {
+                    if let Err(error) = client.delete_model(old_id).await {
+                        tracing::warn!(error = %error, "could not remove a replaced gateway model");
+                    }
+                }
+            }
+        }
     }
 
-    // If ?test=true, send a lightweight probe to the LLM endpoint
+    // If ?test=true, send a lightweight probe to the gateway
     let test_passed = if params.test.unwrap_or(false) {
-        test_llm_connection(&body.provider, api_key, body.model.as_deref(), base_url).await?
+        test_llm_connection(provider).await?
     } else {
         None
     };
 
     Ok(Json(SetupResponse {
         status: "ok".into(),
-        message: if test_passed.is_some() {
-            Some("LLM configuration saved".into())
-        } else {
-            None
-        },
+        message: llm_saved_message(test_passed),
         test_passed,
     }))
 }
 
-/// Try a basic chat-completion probe against the provider.
-async fn test_llm_connection(
-    provider: &str,
-    api_key: &str,
-    model: Option<&str>,
-    base_url: &str,
-) -> Result<Option<bool>, ApiError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))?;
-
-    let (url, model_name) = match provider {
-        "openrouter" => (
-            "https://openrouter.ai/api/v1/chat/completions".to_string(),
-            model.unwrap_or("qwen/qwen3-coder:free"),
+/// Report what the probe actually proved, so a failed probe never reads as success.
+fn llm_saved_message(test_passed: Option<bool>) -> Option<String> {
+    match test_passed {
+        Some(true) => Some("LLM configuration saved and connection verified".into()),
+        Some(false) => Some(
+            "Saved, but the gateway probe failed. Set CODASAURUS_MODEL (or Settings → LLM) \
+             to a model alias you defined in your LiteLLM gateway, then check the gateway URL \
+             and API key."
+                .into(),
         ),
-        "ollama" => {
-            let base = if base_url.is_empty() {
-                "http://localhost:11434"
-            } else {
-                base_url.trim_end_matches('/')
-            };
-            (
-                format!("{base}/v1/chat/completions"),
-                model.unwrap_or("qwen2.5-coder:7b"),
-            )
-        }
-        "custom" => {
-            if base_url.is_empty() {
-                return Ok(Some(false));
-            }
-            ssrf::validate_llm_base_url_resolved(base_url, false)
-                .await
-                .map_err(ApiError::bad_request)?;
-            let base = base_url.trim_end_matches('/');
-            (
-                format!("{base}/chat/completions"),
-                model.unwrap_or("default"),
-            )
-        }
-        "disabled" => return Ok(Some(true)),
-        _ => {
-            return Err(ApiError::bad_request(format!(
-                "Unknown provider: {provider}"
-            )))
-        }
+        None => None,
+    }
+}
+
+/// Probe the configured gateway with a minimal chat completion.
+async fn test_llm_connection(provider: &str) -> Result<Option<bool>, ApiError> {
+    if provider == "disabled" {
+        return Ok(Some(true));
+    }
+    let Some(config) = crate::llm::LlmConfig::from_env() else {
+        return Ok(Some(false));
     };
-
-    let mut req = client.post(&url).json(&json!({
-        "model": model_name,
-        "messages": [{"role": "user", "content": "Say 'ok' and nothing else."}],
-        "max_tokens": 10,
-    }));
-
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    match req.send().await {
-        Ok(resp) => Ok(Some(resp.status().is_success())),
-        Err(_) => Ok(Some(false)),
-    }
+    Ok(Some(crate::llm::check_connection(&config).await.is_ok()))
 }
 
 #[derive(Deserialize)]
@@ -521,7 +919,7 @@ pub(crate) async fn get_public_url(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_setup_wizard_access(&state, &headers).await?;
+    require_setup_open_or_admin(&state, &headers).await?;
     let from_db = db::config::get_config(&state.pool, "public_url")
         .await
         .ok()
@@ -552,7 +950,8 @@ fn is_local_url(url: &str) -> bool {
 
 /// POST /api/setup/public-url — save the canonical HTTPS origin used for
 /// GitHub manifest webhook/callback URLs. Open before the first owner exists.
-async fn setup_public_url(
+#[utoipa::path(post, path = "/api/setup/public-url", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_public_url(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<PublicUrlBody>,
@@ -590,11 +989,9 @@ async fn resolve_public_url(state: &AppState, headers: &axum::http::HeaderMap) -
     if let Ok(url) = std::env::var("PUBLIC_URL") {
         return url;
     }
-    // Auto-detect from request Host header. This is client-controlled and only
-    // used as a last-resort fallback before an operator sets `public_url`/`PUBLIC_URL`
-    // explicitly — reject anything that isn't a plain `host[:port]` so a spoofed
-    // Host can't smuggle a scheme, path, or userinfo into the generated GitHub App
-    // manifest (which would point the webhook/OAuth callback at an attacker's domain).
+    // Host is client-controlled and only a last-resort fallback. Require plain
+    // `host[:port]` so a spoofed value cannot smuggle a scheme, path, or userinfo
+    // into the manifest and redirect the webhook/OAuth callback.
     if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
         let valid = !host.is_empty()
             && host.len() <= 253
@@ -617,11 +1014,8 @@ async fn resolve_public_url(state: &AppState, headers: &axum::http::HeaderMap) -
 /// Build the GitHub App manifest JSON shared by the HTML page and JSON endpoints.
 fn build_manifest(public_url: &str) -> serde_json::Value {
     let suffix: String = uuid::Uuid::new_v4().to_string().chars().take(4).collect();
-    // Events must match handlers in `bot::handle_webhook`. Installation events keep
-    // the dashboard repo list in sync without a manual Sync after install.
-    // Note: GitHub App manifests do not support logo/avatar — upload
-    // manually after creation (see docs/setup-github-app.md). Logo is served
-    // at `{public_url}/branding/logo.png` for easy download.
+    // Events must match `bot::handle_webhook`; installation events keep the repo
+    // list in sync. Manifests cannot set a logo, so serve one for manual upload.
     json!({
         "name": format!("codasaurus-{}", suffix),
         "url": public_url,
@@ -659,7 +1053,8 @@ fn build_manifest(public_url: &str) -> serde_json::Value {
 /// GET /api/setup/github/manifest-page — auto-submitting HTML form that
 /// POSTs the manifest to GitHub. This is the officially documented flow:
 /// https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
-async fn github_manifest_page(
+#[utoipa::path(get, path = "/api/setup/github/manifest-page", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_manifest_page(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<ManifestPageQuery>,
@@ -680,7 +1075,7 @@ async fn github_manifest_page(
     };
 
     let manifest_json = serde_json::to_string(&manifest)
-        .map_err(|e| ApiError::internal(format!("Failed to serialize manifest: {e}")))?;
+        .map_err(|e| ApiError::internal_error(format!("Failed to serialize manifest: {e}")))?;
 
     // HTML page that auto-submits the manifest form to GitHub.
     // This matches GitHub's documented POST form flow exactly.
@@ -733,7 +1128,8 @@ async fn github_manifest_page(
 }
 
 /// GET /api/setup/github/manifest — return the manifest JSON for programmatic use.
-async fn github_manifest_url(
+#[utoipa::path(get, path = "/api/setup/github/manifest-url", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_manifest_url(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -742,7 +1138,8 @@ async fn github_manifest_url(
 }
 
 /// POST /api/setup/github
-async fn setup_github(
+#[utoipa::path(post, path = "/api/setup/github", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_github(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<GithubBody>,
@@ -753,10 +1150,7 @@ async fn setup_github(
     let token = github_jwt::create_app_jwt(&body.app_id, &body.private_key)
         .map_err(|e| ApiError::bad_request(format!("Invalid GitHub App credentials: {e}")))?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))?;
+    let client = http_client(10)?;
 
     let resp = client
         .get("https://api.github.com/app")
@@ -793,17 +1187,19 @@ async fn setup_github(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Store credentials
-    db::config::set_config(&state.pool, "github_app_id", &body.app_id).await?;
-    db::config::set_config(&state.pool, "github_private_key", &body.private_key).await?;
-    db::config::set_config(&state.pool, "github_webhook_secret", &body.webhook_secret).await?;
+    let mut entries = vec![
+        ("github_app_id", body.app_id.as_str()),
+        ("github_private_key", body.private_key.as_str()),
+        ("github_webhook_secret", body.webhook_secret.as_str()),
+    ];
     if let Some(slug) = slug.as_deref() {
-        db::config::set_config(&state.pool, "github_app_slug", slug).await?;
+        entries.push(("github_app_slug", slug));
         db::config::apply_setting_to_env("github_app_slug", slug);
     }
     if let Some(name) = app_name.as_deref() {
-        db::config::set_config(&state.pool, "github_app_name", name).await?;
+        entries.push(("github_app_name", name));
     }
+    db::config::set_configs(&state.pool, &entries).await?;
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let port: u16 = std::env::var("PORT")
@@ -830,33 +1226,44 @@ async fn setup_github(
 /// the manifest code with GitHub, then redirects to the SPA entry point.
 /// This avoids SPA routing issues (hash vs path) because the exchange happens
 /// in a plain page before handing control back to the SPA.
-async fn github_callback_page(
+#[utoipa::path(get, path = "/api/setup/github/callback", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_callback_page(
     Query(params): Query<GithubCallbackQuery>,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
     use axum::response::Html;
+
+    /// Static error page for the manifest callback — both messages are fixed
+    /// strings, so no request input is ever reflected into the HTML.
+    fn error_page(
+        message: &'static str,
+    ) -> (
+        StatusCode,
+        [(axum::http::header::HeaderName, &'static str); 2],
+        Html<String>,
+    ) {
+        use axum::http::header;
+        (
+            StatusCode::BAD_REQUEST,
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'",
+                ),
+            ],
+            Html(format!(
+                r#"<html><body style="font:14px sans-serif;padding:40px">
+                    <p>{message}</p>
+                    <a href="/#/setup/github">Back to setup</a>
+                </body></html>"#
+            )),
+        )
+    }
 
     let code = match params.code {
         Some(ref c) if !c.is_empty() => c.clone(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                [
-                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (
-                        header::CONTENT_SECURITY_POLICY,
-                        "default-src 'none'; style-src 'unsafe-inline'",
-                    ),
-                ],
-                Html(
-                    r#"<html><body style="font:14px sans-serif;padding:40px">
-                        <p>Missing authorization code from GitHub.</p>
-                        <a href="/#/setup/github">Back to setup</a>
-                    </body></html>"#
-                        .into(),
-                ),
-            );
-        }
+        _ => return error_page("Missing authorization code from GitHub."),
     };
 
     // Reject anything that isn't a safe OAuth code charset to prevent XSS when
@@ -866,23 +1273,7 @@ async fn github_callback_page(
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/' | '=' | '+'))
         || code.len() > 512
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            [
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (
-                    header::CONTENT_SECURITY_POLICY,
-                    "default-src 'none'; style-src 'unsafe-inline'",
-                ),
-            ],
-            Html(
-                r#"<html><body style="font:14px sans-serif;padding:40px">
-                    <p>Invalid authorization code.</p>
-                    <a href="/#/setup/github">Back to setup</a>
-                </body></html>"#
-                    .into(),
-            ),
-        );
+        return error_page("Invalid authorization code.");
     }
 
     // Pass code via JSON serialization so it cannot break out of a JS string.
@@ -956,11 +1347,14 @@ async fn github_callback_page(
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/html; charset=utf-8",
+            ),
             // The page exchanges the code with an inline script; the global
             // `script-src 'self'` would block it.
             (
-                header::CONTENT_SECURITY_POLICY,
+                axum::http::header::CONTENT_SECURITY_POLICY,
                 "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
             ),
         ],
@@ -968,18 +1362,28 @@ async fn github_callback_page(
     )
 }
 
+fn github_conversion_error(status: reqwest::StatusCode, upstream_body: &str) -> ApiError {
+    tracing::error!("GitHub manifest conversion failed (HTTP {status}): {upstream_body}");
+    ApiError::bad_request(format!("GitHub manifest conversion failed (HTTP {status})"))
+}
+
+fn http_client(secs: u64) -> Result<reqwest::Client, ApiError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(secs))
+        .build()
+        .map_err(|e| ApiError::internal_error(format!("Failed to build HTTP client: {e}")))
+}
+
 /// POST /api/setup/github/callback
-async fn github_callback(
+#[utoipa::path(post, path = "/api/setup/github/callback", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn github_callback(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<GithubCallbackBody>,
 ) -> Result<Json<GithubCallbackResponse>, ApiError> {
     require_setup_open_or_admin(&state, &headers).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| ApiError::internal(format!("Failed to build HTTP client: {e}")))?;
+    let client = http_client(30)?;
 
     let resp = client
         .post(format!(
@@ -994,9 +1398,7 @@ async fn github_callback(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
-        return Err(ApiError::bad_request(format!(
-            "GitHub manifest conversion failed (HTTP {status}): {text}"
-        )));
+        return Err(github_conversion_error(status, &text));
     }
 
     let data: serde_json::Value = resp
@@ -1023,11 +1425,17 @@ async fn github_callback(
         .to_string();
     let app_name = data["name"].as_str().unwrap_or(&slug).to_string();
 
-    db::config::set_config(&state.pool, "github_app_id", &app_id).await?;
-    db::config::set_config(&state.pool, "github_private_key", &pem).await?;
-    db::config::set_config(&state.pool, "github_webhook_secret", &webhook_secret).await?;
-    db::config::set_config(&state.pool, "github_app_name", &app_name).await?;
-    db::config::set_config(&state.pool, "github_app_slug", &slug).await?;
+    db::config::set_configs(
+        &state.pool,
+        &[
+            ("github_app_id", app_id.as_str()),
+            ("github_private_key", pem.as_str()),
+            ("github_webhook_secret", webhook_secret.as_str()),
+            ("github_app_name", app_name.as_str()),
+            ("github_app_slug", slug.as_str()),
+        ],
+    )
+    .await?;
     db::config::apply_setting_to_env("github_app_slug", &slug);
 
     // Update the in-memory bot config so the webhook handler picks up the
@@ -1058,25 +1466,69 @@ async fn github_callback(
     }))
 }
 
+fn validate_admin_body(body: &AdminBody) -> Result<(), ApiError> {
+    if !body.email.contains('@') {
+        return Err(ApiError::bad_request("Invalid email address"));
+    }
+    if let Err(msg) = db::users::validate_password_policy(&body.password, &body.email) {
+        return Err(ApiError::bad_request(msg));
+    }
+    Ok(())
+}
+
+fn setup_db_error(err: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(ref db_err) = err {
+        if db_err.message().contains("UNIQUE") {
+            return ApiError::bad_request("A user with that email already exists");
+        }
+    }
+    tracing::error!(error = %err, "database error during setup");
+    ApiError::internal("Internal server error")
+}
+
+async fn first_owner_gate(
+    redis: &crate::redis::StateStore,
+    peer: SocketAddr,
+    headers: &axum::http::HeaderMap,
+    body: &AdminBody,
+) -> Result<(), ApiError> {
+    let key = format!(
+        "bootstrap:{}",
+        super::rate_limit::client_ip(peer.ip(), headers, super::rate_limit::trusted_proxies())
+    );
+    super::rate_limit::check(redis, &key, 5, Duration::from_secs(900))
+        .await
+        .map_err(|retry| {
+            ApiError::too_many_requests_after(
+                "Too many bootstrap attempts. Please try again later.",
+                retry.as_secs().max(1),
+            )
+        })?;
+    let secret = headers
+        .get(super::bootstrap::BOOTSTRAP_SECRET_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    validate_admin_body(body)?;
+    super::bootstrap::consume(redis, secret).await
+}
+
 /// POST /api/setup/admin
-async fn setup_admin(
+#[utoipa::path(post, path = "/api/setup/admin", tag = "setup", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn setup_admin(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(body): Json<AdminBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Only allow first owner without auth; subsequent creates require owner.
     let owner_exists = db::users::owner_exists(&state.pool)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(setup_db_error)?;
     if owner_exists {
         super::rbac::require_owner(&state, &headers).await?;
-    }
-
-    if !body.email.contains('@') {
-        return Err(ApiError::bad_request("Invalid email address"));
-    }
-    if let Err(msg) = db::users::validate_password_policy(&body.password, &body.email) {
-        return Err(ApiError::bad_request(msg));
+        validate_admin_body(&body)?;
+    } else {
+        first_owner_gate(&state.redis, peer, &headers, &body).await?;
     }
 
     let result = if owner_exists {
@@ -1084,16 +1536,304 @@ async fn setup_admin(
         db::users::create_user(&state.pool, &body.email, &body.password, "owner").await
     } else {
         // Day-zero onboarding account = instance bootstrap / superuser.
-        db::users::create_bootstrap_owner(&state.pool, &body.email, &body.password).await
+        db::users::create_first_owner(&state.pool, &body.email, &body.password).await
     };
-    result.map_err(|e| {
-        if let sqlx::Error::Database(ref db_err) = e {
-            if db_err.message().contains("UNIQUE") {
-                return ApiError::bad_request("A user with that email already exists");
-            }
-        }
-        ApiError::internal(e.to_string())
-    })?;
+    result.map_err(setup_db_error)?;
 
     Ok(Json(json!({ "status": "ok" })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::bootstrap;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn invalid_first_owner_body_does_not_burn_bootstrap_secret() {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis = crate::redis::StateStore::connect(&redis_url)
+            .await
+            .expect("connect redis");
+        let secret = format!("bootstrap-test-{}", uuid::Uuid::new_v4());
+        bootstrap::arm(&redis, &secret, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let id = uuid::Uuid::new_v4();
+        let octets = id.as_bytes();
+        let peer: SocketAddr = format!("10.{}.{}.{}:0", octets[0], octets[1], octets[2])
+            .parse()
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            bootstrap::BOOTSTRAP_SECRET_HEADER,
+            axum::http::HeaderValue::from_str(&secret).unwrap(),
+        );
+
+        let bad = AdminBody {
+            email: "not-an-email".into(),
+            password: "password123".into(),
+        };
+        let err = first_owner_gate(&redis, peer, &headers, &bad)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ApiError::BadRequest(_)),
+            "unexpected: {err:?}"
+        );
+
+        let good = AdminBody {
+            email: format!("owner-{}@example.com", uuid::Uuid::new_v4()),
+            password: "password123".into(),
+        };
+        first_owner_gate(&redis, peer, &headers, &good)
+            .await
+            .expect("a rejected body must not consume the one-time bootstrap secret");
+    }
+
+    #[tokio::test]
+    async fn setup_db_error_body_omits_internal_detail() {
+        let err = setup_db_error(sqlx::Error::Protocol("SENTINEL_DB_DETAIL".into()));
+        let body = String::from_utf8(
+            err.into_response()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            !body.contains("SENTINEL_DB_DETAIL"),
+            "response leaked DB detail: {body}"
+        );
+        assert_eq!(body, r#"{"error":"Internal server error"}"#);
+    }
+
+    #[test]
+    fn llm_step_needs_a_working_config_unless_disabled() {
+        assert!(llm_step_complete(Some("disabled"), false));
+        assert!(llm_step_complete(Some("DISABLED"), false));
+        assert!(llm_step_complete(Some("litellm"), true));
+        assert!(!llm_step_complete(Some("litellm"), false));
+        assert!(!llm_step_complete(None, false));
+        assert!(llm_step_complete(None, true));
+    }
+
+    #[test]
+    fn failed_llm_probe_message_does_not_claim_verified() {
+        assert_eq!(
+            llm_saved_message(Some(true)).as_deref(),
+            Some("LLM configuration saved and connection verified")
+        );
+        let failed = llm_saved_message(Some(false)).expect("failed probe must explain itself");
+        assert!(failed.contains("CODASAURUS_MODEL"), "{failed}");
+        assert!(!failed.contains("verified"), "{failed}");
+        assert_eq!(llm_saved_message(None), None);
+    }
+
+    #[test]
+    fn github_conversion_error_body_omits_upstream_text() {
+        let err =
+            github_conversion_error(reqwest::StatusCode::BAD_REQUEST, "upstream-secret-token");
+        let text = format!("{err:?}");
+        assert!(
+            !text.contains("upstream-secret-token"),
+            "error leaked upstream text: {text}"
+        );
+        assert!(
+            text.contains("GitHub manifest conversion failed"),
+            "unexpected error: {text}"
+        );
+    }
+
+    #[test]
+    fn upstream_model_name_is_provider_prefixed() {
+        assert_eq!(
+            upstream_model_name("openrouter", "liquid/lfm-3-1.7b:free"),
+            "openrouter/liquid/lfm-3-1.7b:free"
+        );
+        assert_eq!(
+            upstream_model_name("openrouter", "openrouter/foo"),
+            "openrouter/foo"
+        );
+    }
+
+    async fn provision_mock() -> (
+        crate::llm::gateway::GatewayClient,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let models = captured.clone();
+        let app = Router::new()
+            .route(
+                "/public/litellm_model_cost_map",
+                get(|| async {
+                    Json(json!({
+                        "gpt-4o": {"litellm_provider": "openai", "mode": "responses"},
+                        "gpt-4o-mini": {"litellm_provider": "openai", "mode": "completion"},
+                        "text-embedding-3-small": {"litellm_provider": "openai", "mode": "embedding"}
+                    }))
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"data": [
+                        {"id": "openai/gpt-4o"},
+                        {"id": "openai/gpt-4o-mini"},
+                        {"id": "openai/text-embedding-3-small"},
+                        {"id": "openai/new-text-model"},
+                        {"id": "openai/decision-model"}
+                    ]}))
+                }),
+            )
+            .route(
+                "/model/info",
+                get(|| async {
+                    Json(json!({"data": [
+                        {"model_name": "openai/gpt-4o", "model_info": {"mode": "responses"}},
+                        {"model_name": "openai/gpt-4o-mini", "model_info": {"mode": "completion"}},
+                        {"model_name": "openai/text-embedding-3-small", "model_info": {"mode": "embedding"}},
+                        {"model_name": "openai/new-text-model", "model_info": {}},
+                        {"model_name": "openai/decision-model", "model_info": {"mode": "decisions"}}
+                    ]}))
+                }),
+            )
+            .route(
+                "/model/new",
+                post(move |request: axum::extract::Request| {
+                    let models = models.clone();
+                    async move {
+                        let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let alias = body["model_name"].as_str().unwrap();
+                        let model_id = format!("id-{alias}");
+                        models.lock().unwrap().push(body);
+                        Json(json!({"model_id": model_id}))
+                    }
+                }),
+            )
+            .route(
+                "/model/delete",
+                post(|| async { Json(json!({})) }),
+            )
+            .route(
+                "/key/generate",
+                post({
+                    let captured = captured.clone();
+                    move |request: axum::extract::Request| {
+                        let captured = captured.clone();
+                        async move {
+                            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                                .await
+                                .unwrap();
+                            captured.lock().unwrap().push(
+                                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                            );
+                            Json(json!({"key": "sk-virtual"}))
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            crate::llm::gateway::GatewayClient::new(format!("http://{addr}"), "sk-master".into()),
+            captured,
+        )
+    }
+
+    #[tokio::test]
+    async fn provision_models_accepts_non_embedding_review_roles() {
+        let (client, captured) = provision_mock().await;
+        let body = LlmBody {
+            provider: "litellm".into(),
+            api_key: Some("provider-key".into()),
+            model: Some("review".into()),
+            model_cheap: Some("cheap".into()),
+            embedding_model: Some("embedding".into()),
+            upstream_provider: Some("openai".into()),
+            upstream_model: Some("gpt-4o".into()),
+            upstream_model_cheap: Some("gpt-4o-mini".into()),
+            upstream_model_embedding: Some("text-embedding-3-small".into()),
+            api_base: None,
+            model_alias: Some("review".into()),
+        };
+
+        let provisioned = provision_models(&client, &body, [None, None, None], None, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(provisioned.primary.alias, "review");
+        assert_eq!(provisioned.primary.id, "id-review");
+        assert_eq!(provisioned.primary.upstream, "openai/gpt-4o");
+        assert_eq!(provisioned.cheap.unwrap().id, "id-cheap");
+        assert_eq!(provisioned.embedding.unwrap().id, "id-embedding");
+        assert_eq!(provisioned.virtual_key, "sk-virtual");
+
+        let rows = captured.lock().unwrap();
+        let key = rows.iter().find(|row| row.get("models").is_some()).unwrap();
+        assert_eq!(key["models"], json!(["review", "cheap", "embedding"]));
+    }
+
+    #[tokio::test]
+    async fn provision_models_accepts_discovered_model_missing_from_cost_map() {
+        let (client, captured) = provision_mock().await;
+        let body = LlmBody {
+            provider: "litellm".into(),
+            api_key: Some("provider-key".into()),
+            model: Some("review".into()),
+            model_cheap: None,
+            embedding_model: None,
+            upstream_provider: Some("openai".into()),
+            upstream_model: Some("new-text-model".into()),
+            upstream_model_cheap: None,
+            upstream_model_embedding: None,
+            api_base: None,
+            model_alias: Some("review".into()),
+        };
+
+        let provisioned = provision_models(&client, &body, [None, None, None], None, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(provisioned.primary.upstream, "openai/new-text-model");
+        assert_eq!(provisioned.virtual_key, "sk-virtual");
+
+        let rows = captured.lock().unwrap();
+        let key = rows.iter().find(|row| row.get("models").is_some()).unwrap();
+        assert_eq!(key["models"], json!(["review"]));
+    }
+
+    #[tokio::test]
+    async fn provision_rejects_blank_provider_key() {
+        let body = LlmBody {
+            provider: "litellm".into(),
+            api_key: Some("   ".into()),
+            model: None,
+            model_cheap: None,
+            embedding_model: None,
+            upstream_provider: Some("openrouter".into()),
+            upstream_model: Some("liquid/lfm-3-1.7b:free".into()),
+            upstream_model_cheap: None,
+            upstream_model_embedding: None,
+            api_base: None,
+            model_alias: Some("codasaurus-e2e".into()),
+        };
+        let client = crate::llm::gateway::GatewayClient::new(
+            "http://127.0.0.1:1".into(),
+            "sk-master".into(),
+        );
+        let err = provision_models(&client, &body, [None, None, None], None, 0.0)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)), "got {err:?}");
+    }
 }

@@ -1,6 +1,6 @@
 //! Shared dependency file parsing logic.
 
-const DEP_CHARS: &[char] = &['=', '<', '>', '~', '!', ';', ' ', '\t'];
+const DEP_CHARS: &[char] = &['=', '<', '>', '~', '!', ';', ' ', '\t', '[', '@'];
 
 /// Extract npm dependencies from a `package.json` manifest.
 pub fn extract_npm_deps(content: &str) -> Vec<String> {
@@ -21,22 +21,25 @@ pub fn extract_npm_deps(content: &str) -> Vec<String> {
 /// Extract dependencies from a `requirements.txt`, `setup.py`, or `setup.cfg`.
 pub fn extract_requirements_deps(content: &str) -> Vec<String> {
     let mut pkgs = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
+    for line in requirement_lines(content) {
+        let Some(pkg) = requirement_name(line) else {
             continue;
-        }
-        let pkg = line
-            .split(DEP_CHARS)
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        if !pkg.is_empty() {
-            pkgs.push(pkg);
-        }
+        };
+        pkgs.push(pkg);
     }
     pkgs
+}
+
+fn requirement_lines(content: &str) -> impl Iterator<Item = &str> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('-'))
+}
+
+fn requirement_name(requirement: &str) -> Option<String> {
+    let name = requirement.split(DEP_CHARS).next()?.trim();
+    (!name.is_empty()).then(|| name.to_lowercase())
 }
 
 /// Extract dependencies from a `pyproject.toml`.
@@ -47,14 +50,8 @@ pub fn extract_pyproject_deps(content: &str) -> Vec<String> {
         if let Some(project) = toml_table.get("project") {
             if let Some(deps) = project.get("dependencies").and_then(|d| d.as_array()) {
                 for dep in deps {
-                    if let Some(s) = dep.as_str() {
-                        let pkg = s
-                            .split(DEP_CHARS)
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_lowercase();
-                        if !pkg.is_empty() {
+                    if let Some(requirement) = dep.as_str() {
+                        if let Some(pkg) = requirement_name(requirement) {
                             pkgs.push(pkg);
                         }
                     }
@@ -65,7 +62,11 @@ pub fn extract_pyproject_deps(content: &str) -> Vec<String> {
             if let Some(poetry) = tool.get("poetry") {
                 if let Some(deps) = poetry.get("dependencies").and_then(|d| d.as_table()) {
                     pkgs.reserve(deps.len());
-                    pkgs.extend(deps.keys().cloned());
+                    pkgs.extend(
+                        deps.keys()
+                            .filter(|name| name.as_str() != "python")
+                            .cloned(),
+                    );
                 }
             }
         }
@@ -104,15 +105,7 @@ pub fn extract_go_mod_deps(content: &str) -> Vec<String> {
     let mut pkgs = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with(')')
-            || line.starts_with("module ")
-            || line.starts_with("go ")
-            || line.starts_with("exclude ")
-            || line.starts_with("retract ")
-            || line.starts_with("replace ")
-        {
+        if is_go_mod_noise(line) {
             continue;
         }
         // Handle single-line require: "require pkg v1.0" and block require: "pkg v1.0"
@@ -127,6 +120,120 @@ pub fn extract_go_mod_deps(content: &str) -> Vec<String> {
         }
     }
     pkgs
+}
+
+/// A manifest dependency paired with the version declared in that manifest.
+pub struct VersionedDep {
+    pub name: String,
+    pub version: String,
+}
+
+/// Strip range prefixes so the declared version can be queried as an exact version.
+pub fn clean_version(v: &str) -> String {
+    v.trim_start_matches(['^', '~', '=', '>', '<', ' '])
+        .to_string()
+}
+
+/// Lines in a `go.mod` that never declare a direct dependency.
+pub fn is_go_mod_noise(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with("//")
+        || line.starts_with(')')
+        || line.starts_with("module ")
+        || line.starts_with("go ")
+        || line.starts_with("exclude ")
+        || line.starts_with("retract ")
+        || line.starts_with("replace ")
+}
+
+pub fn extract_npm_versioned(content: &str) -> Vec<VersionedDep> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    let mut deps = Vec::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(obj) = json.get(key).and_then(|d| d.as_object()) {
+            for (name, version) in obj {
+                if let Some(v) = version.as_str() {
+                    deps.push(VersionedDep {
+                        name: name.clone(),
+                        version: clean_version(v),
+                    });
+                }
+            }
+        }
+    }
+    deps
+}
+
+pub fn extract_cargo_versioned(content: &str) -> Vec<VersionedDep> {
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let mut deps = Vec::new();
+    for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(obj) = table.get(key).and_then(|d| d.as_table()) {
+            for (name, value) in obj {
+                let version = value.as_str().map(str::to_string).or_else(|| {
+                    value
+                        .as_table()
+                        .and_then(|t| t.get("version"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                });
+                if let Some(v) = version {
+                    deps.push(VersionedDep {
+                        name: name.clone(),
+                        version: clean_version(&v),
+                    });
+                }
+            }
+        }
+    }
+    deps
+}
+
+pub fn extract_go_mod_versioned(content: &str) -> Vec<VersionedDep> {
+    let mut deps = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if is_go_mod_noise(line) {
+            continue;
+        }
+        let rest = line.strip_prefix("require ").unwrap_or(line);
+        if rest == "(" || rest.trim().is_empty() {
+            continue;
+        }
+        let mut parts = rest.split_whitespace();
+        if let (Some(name), Some(version)) = (parts.next(), parts.next()) {
+            if name.contains('/') && version.starts_with('v') {
+                deps.push(VersionedDep {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                });
+            }
+        }
+    }
+    deps
+}
+
+pub fn extract_requirements_versioned(content: &str) -> Vec<VersionedDep> {
+    let mut deps = Vec::new();
+    for line in requirement_lines(content) {
+        if let Some((name, version)) = line.split_once("==") {
+            let name = name.trim().to_lowercase();
+            let version = version
+                .split(|c: char| c == ';' || c.is_whitespace())
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !name.is_empty() && !version.is_empty() {
+                deps.push(VersionedDep { name, version });
+            }
+        }
+    }
+    deps
 }
 
 #[cfg(test)]
@@ -218,5 +325,28 @@ utoipa-swagger-ui = { version = "10", features = ["axum"] }
             deps.iter().any(|d| d == "utoipa-swagger-ui"),
             "deps: {deps:?}"
         );
+    }
+
+    #[test]
+    fn requirements_strip_extras_and_direct_references() {
+        let content = "Requests[security]==2.31.0\nFlask @ https://example.test/flask.whl\nfoo>=1.0\n-r requirements.txt\n";
+        let deps = extract_requirements_deps(content);
+
+        assert_eq!(deps, vec!["requests", "flask", "foo"]);
+    }
+
+    #[test]
+    fn poetry_python_constraint_is_not_a_dependency() {
+        let content = "[tool.poetry.dependencies]\npython = \"^3.9\"\nrequests = \"^2.0\"\n";
+        let deps = extract_pyproject_deps(content);
+
+        assert_eq!(deps, vec!["requests"]);
+    }
+
+    #[test]
+    fn malformed_manifests_return_no_dependencies() {
+        assert!(extract_npm_deps("{").is_empty());
+        assert!(extract_pyproject_deps("[").is_empty());
+        assert!(extract_cargo_deps("[").is_empty());
     }
 }

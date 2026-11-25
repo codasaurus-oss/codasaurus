@@ -15,17 +15,32 @@ use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::fmt;
+use std::time::Duration;
 use uuid::Uuid;
 
-#[derive(Clone, Debug)]
+use crate::redis::StateStore;
+
+#[derive(Clone)]
 pub struct OidcConfig {
     pub issuer: String,
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
     pub scopes: String,
+}
+
+impl fmt::Debug for OidcConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OidcConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 impl OidcConfig {
@@ -80,7 +95,13 @@ struct Discovery {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     id_token: Option<String>,
-    access_token: Option<String>,
+}
+
+fn id_token_from_response(response: TokenResponse) -> Result<String> {
+    response
+        .id_token
+        .filter(|token| !token.is_empty())
+        .context("OIDC token response missing id_token")
 }
 
 /// The claims this code reads. `iss` and `aud` are deliberately absent: they are
@@ -93,15 +114,6 @@ struct IdClaims {
     email_verified: Option<bool>,
 }
 
-/// Short-lived CSRF state + PKCE verifier store: state -> (created_at, code_verifier).
-static PENDING: LazyLock<Mutex<HashMap<String, (Instant, String)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn prune_pending(map: &mut HashMap<String, (Instant, String)>) {
-    let cutoff = Instant::now() - Duration::from_secs(600);
-    map.retain(|_, (t, _)| *t > cutoff);
-}
-
 fn generate_pkce() -> (String, String) {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -111,34 +123,43 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-pub async fn authorization_url(cfg: &OidcConfig) -> Result<(String, String)> {
+pub async fn store_pending(store: &StateStore, state: &str, verifier: &str) -> Result<()> {
+    store
+        .set_ex(
+            &format!("oidc:state:{state}"),
+            verifier,
+            Duration::from_secs(600),
+        )
+        .await
+        .context("store pending OIDC state")?;
+    Ok(())
+}
+
+pub async fn authorization_url(cfg: &OidcConfig, store: &StateStore) -> Result<(String, String)> {
     cfg.require_client_secret()?;
     let disc = discover(cfg).await?;
     let state = Uuid::new_v4().to_string();
     let (verifier, challenge) = generate_pkce();
-    if let Ok(mut m) = PENDING.lock() {
-        prune_pending(&mut m);
-        m.insert(state.clone(), (Instant::now(), verifier));
-    }
+    store_pending(store, &state, &verifier).await?;
     let url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
         disc.authorization_endpoint,
-        urlencoding_encode(&cfg.client_id),
-        urlencoding_encode(&cfg.redirect_uri),
-        urlencoding_encode(&cfg.scopes),
-        urlencoding_encode(&state),
-        urlencoding_encode(&challenge),
+        crate::util::url_encode(&cfg.client_id),
+        crate::util::url_encode(&cfg.redirect_uri),
+        crate::util::url_encode(&cfg.scopes),
+        crate::util::url_encode(&state),
+        crate::util::url_encode(&challenge),
     );
     Ok((url, state))
 }
 
 /// Take pending OIDC state and return the associated PKCE `code_verifier`.
-pub fn take_pending(state: &str) -> Option<String> {
-    if let Ok(mut m) = PENDING.lock() {
-        prune_pending(&mut m);
-        return m.remove(state).map(|(_, verifier)| verifier);
-    }
-    None
+pub async fn take_pending(store: &StateStore, state: &str) -> Option<String> {
+    store
+        .getdel(&format!("oidc:state:{state}"))
+        .await
+        .ok()
+        .flatten()
 }
 
 pub async fn exchange_code(cfg: &OidcConfig, code: &str, code_verifier: &str) -> Result<String> {
@@ -168,10 +189,7 @@ pub async fn exchange_code(cfg: &OidcConfig, code: &str, code_verifier: &str) ->
         .error_for_status()?
         .json::<TokenResponse>()
         .await?;
-    let id_token = resp
-        .id_token
-        .or(resp.access_token)
-        .context("OIDC token response missing id_token")?;
+    let id_token = id_token_from_response(resp)?;
     email_from_verified_jwt(cfg, &id_token, jwks_uri).await
 }
 
@@ -245,15 +263,44 @@ fn email_from_claims(claims: &IdClaims) -> Result<String> {
     bail!("OIDC token has no email claim")
 }
 
-fn urlencoding_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> OidcConfig {
+        OidcConfig {
+            issuer: "https://id.example.test".into(),
+            client_id: "client".into(),
+            client_secret: "super-secret".into(),
+            redirect_uri: "https://app.example.test/callback".into(),
+            scopes: "openid email".into(),
         }
     }
-    out
+
+    #[test]
+    fn debug_output_redacts_client_secret() {
+        let debug = format!("{:?}", config());
+
+        assert!(!debug.contains("super-secret"), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+    }
+
+    #[test]
+    fn token_exchange_requires_an_id_token() {
+        let response: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"access-only"}"#).unwrap();
+        let error = id_token_from_response(response).unwrap_err();
+
+        assert!(error.to_string().contains("id_token"), "{error}");
+    }
+
+    #[test]
+    fn token_exchange_prefers_the_id_token() {
+        let response: TokenResponse =
+            serde_json::from_str(r#"{"id_token":"id-token","access_token":"access-token"}"#)
+                .unwrap();
+        let token = id_token_from_response(response).unwrap();
+
+        assert_eq!(token, "id-token");
+    }
 }

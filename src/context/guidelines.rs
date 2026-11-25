@@ -1,4 +1,3 @@
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use crate::context::rules::{parse_guidelines_md, ExtractedRule};
@@ -7,13 +6,13 @@ use crate::context::rules::{parse_guidelines_md, ExtractedRule};
 #[derive(Debug, Clone)]
 pub struct GuidelineFile {
     pub path: PathBuf,
-    /// Label describing the source ("CONTRIBUTING.md", "AGENTS.md", "env-var", etc.)
+    /// Label describing the source ("CONTRIBUTING.md", "AGENTS.md", "config", etc.)
     pub source: String,
     pub content: String,
     pub rules: Vec<ExtractedRule>,
 }
 
-/// Static list of file/directory names to auto-discover, in priority order.
+/// Static list of file/directory names to auto-discover, in discovery order.
 const AUTO_DISCOVER_NAMES: &[(&str, bool)] = &[
     ("CONTRIBUTING.md", false),
     ("CONTRIBUTING", true),
@@ -23,11 +22,8 @@ const AUTO_DISCOVER_NAMES: &[(&str, bool)] = &[
 ];
 
 /// Discover contribution guideline files for the repository at `root`.
-///
-/// Resolution order (first match wins per name):
-/// 1. `CONTRIBUTING_GUIDELINES` env var (absolute path to file or directory)
-/// 2. Config override path (relative to repo root or absolute)
-/// 3. Auto-discovery of known file/dir names
+/// Env and config overrides short-circuit auto-discovery, which returns known
+/// files in deterministic discovery order.
 pub fn find_guidelines(root: &Path, config_path: Option<&str>) -> Vec<GuidelineFile> {
     let env_override = std::env::var("CONTRIBUTING_GUIDELINES").ok();
     find_guidelines_inner(root, config_path, env_override.as_deref())
@@ -38,84 +34,69 @@ fn find_guidelines_inner(
     config_path: Option<&str>,
     env_override: Option<&str>,
 ) -> Vec<GuidelineFile> {
-    // 1. Env var override (highest priority)
     if let Some(env_path) = env_override {
-        let p = PathBuf::from(env_path);
-        let found = resolve_guideline_path(&p);
+        let found = resolve_guideline_path(&PathBuf::from(env_path), "env-var");
         if !found.is_empty() {
             return found;
         }
     }
 
-    // 2. Config override
-    if let Some(cfg) = config_path {
-        let p = if Path::new(cfg).is_absolute() {
-            PathBuf::from(cfg)
+    if let Some(config) = config_path {
+        let path = if Path::new(config).is_absolute() {
+            PathBuf::from(config)
         } else {
-            root.join(cfg)
+            root.join(config)
         };
-        let found = resolve_guideline_path(&p);
+        let found = resolve_guideline_path(&path, "config");
         if !found.is_empty() {
             return found;
         }
     }
 
-    // 3. Auto-discovery
-    let mut results: Vec<GuidelineFile> = Vec::new();
+    let mut results = Vec::new();
     for (name, is_dir) in AUTO_DISCOVER_NAMES {
         let candidate = root.join(name);
         if *is_dir {
-            if candidate.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&candidate) {
-                    let mut dir_files: Vec<PathBuf> = entries
-                        .flatten()
-                        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                        .map(|e| e.path())
-                        .filter(|p| p.extension().map(|e| e == "md").unwrap_or(false))
-                        .collect();
-                    dir_files.sort();
-                    for f in dir_files {
-                        if let Some(gf) = load_guideline_file(&f, name) {
-                            results.push(gf);
-                        }
-                    }
-                }
-            }
+            results.extend(load_markdown_directory(&candidate, name));
         } else if candidate.is_file() {
-            if let Some(gf) = load_guideline_file(&candidate, name) {
-                results.push(gf);
+            if let Some(file) = load_guideline_file(&candidate, name) {
+                results.push(file);
             }
         }
     }
-
     results
 }
 
-fn resolve_guideline_path(path: &Path) -> Vec<GuidelineFile> {
+fn resolve_guideline_path(path: &Path, source: &str) -> Vec<GuidelineFile> {
     if path.is_file() {
-        load_guideline_file(path, "env-var")
-            .map(|f| vec![f])
-            .unwrap_or_default()
+        load_guideline_file(path, source).into_iter().collect()
     } else if path.is_dir() {
-        let mut results = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(path) {
-            let mut files: Vec<PathBuf> = entries
-                .flatten()
-                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|e| e == "md").unwrap_or(false))
-                .collect();
-            files.sort();
-            for f in files {
-                if let Some(gf) = load_guideline_file(&f, "env-var") {
-                    results.push(gf);
-                }
-            }
-        }
-        results
+        load_markdown_directory(path, source)
     } else {
         Vec::new()
     }
+}
+
+fn load_markdown_directory(path: &Path, source: &str) -> Vec<GuidelineFile> {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|file| load_guideline_file(&file, source))
+        .collect()
 }
 
 fn load_guideline_file(path: &Path, source: &str) -> Option<GuidelineFile> {
@@ -139,85 +120,6 @@ impl GuidelineFile {
     }
 }
 
-/// Format guideline files as a compact LLM-friendly string.
-pub fn format_guidelines_section(files: &[GuidelineFile]) -> String {
-    if files.is_empty() {
-        return String::new();
-    }
-
-    let mut out = String::with_capacity(4096);
-    out.push_str("## Contribution Guidelines\n\n");
-
-    for gf in files {
-        let label = gf
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&gf.source);
-        let _ = write!(out, "### {} ({})\n\n", label, gf.source);
-
-        if !gf.rules.is_empty() {
-            let mut checklist_count = 0;
-            let mut req_count = 0;
-            let mut commit_count = 0;
-            let mut branch_count = 0;
-            let mut checklist_items: Vec<&str> = Vec::new();
-
-            for rule in &gf.rules {
-                match rule {
-                    ExtractedRule::ChecklistItem { text, .. } => {
-                        checklist_count += 1;
-                        checklist_items.push(text);
-                    }
-                    ExtractedRule::FileRequired { .. } => req_count += 1,
-                    ExtractedRule::CommitRule { .. } => commit_count += 1,
-                    ExtractedRule::BranchPattern { .. } => branch_count += 1,
-                    ExtractedRule::SectionRule { .. } => {}
-                }
-            }
-
-            if checklist_count > 0 {
-                let _ = writeln!(out, "- **{checklist_count} checklist items**");
-            }
-            if req_count > 0 {
-                let _ = writeln!(out, "- **{req_count} required files**");
-            }
-            if commit_count > 0 {
-                let _ = writeln!(out, "- **{commit_count} commit rules**");
-            }
-            if branch_count > 0 {
-                let _ = writeln!(out, "- **{branch_count} branch patterns**");
-            }
-
-            for text in checklist_items {
-                let _ = writeln!(out, "  - [ ] {text}");
-            }
-            out.push('\n');
-        }
-
-        if !gf.content.is_empty() {
-            let truncated = if gf.content.len() > 4096 {
-                let trunc_byte = gf
-                    .content
-                    .char_indices()
-                    .nth(4096)
-                    .map(|(i, _)| i)
-                    .unwrap_or(gf.content.len());
-                format!(
-                    "{}\n\n[Content truncated at 4096 characters — full file at {}]",
-                    &gf.content[..trunc_byte],
-                    gf.path.display()
-                )
-            } else {
-                gf.content.clone()
-            };
-            let _ = write!(out, "```\n{truncated}\n```\n\n");
-        }
-    }
-
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +127,7 @@ mod tests {
     #[test]
     fn test_discover_nothing_in_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let files = find_guidelines(dir.path(), None);
+        let files = find_guidelines_inner(dir.path(), None, None);
         assert!(files.is_empty());
     }
 
@@ -235,7 +137,7 @@ mod tests {
         let content = "# Contributing\n\n- [ ] Add tests\n- [ ] Sign commits\n";
         std::fs::write(dir.path().join("CONTRIBUTING.md"), content).unwrap();
 
-        let files = find_guidelines(dir.path(), None);
+        let files = find_guidelines_inner(dir.path(), None, None);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].source, "CONTRIBUTING.md");
         assert!(!files[0].rules.is_empty());
@@ -247,7 +149,7 @@ mod tests {
         std::fs::write(dir.path().join("AGENTS.md"), "# AGENTS\n").unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "# CLAUDE\n").unwrap();
 
-        let files = find_guidelines(dir.path(), None);
+        let files = find_guidelines_inner(dir.path(), None, None);
         assert_eq!(files.len(), 2);
         let sources: Vec<&str> = files.iter().map(|f| f.source.as_str()).collect();
         assert!(sources.contains(&"AGENTS.md"));
@@ -266,6 +168,7 @@ mod tests {
         let files = find_guidelines_inner(dir.path(), None, custom_file.to_str());
 
         assert_eq!(files.len(), 1);
+        assert_eq!(files[0].source, "env-var");
         assert!(files[0].path.to_string_lossy().contains("MYRULES.md"));
     }
 
@@ -274,13 +177,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("CONTRIBUTING.md"), "# Ignored\n").unwrap();
 
-        // Create a subdir with custom guidelines
         let custom_dir = dir.path().join("docs");
         std::fs::create_dir_all(&custom_dir).unwrap();
         std::fs::write(custom_dir.join("CONTRIBUTE.md"), "# Custom\n- [ ] Test\n").unwrap();
 
-        let files = find_guidelines(dir.path(), Some("docs/CONTRIBUTE.md"));
+        let files = find_guidelines_inner(dir.path(), Some("docs/CONTRIBUTE.md"), None);
         assert_eq!(files.len(), 1);
+        assert_eq!(files[0].source, "config");
         assert!(files[0].path.to_string_lossy().contains("CONTRIBUTE.md"));
     }
 
@@ -288,7 +191,7 @@ mod tests {
     fn test_skip_empty_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("CONTRIBUTING.md"), "").unwrap();
-        let files = find_guidelines(dir.path(), None);
+        let files = find_guidelines_inner(dir.path(), None, None);
         assert!(files.is_empty());
     }
 
@@ -304,13 +207,13 @@ mod tests {
         )
         .unwrap();
 
-        // Use config override path (not auto-discovery) to avoid parallel test env var races
-        let override_path = contrib_dir.join("CODE_OF_CONDUCT.md");
-        let files = find_guidelines(dir.path(), Some(override_path.to_str().unwrap()));
-        assert_eq!(files.len(), 1);
-        assert!(files[0]
-            .path
-            .to_string_lossy()
-            .contains("CODE_OF_CONDUCT.md"));
+        let files = find_guidelines_inner(dir.path(), None, None);
+        assert_eq!(files.len(), 2);
+        assert!(files
+            .iter()
+            .any(|file| file.path.ends_with("CODE_OF_CONDUCT.md")));
+        assert!(files
+            .iter()
+            .any(|file| file.path.ends_with("STYLE_GUIDE.md")));
     }
 }

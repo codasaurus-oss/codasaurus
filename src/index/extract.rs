@@ -17,6 +17,7 @@ pub const EDGE_IMPORTS: &str = "IMPORTS";
 pub const EDGE_EXTENDS: &str = "EXTENDS";
 pub const EDGE_DEFINES: &str = "DEFINES";
 
+/// A definition or import found in one source file.
 #[derive(Debug, Clone)]
 pub struct ExtractedSymbol {
     pub name: String,
@@ -25,6 +26,7 @@ pub struct ExtractedSymbol {
     pub line: i64,
 }
 
+/// A best-effort relationship between two symbol names.
 #[derive(Debug, Clone)]
 pub struct ExtractedEdge {
     pub from_symbol: String,
@@ -32,6 +34,7 @@ pub struct ExtractedEdge {
     pub edge_kind: String,
 }
 
+/// Symbols and edges extracted from a single file.
 #[derive(Debug, Clone)]
 pub struct FileIndex {
     pub file_path: String,
@@ -50,50 +53,37 @@ static JAVASCRIPT: std::sync::LazyLock<Language> =
 static TYPESCRIPT: std::sync::LazyLock<Language> =
     std::sync::LazyLock::new(|| Language::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT));
 
-fn language_for_path(path: &str) -> Option<&'static Language> {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".rs") {
-        Some(&RUST)
-    } else if lower.ends_with(".go") {
-        Some(&GO)
-    } else if lower.ends_with(".py") {
-        Some(&PYTHON)
-    } else if lower.ends_with(".js") || lower.ends_with(".jsx") || lower.ends_with(".mjs") {
-        Some(&JAVASCRIPT)
-    } else if lower.ends_with(".ts") || lower.ends_with(".tsx") {
-        Some(&TYPESCRIPT)
-    } else {
-        None
-    }
+fn language_for_path(path: &str) -> Option<(&'static str, &'static Language)> {
+    let extension = path.rsplit('.').next()?.to_ascii_lowercase();
+    let (name, language) = match extension.as_str() {
+        "rs" => ("rust", &RUST),
+        "go" => ("go", &GO),
+        "py" => ("python", &PYTHON),
+        "js" | "jsx" | "mjs" => ("javascript", &JAVASCRIPT),
+        "ts" | "tsx" => ("typescript", &TYPESCRIPT),
+        _ => return None,
+    };
+    Some((name, language))
 }
 
+/// Return the indexed language name for a source path.
+#[must_use]
 pub fn language_name(path: &str) -> Option<&'static str> {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".rs") {
-        Some("rust")
-    } else if lower.ends_with(".go") {
-        Some("go")
-    } else if lower.ends_with(".py") {
-        Some("python")
-    } else if lower.ends_with(".js") || lower.ends_with(".jsx") || lower.ends_with(".mjs") {
-        Some("javascript")
-    } else if lower.ends_with(".ts") || lower.ends_with(".tsx") {
-        Some("typescript")
-    } else {
-        None
-    }
+    language_for_path(path).map(|(name, _)| name)
 }
 
 /// Parse a source file into symbols + edges. `None` when the language is not
 /// indexed or the tree fails to build (e.g. binary bytes).
+#[must_use]
 pub fn extract_file(file_path: &str, content: &str) -> Option<FileIndex> {
-    let language = language_for_path(file_path)?;
+    let (language_name, language) = language_for_path(file_path)?;
     let mut parser = Parser::new();
     parser.set_language(language).ok()?;
 
     let tree = parser.parse(content, None)?;
     let mut collector = Collector {
         file_path,
+        language: language_name,
         content,
         symbols: Vec::new(),
         edges: Vec::new(),
@@ -109,6 +99,7 @@ pub fn extract_file(file_path: &str, content: &str) -> Option<FileIndex> {
 
 struct Collector<'a> {
     file_path: &'a str,
+    language: &'static str,
     content: &'a str,
     symbols: Vec<ExtractedSymbol>,
     edges: Vec<ExtractedEdge>,
@@ -117,11 +108,11 @@ struct Collector<'a> {
     scope: Vec<String>,
 }
 
-impl<'a> Collector<'a> {
+impl Collector<'_> {
     fn text(&self, node: Node) -> Option<String> {
         node.utf8_text(self.content.as_bytes())
             .ok()
-            .map(|s| s.to_string())
+            .map(ToString::to_string)
     }
 
     fn node_name(&self, node: Node) -> Option<String> {
@@ -129,7 +120,21 @@ impl<'a> Collector<'a> {
     }
 
     fn enclosing(&self) -> Option<&str> {
-        self.scope.last().map(|s| s.as_str())
+        self.scope.last().map(String::as_str)
+    }
+
+    fn line_number(node: Node) -> i64 {
+        i64::try_from(node.start_position().row)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1)
+    }
+
+    fn definition_kind(&self) -> &'static str {
+        if self.enclosing().is_some() {
+            SYMBOL_METHOD
+        } else {
+            SYMBOL_FUNCTION
+        }
     }
 
     /// Record a symbol (+ DEFINES edge) and return its (possibly qualified) name.
@@ -146,7 +151,7 @@ impl<'a> Collector<'a> {
             name: qualified.clone(),
             kind: kind.to_string(),
             signature,
-            line: node.start_position().row as i64 + 1,
+            line: Self::line_number(node),
         });
         self.edges.push(ExtractedEdge {
             from_symbol: self.file_path.to_string(),
@@ -156,40 +161,64 @@ impl<'a> Collector<'a> {
         qualified
     }
 
+    /// Record a symbol and push it as the enclosing scope for its children.
+    fn add_scoped_symbol(&mut self, name: &str, kind: &str, node: Node) -> bool {
+        let qualified = self.add_symbol(name, kind, node);
+        self.scope.push(qualified);
+        true
+    }
+
+    /// Record a class plus `extends` edges read from its grammar-specific base field.
+    fn add_class_with_bases(&mut self, name: &str, node: Node, bases_field: &str) -> bool {
+        let qualified = self.add_symbol(name, SYMBOL_CLASS, node);
+        if let Some(bases) = node.child_by_field_name(bases_field) {
+            for child in bases.named_children(&mut bases.walk()) {
+                if let Some(base) = self.text(child) {
+                    self.edges.push(ExtractedEdge {
+                        from_symbol: qualified.clone(),
+                        to_symbol: base,
+                        edge_kind: EDGE_EXTENDS.to_string(),
+                    });
+                }
+            }
+        }
+        self.scope.push(qualified);
+        true
+    }
+
     fn walk(&mut self, node: Node) {
         let kind = node.kind();
-        let mut pushed = false;
+        let pushed = self.record_definition(node, kind);
+        self.record_call(node, kind);
 
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.walk(child);
+        }
+        if pushed {
+            self.scope.pop();
+        }
+    }
+
+    fn record_definition(&mut self, node: Node, kind: &str) -> bool {
         match kind {
-            // --- Rust ---
-            "function_item" => {
+            "function_item" | "function_definition" => {
                 if let Some(name) = self.node_name(node) {
-                    let kind = if self.enclosing().is_some() {
-                        SYMBOL_METHOD
-                    } else {
-                        SYMBOL_FUNCTION
-                    };
-                    let qualified = self.add_symbol(&name, kind, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    return self.add_scoped_symbol(&name, self.definition_kind(), node);
                 }
             }
             "struct_item" | "enum_item" | "trait_item" | "union_item" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    return self.add_scoped_symbol(&name, SYMBOL_CLASS, node);
                 }
             }
             "impl_item" => {
-                let name = node.child_by_field_name("type").and_then(|n| self.text(n));
-                if let Some(name) = name {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                if let Some(name) = node.child_by_field_name("type").and_then(|n| self.text(n)) {
+                    self.scope.push(name);
+                    return true;
                 }
             }
-            "const_item" | "static_item" => {
+            "const_item" | "static_item" | "const_declaration" | "var_declaration" => {
                 if let Some(name) = self.node_name(node) {
                     self.add_symbol(&name, SYMBOL_CONST, node);
                 }
@@ -200,121 +229,48 @@ impl<'a> Collector<'a> {
                     self.push_import(clean.to_string(), node);
                 }
             }
-            // --- Go ---
             "function_declaration" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_FUNCTION, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    return self.add_scoped_symbol(&name, SYMBOL_FUNCTION, node);
                 }
             }
-            "method_declaration" => {
+            "method_declaration" | "method_definition" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_METHOD, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    return self.add_scoped_symbol(&name, SYMBOL_METHOD, node);
                 }
             }
             "type_declaration" => {
                 if let Some(spec) = node.child_by_field_name("type") {
                     if let Some(name) = self.node_name(spec) {
-                        let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                        self.scope.push(qualified);
-                        pushed = true;
+                        return self.add_scoped_symbol(&name, SYMBOL_CLASS, node);
                     }
                 }
             }
-            "const_declaration" | "var_declaration" => {
-                if let Some(name) = self.node_name(node) {
-                    self.add_symbol(&name, SYMBOL_CONST, node);
-                }
-            }
-            "import_declaration" => {
-                let mut cursor = node.walk();
-                for child in node.named_children(&mut cursor) {
-                    if child.kind() == "import_spec" {
-                        if let Some(path) = child.child_by_field_name("path") {
-                            if let Some(clean) = self
-                                .text(path)
-                                .map(|t| t.trim_matches('"').to_string())
-                                .filter(|t| !t.is_empty())
-                            {
-                                self.push_import(clean, node);
-                            }
-                        }
-                    }
-                }
-            }
-            // --- Python ---
-            "function_definition" => {
-                if let Some(name) = self.node_name(node) {
-                    let kind = if self.enclosing().is_some() {
-                        SYMBOL_METHOD
-                    } else {
-                        SYMBOL_FUNCTION
-                    };
-                    let qualified = self.add_symbol(&name, kind, node);
-                    self.scope.push(qualified);
-                    pushed = true;
-                }
-            }
+            "import_declaration" => self.push_go_imports(node),
             "class_definition" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    if let Some(superclasses) = node.child_by_field_name("superclasses") {
-                        for child in superclasses.named_children(&mut superclasses.walk()) {
-                            if let Some(base) = self.text(child) {
-                                self.edges.push(ExtractedEdge {
-                                    from_symbol: name.clone(),
-                                    to_symbol: base,
-                                    edge_kind: EDGE_EXTENDS.to_string(),
-                                });
-                            }
-                        }
-                    }
-                    self.scope.push(qualified);
-                    pushed = true;
+                    return self.add_class_with_bases(&name, node, "superclasses");
                 }
             }
-            "import_statement" | "import_from_statement" => {
-                if let Some(text) = self.text(node) {
-                    let clean = text.replace("import", "").trim().to_string();
-                    self.push_import(clean, node);
+            "import_statement" => {
+                if self.language == "python" {
+                    self.push_python_imports(node);
+                } else {
+                    self.push_javascript_import(node);
                 }
             }
-            // --- JavaScript / TypeScript ---
+            "import_from_statement" | "future_import_statement" => self.push_python_imports(node),
             "class_declaration" | "interface_declaration" => {
                 if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_CLASS, node);
-                    if let Some(heritage) = node.child_by_field_name("heritage") {
-                        for child in heritage.named_children(&mut heritage.walk()) {
-                            if let Some(base) = self.text(child) {
-                                self.edges.push(ExtractedEdge {
-                                    from_symbol: name.clone(),
-                                    to_symbol: base,
-                                    edge_kind: EDGE_EXTENDS.to_string(),
-                                });
-                            }
-                        }
-                    }
-                    self.scope.push(qualified);
-                    pushed = true;
-                }
-            }
-            "method_definition" => {
-                if let Some(name) = self.node_name(node) {
-                    let qualified = self.add_symbol(&name, SYMBOL_METHOD, node);
-                    self.scope.push(qualified);
-                    pushed = true;
+                    return self.add_class_with_bases(&name, node, "heritage");
                 }
             }
             "variable_declarator" => {
                 let is_const = node
                     .parent()
-                    .and_then(|p| p.child(0))
-                    .and_then(|k| self.text(k))
-                    .map(|t| t == "const")
-                    .unwrap_or(false);
+                    .and_then(|parent| parent.child(0))
+                    .and_then(|token| self.text(token))
+                    .is_some_and(|text| text == "const");
                 if is_const {
                     if let Some(name) = self.node_name(node) {
                         self.add_symbol(&name, SYMBOL_CONST, node);
@@ -323,43 +279,89 @@ impl<'a> Collector<'a> {
             }
             _ => {}
         }
+        false
+    }
 
-        // CALLS edges: name the callee from the call's function field.
-        if matches!(kind, "call_expression" | "call") {
-            if let Some(callee) = node.child_by_field_name("function") {
-                let callee_name = if callee.kind() == "member_expression" {
-                    callee
-                        .child_by_field_name("property")
-                        .and_then(|n| self.text(n))
-                } else if callee.kind() == "field_expression" {
-                    callee
-                        .child_by_field_name("field")
-                        .and_then(|n| self.text(n))
-                } else {
-                    callee
-                        .child_by_field_name("name")
-                        .and_then(|n| self.text(n))
-                        .or_else(|| self.text(callee))
-                };
-                if let Some(target) = callee_name {
-                    if let Some(caller) = self.enclosing() {
-                        self.edges.push(ExtractedEdge {
-                            from_symbol: caller.to_string(),
-                            to_symbol: target,
-                            edge_kind: EDGE_CALLS.to_string(),
-                        });
-                    }
+    fn record_call(&mut self, node: Node, kind: &str) {
+        if !matches!(kind, "call_expression" | "call") {
+            return;
+        }
+        let Some(callee) = node.child_by_field_name("function") else {
+            return;
+        };
+        let callee_name = if callee.kind() == "member_expression" {
+            callee
+                .child_by_field_name("property")
+                .and_then(|property| self.text(property))
+        } else if callee.kind() == "field_expression" {
+            callee
+                .child_by_field_name("field")
+                .and_then(|field| self.text(field))
+        } else {
+            callee
+                .child_by_field_name("name")
+                .and_then(|name| self.text(name))
+                .or_else(|| self.text(callee))
+        };
+        let (Some(target), Some(caller)) = (callee_name, self.enclosing()) else {
+            return;
+        };
+        self.edges.push(ExtractedEdge {
+            from_symbol: caller.to_string(),
+            to_symbol: target,
+            edge_kind: EDGE_CALLS.to_string(),
+        });
+    }
+
+    fn push_go_imports(&mut self, node: Node) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "import_spec" {
+                continue;
+            }
+            if let Some(path) = child.child_by_field_name("path") {
+                if let Some(name) = self
+                    .text(path)
+                    .map(|text| text.trim_matches('"').to_string())
+                    .filter(|text| !text.is_empty())
+                {
+                    self.push_import(name, child);
                 }
             }
         }
+    }
 
-        // Recurse, then pop the scope entry this node pushed (if any).
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            self.walk(child);
+    fn push_python_imports(&mut self, node: Node) {
+        if node.kind() == "future_import_statement" {
+            self.push_import("__future__".to_string(), node);
+            return;
         }
-        if pushed {
-            self.scope.pop();
+        if let Some(module) = node
+            .child_by_field_name("module_name")
+            .and_then(|module| self.text(module))
+        {
+            self.push_import(module, node);
+            return;
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children_by_field_name("name", &mut cursor) {
+            let import = child.child_by_field_name("name").unwrap_or(child);
+            if let Some(name) = self.text(import) {
+                self.push_import(name, child);
+            }
+        }
+    }
+
+    fn push_javascript_import(&mut self, node: Node) {
+        if let Some(source) = node
+            .child_by_field_name("source")
+            .and_then(|source| self.text(source))
+        {
+            let name = source.trim_matches(['\'', '"']).to_string();
+            if !name.is_empty() {
+                self.push_import(name, node);
+            }
         }
     }
 
@@ -368,7 +370,7 @@ impl<'a> Collector<'a> {
             name: name.clone(),
             kind: SYMBOL_IMPORT.to_string(),
             signature: None,
-            line: node.start_position().row as i64 + 1,
+            line: Self::line_number(node),
         });
         self.edges.push(ExtractedEdge {
             from_symbol: self.file_path.to_string(),
@@ -459,6 +461,62 @@ fn main() {
         let names: Vec<&str> = idx.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"A"), "{names:?}");
         assert!(names.contains(&"A::go"), "{names:?}");
+    }
+
+    #[test]
+    fn rust_impl_blocks_do_not_duplicate_type_symbols() {
+        let src = "struct User {}\nimpl User { fn one() {} }\nimpl User { fn two() {} }\n";
+        let idx = extract_file("user.rs", src).unwrap();
+        assert_eq!(
+            idx.symbols
+                .iter()
+                .filter(|symbol| symbol.name == "User")
+                .count(),
+            1
+        );
+        assert_eq!(
+            idx.edges
+                .iter()
+                .filter(|edge| edge.edge_kind == EDGE_DEFINES && edge.to_symbol == "User")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn python_imports_use_module_names() {
+        let src = "import importlib\nimport os, sys\nimport numpy as np\nfrom collections.abc import Mapping\nfrom .helpers import thing\n";
+        let idx = extract_file("imports.py", src).unwrap();
+        let imports: Vec<&str> = idx
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == SYMBOL_IMPORT)
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+        assert_eq!(
+            imports,
+            [
+                "importlib",
+                "os",
+                "sys",
+                "numpy",
+                "collections.abc",
+                ".helpers"
+            ]
+        );
+    }
+
+    #[test]
+    fn javascript_imports_are_extracted() {
+        let src = "import React from 'react';\nimport { value } from \"./value.js\";\n";
+        let idx = extract_file("imports.js", src).unwrap();
+        let imports: Vec<&str> = idx
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_kind == EDGE_IMPORTS)
+            .map(|edge| edge.to_symbol.as_str())
+            .collect();
+        assert_eq!(imports, ["react", "./value.js"]);
     }
 
     #[test]

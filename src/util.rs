@@ -1,5 +1,66 @@
 //! Shared helpers used across the bot and API.
 
+use std::fmt::Write as _;
+use std::future::Future;
+use std::sync::LazyLock;
+use tokio::runtime::{Handle, Runtime};
+
+static FALLBACK_RT: LazyLock<Runtime> =
+    LazyLock::new(|| Runtime::new().expect("failed to create fallback tokio runtime"));
+
+/// Run a future from sync code, reusing the current multi-thread runtime when possible.
+///
+/// `block_in_place` is required because callers may already hold blocking work on the
+/// runtime; calling `Handle::block_on` directly would panic in that case.
+pub fn block_on<F: Future>(fut: F) -> F::Output {
+    match Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => FALLBACK_RT.block_on(fut),
+    }
+}
+
+/// Percent-encode everything outside RFC 3986 unreserved characters.
+pub fn url_encode(s: &str) -> String {
+    percent_encode(s, false)
+}
+
+/// Like [`url_encode`], but leaves `/` intact for path segments.
+pub fn url_encode_path(s: &str) -> String {
+    percent_encode(s, true)
+}
+
+fn percent_encode(s: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'_' | b'.' | b'~')
+            || (keep_slash && b == b'/')
+        {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// Narrow security-path signal used for related-PR ranking.
+pub fn is_security_sensitive_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("auth")
+        || lower.contains("crypto")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("middleware")
+        || lower.contains("rbac")
+        || lower.contains("permission")
+        || lower.contains("/k8s/")
+        || lower.contains("/kubernetes/")
+        || lower.contains("/helm/")
+        || lower.ends_with(".tf")
+        || lower.ends_with(".tfvars")
+}
+
 /// GitHub API related constants.
 pub mod github {
     /// Number of files to fetch per API page when listing PR files.

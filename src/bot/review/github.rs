@@ -1,6 +1,7 @@
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use crate::state::ReviewState;
 use anyhow::Result;
+use reqwest::Method;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -19,8 +20,8 @@ pub(crate) static GITHUB_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::n
         .build()
     {
         Ok(client) => Some(client),
-        Err(e) => {
-            eprintln!("Warning: failed to build GitHub API client: {e}");
+        Err(error) => {
+            tracing::error!(error = %error, "failed to build GitHub API client");
             None
         }
     }
@@ -35,25 +36,86 @@ pub async fn fetch_pull_request(
     let client = GITHUB_CLIENT
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("GitHub API client not available (failed to initialize)"))?;
-    let auth_header = format!("Bearer {token}");
-    let headers = github_api_headers(&auth_header)?;
+    let headers = github_api_headers(&format!("Bearer {token}"))?;
     let url = format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}");
-    retry_async(
-        &RetryConfig::api_default(),
+    github_get(
+        client,
+        &headers,
+        &url,
         "fetch_pull_request",
-        &is_reqwest_error_retryable,
-        || async {
-            client
-                .get(&url)
-                .headers(headers.clone())
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(Into::into)
-        },
+        &RetryConfig::api_default(),
     )
+    .await
+}
+
+/// Concatenate the first `max_files` non-empty patches into one bounded diff.
+pub(crate) fn unified_diff_from_files(
+    files: &[serde_json::Value],
+    max_files: usize,
+    max_bytes: usize,
+) -> String {
+    let mut diff = String::new();
+    for f in files.iter().take(max_files) {
+        let name = f["filename"].as_str().unwrap_or("?");
+        let patch = f["patch"].as_str().unwrap_or("");
+        if patch.is_empty() {
+            continue;
+        }
+        use std::fmt::Write as _;
+        let _ = write!(diff, "--- a/{name}\n+++ b/{name}\n{patch}\n");
+        if diff.len() > max_bytes {
+            break;
+        }
+    }
+    diff
+}
+
+/// GET a GitHub API resource with the shared retry policy.
+pub(crate) async fn github_get<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
+    url: &str,
+    op: &'static str,
+    retry: &RetryConfig,
+) -> Result<T> {
+    github_request(Method::GET, client, headers, url, None, op, retry).await
+}
+
+/// POST a JSON body to a GitHub API resource with the shared retry policy.
+/// `body` is `None` for endpoints like the installation-token exchange that
+/// take no parameters.
+pub(crate) async fn github_post<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
+    url: &str,
+    body: Option<&serde_json::Value>,
+    op: &'static str,
+    retry: &RetryConfig,
+) -> Result<T> {
+    github_request(Method::POST, client, headers, url, body, op, retry).await
+}
+
+async fn github_request<T: serde::de::DeserializeOwned>(
+    method: Method,
+    client: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
+    url: &str,
+    body: Option<&serde_json::Value>,
+    op: &'static str,
+    retry: &RetryConfig,
+) -> Result<T> {
+    retry_async(retry, op, &is_reqwest_error_retryable, || async {
+        let mut req = client.request(method.clone(), url).headers(headers.clone());
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        req.send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(Into::into)
+    })
     .await
 }
 
@@ -86,27 +148,18 @@ pub(crate) async fn fetch_pr_files(
     pr_number: i64,
     auth_header: &str,
 ) -> Result<Vec<serde_json::Value>> {
+    let headers = github_api_headers(auth_header)?;
     let mut all_files = Vec::new();
     for page_number in 1..=MAX_PR_FILE_PAGES {
         let url = format!(
             "https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page={PER_PAGE}&page={page_number}"
         );
-        let page: Vec<serde_json::Value> = retry_async(
-            &RetryConfig::api_default(),
+        let page: Vec<serde_json::Value> = github_get(
+            client,
+            &headers,
+            &url,
             "fetch_pr_files_page",
-            &is_reqwest_error_retryable,
-            || async {
-                let headers = github_api_headers(auth_header)?;
-                client
-                    .get(&url)
-                    .headers(headers)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await
-                    .map_err(Into::into)
-            },
+            &RetryConfig::api_default(),
         )
         .await?;
         let is_last_page = page.len() < PER_PAGE;
@@ -119,18 +172,9 @@ pub(crate) async fn fetch_pr_files(
     unreachable!("the bounded page loop always returns")
 }
 
-/// Fingerprint prefixes Codasaurus has already posted an inline comment for on
-/// this PR, read back from GitHub.
-///
-/// Without this every push re-posts an inline comment for every finding that is
-/// still open, so a PR that takes five pushes to fix accumulates five copies of
-/// the same comment. GitHub is the source of truth rather than our own findings
-/// table, because a finding can be persisted and still never have been commented
-/// on (it was past `max_inline_comments`, or had no line to anchor to).
-///
-/// Best-effort: on any failure this returns empty, which re-posts a comment.
-/// Duplicating a comment is a far better failure than silently withholding a
-/// blocking finding.
+/// Fingerprint prefixes already posted on this PR, read from GitHub because a
+/// persisted finding may never have been commented. Failures return empty so a
+/// duplicate is preferred to hiding a blocking finding.
 pub(crate) async fn posted_inline_fingerprints(
     client: &reqwest::Client,
     headers: &reqwest::header::HeaderMap,
@@ -142,21 +186,12 @@ pub(crate) async fn posted_inline_fingerprints(
         let url = format!(
             "https://api.github.com/repos/{repo_name}/pulls/{pr_number}/comments?per_page={PER_PAGE}&page={page}"
         );
-        let fetched = retry_async(
-            &RetryConfig::api_default(),
+        let fetched = github_get::<Vec<serde_json::Value>>(
+            client,
+            headers,
+            &url,
             "list_review_comments",
-            &is_reqwest_error_retryable,
-            || async {
-                client
-                    .get(&url)
-                    .headers(headers.clone())
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Vec<serde_json::Value>>()
-                    .await
-                    .map_err(Into::into)
-            },
+            &RetryConfig::api_default(),
         )
         .await;
         let Ok(comments) = fetched else {
@@ -332,85 +367,42 @@ pub(crate) fn next_github_link(headers: &reqwest::header::HeaderMap) -> Option<S
     None
 }
 
-/// True when GitHub already has a pull-request review for `head_sha` (idempotent retry guard).
-pub(crate) async fn review_exists_for_commit(
+/// True when GitHub already has a review for `head_sha`. When `marker` is set,
+/// only reviews whose body contains it are considered, so an independent review
+/// can be posted for the same commit without colliding with idempotency checks.
+pub(crate) async fn review_exists(
     client: &reqwest::Client,
     auth_header: &str,
     repo_name: &str,
     pr_number: i64,
     head_sha: &str,
+    marker: Option<&str>,
 ) -> Result<bool> {
     if head_sha.is_empty() {
         return Ok(false);
     }
     let url =
         format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews?per_page=100");
-    let reviews: Vec<serde_json::Value> = retry_async(
-        &RetryConfig::quick(),
+    let headers = github_api_headers(auth_header)?;
+    let reviews: Vec<serde_json::Value> = github_get(
+        client,
+        &headers,
+        &url,
         "list_pr_reviews",
-        &is_reqwest_error_retryable,
-        || async {
-            let headers = github_api_headers(auth_header)?;
-            client
-                .get(&url)
-                .headers(headers)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(Into::into)
-        },
+        &RetryConfig::quick(),
     )
     .await?;
     Ok(reviews.iter().any(|r| {
-        r.get("commit_id")
+        let sha_matches = r
+            .get("commit_id")
             .and_then(|v| v.as_str())
-            .is_some_and(|sha| sha == head_sha)
-    }))
-}
-
-/// Like [`review_exists_for_commit`] but scoped to reviews whose body contains `marker` —
-/// lets a second, independent review (e.g. LLM auto-fix suggestions) be posted for the
-/// same commit without colliding with the Tier-1 review's own idempotency check.
-pub(crate) async fn review_exists_with_marker(
-    client: &reqwest::Client,
-    auth_header: &str,
-    repo_name: &str,
-    pr_number: i64,
-    head_sha: &str,
-    marker: &str,
-) -> Result<bool> {
-    if head_sha.is_empty() {
-        return Ok(false);
-    }
-    let url =
-        format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews?per_page=100");
-    let reviews: Vec<serde_json::Value> = retry_async(
-        &RetryConfig::quick(),
-        "list_pr_reviews",
-        &is_reqwest_error_retryable,
-        || async {
-            let headers = github_api_headers(auth_header)?;
-            client
-                .get(&url)
-                .headers(headers)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(Into::into)
-        },
-    )
-    .await?;
-    Ok(reviews.iter().any(|r| {
-        r.get("commit_id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|sha| sha == head_sha)
-            && r.get("body")
-                .and_then(|v| v.as_str())
-                .is_some_and(|b| b.contains(marker))
+            .is_some_and(|sha| sha == head_sha);
+        sha_matches
+            && marker.is_none_or(|m| {
+                r.get("body")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|body| body.contains(m))
+            })
     }))
 }
 

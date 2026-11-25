@@ -9,10 +9,6 @@ use crate::db;
 use super::errors::ApiError;
 use super::AppState;
 
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, Default)]
 pub struct ListAuditParams {
     pub event_type: Option<String>,
@@ -22,17 +18,9 @@ pub struct ListAuditParams {
     pub per_page: Option<i64>,
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_audit))
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 /// GET /api/audit
 #[utoipa::path(get, path = "/api/audit", tag = "audit", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
@@ -50,19 +38,23 @@ pub(crate) async fn list_audit(
     };
     let event_type = params.event_type.as_deref();
 
-    let entries = db::audit::list_audit_entries(&state.pool, event_type, limit, offset).await?;
-
-    // Total count (matching filter)
-    let total: i64 = match event_type {
-        Some(et) => crate::db::db_scalar!(
-            &state.pool,
-            i64,
-            "SELECT COUNT(*) FROM audit_log WHERE event_type = ?",
-            et
-        )?,
-        None => crate::db::db_scalar!(&state.pool, i64, "SELECT COUNT(*) FROM audit_log")?,
-    };
-    let total_pages = ((total as f64) / (limit as f64)).ceil() as i64;
+    let (entries, total) = tokio::join!(
+        db::audit::list_audit_entries(&state.pool, event_type, limit, offset),
+        async {
+            match event_type {
+                Some(et) => crate::db::db_scalar!(
+                    &state.pool,
+                    i64,
+                    "SELECT COUNT(*) FROM audit_log WHERE event_type = ?",
+                    et
+                ),
+                None => crate::db::db_scalar!(&state.pool, i64, "SELECT COUNT(*) FROM audit_log"),
+            }
+        },
+    );
+    let entries = entries?;
+    let total = total?;
+    let total_pages = total / limit + i64::from(total % limit != 0);
 
     Ok(Json(json!({
         "entries": entries,

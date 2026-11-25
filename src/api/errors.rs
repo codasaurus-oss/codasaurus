@@ -42,12 +42,17 @@ impl IntoResponse for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
-        ApiError::Internal(err.to_string())
+        Self::internal_error(err)
     }
 }
 
-// Convenience constructors so handlers read naturally.
 impl ApiError {
+    /// Log the real cause and return a generic response body.
+    pub fn internal_error(err: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %err, "internal API error");
+        ApiError::Internal("Internal server error".into())
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         ApiError::NotFound(msg.into())
     }
@@ -66,10 +71,6 @@ impl ApiError {
 
     pub fn forbidden(msg: impl Into<String>) -> Self {
         ApiError::Forbidden(msg.into())
-    }
-
-    pub fn too_many_requests(msg: impl Into<String>) -> Self {
-        ApiError::TooManyRequests(msg.into(), 0)
     }
 
     pub fn too_many_requests_after(msg: impl Into<String>, retry_after_secs: u64) -> Self {

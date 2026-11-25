@@ -116,7 +116,7 @@ pub fn evaluate_gate(gate: &QualityGate, findings: &[Finding]) -> GateResult {
             GateMetric::NewWarningIssues => *counts.get("warning").unwrap_or(&0) as f64,
             GateMetric::NewInfoIssues => *counts.get("info").unwrap_or(&0) as f64,
         };
-        if cond.operator.eval(actual, cond.threshold) {
+        if !cond.threshold.is_finite() || cond.operator.eval(actual, cond.threshold) {
             failed.push(FailedCondition {
                 metric: cond.metric,
                 operator: cond.operator,
@@ -272,5 +272,30 @@ mod tests {
         let gate = QualityGate::default();
         let r = evaluate_gate(&gate, &sample(0, 6, 0));
         assert!(!r.passed);
+    }
+
+    #[test]
+    fn configured_default_gate_does_not_duplicate_blocker_aliases() {
+        let gate = QualityGate::from(QualityGateConfig::default());
+        let result = evaluate_gate(&gate, &sample(1, 0, 0));
+
+        assert_eq!(result.failed_conditions.len(), 1);
+    }
+
+    #[test]
+    fn non_finite_threshold_fails_closed() {
+        let gate = QualityGate {
+            name: "invalid".into(),
+            conditions: vec![GateCondition {
+                metric: GateMetric::NewIssues,
+                operator: GateOperator::Gt,
+                threshold: f64::NAN,
+            }],
+        };
+
+        let result = evaluate_gate(&gate, &sample(0, 0, 0));
+
+        assert!(!result.passed);
+        assert_eq!(result.failed_conditions.len(), 1);
     }
 }

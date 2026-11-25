@@ -12,14 +12,14 @@ pub mod client;
 use crate::db::DbPool;
 use anyhow::{bail, Result};
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
-/// Heuristic classification of a tool as state-mutating from its name. There is no
-/// standard MCP field for this, and remote servers are third-party (GitHub, Linear,
-/// Notion, Jira, Sentry, or an operator-supplied custom URL) — so tool calls are
-/// steerable by whatever a reviewing PR's diff/description says, including a
-/// jailbroken or hallucinating model. Default-deny anything that looks like a write
-/// so a prompt-injected diff can only ever reach read-only tools; this is a
-/// heuristic safety net, not a substitute for per-tool allowlisting by the operator.
+const MAX_CONCURRENT_MCP_FETCHES: usize = 4;
+
+/// Default-deny write-looking tools because PR content can steer the model.
+/// This is a heuristic safety net, not a replacement for operator allowlisting.
 fn is_write_tool(name: &str) -> bool {
     const WRITE_PREFIXES: &[&str] = &[
         "create",
@@ -70,9 +70,11 @@ fn is_write_tool(name: &str) -> bool {
         "unpin",
     ];
     let lower = name.to_ascii_lowercase();
-    WRITE_PREFIXES
-        .iter()
-        .any(|p| lower.starts_with(p) || lower.contains(&format!("_{p}")))
+    lower.split('_').any(|segment| {
+        WRITE_PREFIXES
+            .iter()
+            .any(|prefix| segment.starts_with(prefix))
+    })
 }
 
 /// One tool exposed to the LLM, qualified with its server so names never collide.
@@ -96,32 +98,25 @@ pub struct ServerInfo {
     pub is_custom: bool,
 }
 
-async fn custom_server_ids(pool: &DbPool) -> Vec<String> {
-    match crate::db::config::get_config(pool, "mcp_custom_server_ids").await {
-        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
-        _ => Vec::new(),
-    }
+async fn server_configs(pool: &DbPool) -> std::collections::HashMap<String, String> {
+    crate::db::config::get_all_config(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.key, entry.value))
+        .collect()
 }
 
-/// All servers known to this instance: catalog entries plus any custom ones,
-/// merged with their DB-stored enabled/key state. Never returns raw keys.
-pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
+fn list_servers_from_config(config: &std::collections::HashMap<String, String>) -> Vec<ServerInfo> {
     let mut out = Vec::new();
 
     for entry in catalog::CATALOG {
-        let enabled = crate::db::config::get_config(pool, &format!("mcp_{}_enabled", entry.id))
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        let key_configured =
-            crate::db::config::get_config(pool, &format!("mcp_{}_api_key", entry.id))
-                .await
-                .ok()
-                .flatten()
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
+        let enabled = config
+            .get(&format!("mcp_{}_enabled", entry.id))
+            .is_some_and(|value| value == "true");
+        let key_configured = config
+            .get(&format!("mcp_{}_api_key", entry.id))
+            .is_some_and(|value| !value.is_empty());
         out.push(ServerInfo {
             id: entry.id.to_string(),
             name: entry.name.to_string(),
@@ -133,28 +128,24 @@ pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
         });
     }
 
-    for id in custom_server_ids(pool).await {
-        let enabled = crate::db::config::get_config(pool, &format!("mcp_{id}_enabled"))
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        let key_configured = crate::db::config::get_config(pool, &format!("mcp_{id}_api_key"))
-            .await
-            .ok()
-            .flatten()
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        let name = crate::db::config::get_config(pool, &format!("mcp_{id}_name"))
-            .await
-            .ok()
-            .flatten()
+    let custom_ids: Vec<String> = config
+        .get("mcp_custom_server_ids")
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    for id in custom_ids {
+        let enabled = config
+            .get(&format!("mcp_{id}_enabled"))
+            .is_some_and(|value| value == "true");
+        let key_configured = config
+            .get(&format!("mcp_{id}_api_key"))
+            .is_some_and(|value| !value.is_empty());
+        let name = config
+            .get(&format!("mcp_{id}_name"))
+            .cloned()
             .unwrap_or_else(|| id.clone());
-        let base_url = crate::db::config::get_config(pool, &format!("mcp_{id}_base_url"))
-            .await
-            .ok()
-            .flatten()
+        let base_url = config
+            .get(&format!("mcp_{id}_base_url"))
+            .cloned()
             .unwrap_or_default();
         out.push(ServerInfo {
             id,
@@ -170,6 +161,12 @@ pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
     out
 }
 
+/// All servers known to this instance: catalog entries plus any custom ones,
+/// merged with their DB-stored enabled/key state. Never returns raw keys.
+pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
+    list_servers_from_config(&server_configs(pool).await)
+}
+
 /// Tool specs for every enabled server, in OpenAI-compatible shape. Empty in
 /// offline mode or when a server's `tools/list` call fails (fails open —
 /// one broken server doesn't kill review).
@@ -178,40 +175,62 @@ pub async fn list_enabled_tools(pool: &DbPool) -> Vec<McpToolSpec> {
         return Vec::new();
     }
 
-    let mut specs = Vec::new();
-    for server in list_servers(pool).await {
-        if !server.enabled || server.base_url.is_empty() {
-            continue;
-        }
-        let api_key = crate::db::config::get_config(pool, &format!("mcp_{}_api_key", server.id))
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+    let config = server_configs(pool).await;
+    let servers: Vec<_> = list_servers_from_config(&config)
+        .into_iter()
+        .filter(|server| server.enabled && !server.base_url.is_empty())
+        .map(|server| {
+            let api_key = config
+                .get(&format!("mcp_{}_api_key", server.id))
+                .cloned()
+                .unwrap_or_default();
+            (server, api_key)
+        })
+        .collect();
+    let server_count = servers.len();
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_MCP_FETCHES));
+    let mut tasks = JoinSet::new();
 
-        let tools = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
-        for tool in tools {
-            let Some(name) = tool.get("name").and_then(|v| v.as_str()) else {
-                continue;
+    for (index, (server, api_key)) in servers.into_iter().enumerate() {
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let Ok(_permit) = semaphore.acquire().await else {
+                return (index, Vec::new());
             };
-            if is_write_tool(name) {
-                continue;
-            }
-            specs.push(McpToolSpec {
-                qualified_name: format!("{}__{name}", server.id),
-                description: tool
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                input_schema: tool
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
-            });
+            let tools = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
+            let specs = tools
+                .into_iter()
+                .filter_map(|tool| {
+                    let name = tool.get("name")?.as_str()?;
+                    if is_write_tool(name) {
+                        return None;
+                    }
+                    Some(McpToolSpec {
+                        qualified_name: format!("{}__{name}", server.id),
+                        description: tool
+                            .get("description")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        input_schema: tool
+                            .get("inputSchema")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+                    })
+                })
+                .collect();
+            (index, specs)
+        });
+    }
+
+    let mut batches = vec![Vec::new(); server_count];
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((index, specs)) => batches[index] = specs,
+            Err(error) => tracing::warn!(error = %error, "MCP tool discovery task failed"),
         }
     }
-    specs
+    batches.into_iter().flatten().collect()
 }
 
 /// Truncated at 8000 chars — bounds what a tool result can cost in the next
@@ -223,24 +242,19 @@ pub async fn call_tool(pool: &DbPool, qualified_name: &str, arguments: &Value) -
         bail!("malformed MCP tool name: {qualified_name}");
     };
 
-    // Re-validate against the currently enabled server + its live tool list before
-    // executing anything — the model only sees this list when tools are *offered*,
-    // but a jailbroken/hallucinating model can still emit a call for a name it was
-    // never given (e.g. lifted from injected PR content), or for a server that was
-    // disabled after tools were listed for this review. Never trust the tool call
-    // in isolation from the current allowlist.
-    let server = list_servers(pool)
-        .await
+    // Re-check the live allowlist: injected content or a config change can
+    // introduce a tool name that was unavailable when tools were offered.
+    let config = server_configs(pool).await;
+    let server = list_servers_from_config(&config)
         .into_iter()
         .find(|s| s.id == server_id)
         .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server_id}"))?;
     if !server.enabled || server.base_url.is_empty() {
         bail!("MCP server {server_id} is not enabled");
     }
-    let api_key = crate::db::config::get_config(pool, &format!("mcp_{server_id}_api_key"))
-        .await
-        .ok()
-        .flatten()
+    let api_key = config
+        .get(&format!("mcp_{server_id}_api_key"))
+        .cloned()
         .unwrap_or_default();
     let available = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
     let allowed = available
@@ -263,4 +277,31 @@ pub async fn call_tool(pool: &DbPool, qualified_name: &str, arguments: &Value) -
     };
     let truncated: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
     Ok(truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_tool_classification_covers_prefixes_and_segments() {
+        for name in [
+            "create_issue",
+            "UpdateIssue",
+            "repo__delete_branch",
+            "foo_set_status",
+            "execute_command",
+        ] {
+            assert!(is_write_tool(name), "{name}");
+        }
+
+        for name in [
+            "get_issue",
+            "search_docs",
+            "list_repositories",
+            "fetch_summary",
+        ] {
+            assert!(!is_write_tool(name), "{name}");
+        }
+    }
 }

@@ -11,25 +11,13 @@ use crate::learning::store::LearningStore;
 use super::errors::ApiError;
 use super::AppState;
 
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize, Default)]
 pub struct ListReviewsParams {
     pub repo_id: Option<i64>,
     pub status: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    #[serde(alias = "page")]
-    pub _page: Option<i64>,
-    #[serde(alias = "per_page")]
-    pub _per_page: Option<i64>,
 }
-
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct DismissBody {
@@ -50,58 +38,34 @@ pub fn router() -> Router<AppState> {
         .route("/dismiss", post(dismiss_finding))
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
 /// GET /api/reviews
 #[utoipa::path(get, path = "/api/reviews", tag = "reviews", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn list_reviews(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<ListReviewsParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::rbac::require_role(&state.pool, &headers, super::rbac::MinRole::Viewer).await?;
     let limit = params.limit.unwrap_or(20).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
     let repo_id = params.repo_id;
     let status = params.status.as_deref();
 
-    let reviews = db::reviews::list_reviews(&state.pool, repo_id, status, limit, offset).await?;
-    let total: i64 = count_reviews(&state.pool, repo_id, status).await?;
-    let total_pages = ((total as f64) / (limit as f64)).ceil() as i64;
-
-    // Batch-load repo names (avoid N+1).
-    let mut name_by_id: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
-    let unique_ids: Vec<i64> = {
-        let mut ids: Vec<i64> = reviews.iter().map(|r| r.repo_id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    };
-    if !unique_ids.is_empty() {
-        let placeholders = std::iter::repeat_n("?", unique_ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!("SELECT id, full_name FROM repos WHERE id IN ({placeholders})");
-        let prepared = state.pool.prepare_sql(&sql);
-        let mut q = sqlx::query_as::<_, (i64, String)>(&prepared);
-        for id in &unique_ids {
-            q = q.bind(id);
-        }
-        if let Ok(rows) = q.fetch_all(state.pool.as_pg()).await {
-            for (id, name) in rows {
-                name_by_id.insert(id, name);
-            }
-        }
-    }
+    let (reviews, total) = tokio::join!(
+        db::reviews::list_reviews(&state.pool, repo_id, status, limit, offset),
+        count_reviews(&state.pool, repo_id, status),
+    );
+    let reviews = reviews?;
+    let total = total?;
+    let total_pages = total / limit + i64::from(total % limit != 0);
 
     let enriched: Vec<serde_json::Value> = reviews
-        .iter()
-        .map(|r| {
-            let name = name_by_id.get(&r.repo_id).cloned().unwrap_or_default();
-            let mut v = serde_json::to_value(r).unwrap_or_default();
+        .into_iter()
+        .map(|row| {
+            let mut v = serde_json::to_value(row.review).unwrap_or_default();
             if let Some(obj) = v.as_object_mut() {
-                obj.insert("repo_name".into(), json!(name.clone()));
-                obj.insert("repo_full_name".into(), json!(name));
+                obj.insert("repo_name".into(), json!(row.repo_full_name.clone()));
+                obj.insert("repo_full_name".into(), json!(row.repo_full_name));
             }
             v
         })
@@ -151,22 +115,13 @@ async fn count_reviews(
 #[utoipa::path(get, path = "/api/reviews/{id}", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_review(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let review = db::reviews::get_review(&state.pool, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
-
+    let (_user, detail) = super::rbac::require_review_read(&state, &headers, id).await?;
     let findings = db::reviews::get_findings_for_review(&state.pool, id).await?;
-
-    let repo_full_name: Option<String> = crate::db::db_scalar_optional!(
-        &state.pool,
-        String,
-        "SELECT full_name FROM repos WHERE id = ?",
-        review.repo_id
-    )
-    .ok()
-    .flatten();
+    let review = detail.review;
+    let repo_full_name = (!detail.repo_full_name.is_empty()).then_some(detail.repo_full_name);
 
     let mut by_severity: std::collections::BTreeMap<String, i64> =
         std::collections::BTreeMap::new();
@@ -214,16 +169,13 @@ pub(crate) async fn get_review(
 #[utoipa::path(get, path = "/api/reviews/{id}/findings", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_review_findings(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Verify the review exists first
-    let _review = db::reviews::get_review(&state.pool, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
+    super::rbac::require_review_read(&state, &headers, id).await?;
 
     let findings = db::reviews::get_findings_for_review(&state.pool, id).await?;
 
-    // Group findings by file_path
     let mut grouped: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
         std::collections::BTreeMap::new();
     for f in findings {
@@ -242,23 +194,13 @@ pub(crate) async fn get_review_findings(
 #[utoipa::path(get, path = "/api/reviews/{id}/sarif", tag = "reviews", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn get_review_sarif(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<axum::response::Response, ApiError> {
-    let review = db::reviews::get_review(&state.pool, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Review {id} not found")))?;
-
+    let (_user, detail) = super::rbac::require_review_read(&state, &headers, id).await?;
     let findings = db::reviews::get_findings_for_review(&state.pool, id).await?;
-
-    let repo_full_name: String = crate::db::db_scalar_optional!(
-        &state.pool,
-        String,
-        "SELECT full_name FROM repos WHERE id = ?",
-        review.repo_id
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_default();
+    let review = detail.review;
+    let repo_full_name = detail.repo_full_name;
 
     let commit_sha = review.pr_head_sha.clone().unwrap_or_default();
     let sarif =
@@ -269,17 +211,17 @@ pub(crate) async fn get_review_sarif(
         .body(axum::body::Body::from(
             serde_json::to_vec(&sarif).unwrap_or_default(),
         ))
-        .map_err(|e| ApiError::internal(e.to_string()))
+        .map_err(ApiError::internal_error)
 }
 
 /// POST /api/reviews/dismiss — dismiss a finding into the learning store
-async fn dismiss_finding(
+#[utoipa::path(post, path = "/api/reviews/dismiss", tag = "reviews", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn dismiss_finding(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(body): Json<DismissBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    super::rbac::require_maintainer(&state, &headers).await?;
-    let user = super::rbac::current_user(&state.pool, &headers).await?;
+    let user = super::rbac::require_maintainer(&state, &headers).await?;
     let fp = body.fingerprint.trim();
     if fp.len() < 8 {
         return Err(ApiError::bad_request("fingerprint too short"));
@@ -299,6 +241,6 @@ async fn dismiss_finding(
             true, // dashboard dismiss requires maintainer
         )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::internal_error)?;
     Ok(Json(json!({ "status": "ok", "fingerprint": fp })))
 }

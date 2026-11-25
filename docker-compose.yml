@@ -9,12 +9,70 @@ services:
       POSTGRES_DB: codasaurus
     volumes:
       - codasaurus-pg:/var/lib/postgresql/data
+      - ./docker/litellm-init.sql:/docker-entrypoint-initdb.d/01-litellm.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codasaurus"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  litellm-migrate:
+    image: ghcr.io/berriai/litellm:v1.110.2
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - /app/.venv/bin/prisma migrate deploy --schema /app/.venv/lib/python*/site-packages/litellm_proxy_extras/schema.prisma
+    environment:
+      - DATABASE_URL=${LITELLM_DATABASE_URL:?required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.110.2
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      - LITELLM_MODE=PRODUCTION
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?required}
+      - STORE_MODEL_IN_DB=True
+      - DATABASE_URL=${LITELLM_DATABASE_URL:?required}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY:?required}
+      # Provider credentials and models are configured through Codasaurus
+      # onboarding / Settings → LLM, not in the mounted gateway config.
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+    depends_on:
+      litellm-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   codasaurus:
     build:
@@ -26,15 +84,20 @@ services:
       - "3000:3000"
     environment:
       - DATABASE_URL=postgres://codasaurus:${POSTGRES_PASSWORD:-codasaurus}@postgres:5432/codasaurus
+      - REDIS_URL=redis://redis:6379
+      - CODASAURUS_TRUSTED_PROXIES=${CODASAURUS_TRUSTED_PROXIES:-127.0.0.0/8,::1/128}
       - CODASAURUS_DATA_DIR=/data
       - PORT=3000
       - GITHUB_APP_ID=${GITHUB_APP_ID:-}
       - GITHUB_APP_PRIVATE_KEY_B64=${GITHUB_APP_PRIVATE_KEY_B64:-}
       - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - CODASAURUS_MODEL=${CODASAURUS_MODEL:-}
-      - CODASAURUS_BASE_URL=${CODASAURUS_BASE_URL:-}
+      - CODASAURUS_MODEL_CHEAP=${CODASAURUS_MODEL_CHEAP:-}
+      - CODASAURUS_EMBEDDING_MODEL=${CODASAURUS_EMBEDDING_MODEL:-}
+      - CODASAURUS_BASE_URL=http://litellm:4000/v1
+      # Admin credential for gateway management APIs; never used for inference.
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?required}
       - CODASAURUS_MAX_CONCURRENT_REVIEWS=${CODASAURUS_MAX_CONCURRENT_REVIEWS:-4}
       - OIDC_ISSUER=${OIDC_ISSUER:-}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
@@ -59,6 +122,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      litellm:
+        # The app fails closed without a gateway, so a sidecar that is still
+        # booting (or misconfigured) must not block the dashboard and webhook.
+        condition: service_started
     healthcheck:
       test: ["CMD", "codasaurus", "health", "--ready"]
       interval: 30s

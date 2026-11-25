@@ -86,91 +86,39 @@ impl ReviewState {
         Ok(())
     }
 
-    pub async fn get_reviewed_sha_async(
-        &self,
-        repo: &str,
-        pr_number: i64,
-    ) -> Result<Option<String>> {
-        let key = format!("{repo}/{pr_number}");
-        Ok(db_scalar_optional!(
-            &self.pool,
-            String,
-            "SELECT head_sha FROM reviewed_commits WHERE repo_pr = ?",
-            &key
-        )?)
-    }
-
     pub async fn try_claim_sha(&self, repo: &str, pr_number: i64, sha: &str) -> Result<bool> {
         let key = format!("{repo}/{pr_number}");
         let owner = lease_owner_id();
         if let Some(row) = db_fetch_optional!(
             &self.pool,
-            (String, String, DateTime<Utc>, String),
+            (String, String, DateTime<Utc>),
             "SELECT head_sha,
                     COALESCE(status, 'completed'),
-                    COALESCE(created_at, NOW()),
-                    COALESCE(lease_owner, '')
+                    COALESCE(created_at, NOW())
              FROM reviewed_commits WHERE repo_pr = ?",
             &key
         )? {
-            let (existing, status, created_at, lease_owner) = row;
+            let (existing, status, created_at) = row;
             if existing == sha {
                 if status == "completed" {
                     return Ok(false);
                 }
-                if status == "in_progress" && lease_owner != owner && !is_claim_stale(created_at) {
-                    return Ok(false);
-                }
-                if status == "in_progress" && lease_owner == owner && !is_claim_stale(created_at) {
+                if status == "in_progress" && !is_claim_stale(created_at) {
                     return Ok(false);
                 }
             }
         }
 
-        let result = sqlx::query(
-            "INSERT INTO reviewed_commits (repo_pr, head_sha, status, lease_owner, created_at)
-             VALUES ($1, $2, 'in_progress', $3, NOW())
-             ON CONFLICT(repo_pr) DO UPDATE SET
-               head_sha = excluded.head_sha,
-               status = 'in_progress',
-               lease_owner = excluded.lease_owner,
-               created_at = NOW()
-             WHERE reviewed_commits.head_sha != excluded.head_sha
-                OR reviewed_commits.status != 'in_progress'
-                OR reviewed_commits.lease_owner = excluded.lease_owner
-                OR reviewed_commits.created_at < NOW() - ($4::bigint * INTERVAL '1 second')",
-        )
-        .bind(&key)
-        .bind(sha)
-        .bind(owner)
-        .bind(stale_claim_secs())
-        .execute(self.pool.as_pg())
-        .await?
-        .rows_affected();
-
-        Ok(result > 0)
+        self.upsert_claim(&key, sha, owner, "in_progress", false)
+            .await
     }
 
     /// Force-claim a SHA even when a completed review already exists (slash re-review).
     pub async fn force_claim_sha(&self, repo: &str, pr_number: i64, sha: &str) -> Result<bool> {
         let key = format!("{repo}/{pr_number}");
         let owner = lease_owner_id();
-        let result = sqlx::query(
-            "INSERT INTO reviewed_commits (repo_pr, head_sha, status, lease_owner, created_at)
-             VALUES ($1, $2, 'in_progress', $3, NOW())
-             ON CONFLICT(repo_pr) DO UPDATE SET
-               head_sha = excluded.head_sha,
-               status = 'in_progress',
-               lease_owner = excluded.lease_owner,
-               created_at = NOW()",
-        )
-        .bind(&key)
-        .bind(sha)
-        .bind(owner)
-        .execute(self.pool.as_pg())
-        .await?
-        .rows_affected();
-        Ok(result > 0)
+        self.upsert_claim(&key, sha, owner, "in_progress", true)
+            .await
     }
 
     pub async fn set_reviewed_sha_async(
@@ -181,20 +129,43 @@ impl ReviewState {
     ) -> Result<()> {
         let key = format!("{repo}/{pr_number}");
         let owner = lease_owner_id();
-        db_execute!(
-            &self.pool,
+        self.upsert_claim(&key, sha, owner, "completed", true)
+            .await?;
+        Ok(())
+    }
+
+    async fn upsert_claim(
+        &self,
+        key: &str,
+        sha: &str,
+        owner: &str,
+        status: &str,
+        force: bool,
+    ) -> Result<bool> {
+        let result = sqlx::query(
             "INSERT INTO reviewed_commits (repo_pr, head_sha, status, lease_owner, created_at)
-             VALUES (?, ?, 'completed', ?, NOW())
+             VALUES ($1, $2, $3, $4, NOW())
              ON CONFLICT(repo_pr) DO UPDATE SET
                head_sha = excluded.head_sha,
-               status = 'completed',
+               status = excluded.status,
                lease_owner = excluded.lease_owner,
-               created_at = NOW()",
-            &key,
-            sha,
-            owner
-        )?;
-        Ok(())
+               created_at = NOW()
+             WHERE $5::boolean
+                OR reviewed_commits.head_sha != excluded.head_sha
+                OR reviewed_commits.status != 'in_progress'
+                OR reviewed_commits.lease_owner = excluded.lease_owner
+                OR reviewed_commits.created_at < NOW() - ($6::bigint * INTERVAL '1 second')",
+        )
+        .bind(key)
+        .bind(sha)
+        .bind(status)
+        .bind(owner)
+        .bind(force)
+        .bind(stale_claim_secs())
+        .execute(self.pool.as_pg())
+        .await?
+        .rows_affected();
+        Ok(result > 0)
     }
 
     pub async fn release_sha_claim(&self, repo: &str, pr_number: i64, sha: &str) -> Result<()> {

@@ -1,13 +1,4 @@
-//! Related PR discovery via path history (budgeted GitHub calls).
-//!
-//! Algorithm (kept within a small GitHub API budget):
-//! 1. **Score** changed paths — prefer source / critical files; deprioritize
-//!    meta churn (`CHANGELOG.md`, docs, lockfiles, root markdown).
-//! 2. **Sample** up to [`MAX_PATHS`] with root diversity (not raw API order).
-//! 3. For each path: recent commits → linked PRs (GitHub's practical approach
-//!    when PR search isn't path-indexed).
-//! 4. **Rank** by overlap strength (how many sampled paths hit the PR), then
-//!    path weight, then newer PR number — not "first path wins."
+//! Related PR discovery through bounded, ranked path-history lookups.
 
 use crate::llm::is_low_signal_path;
 use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
@@ -17,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-const USER_AGENT: &str = concat!("codasaurus/", env!("CARGO_PKG_VERSION"));
+use crate::bot::USER_AGENT;
 const MAX_PATHS: usize = 5;
 const MAX_COMMITS_PER_PATH: usize = 4;
 const MAX_RELATED: usize = 3;
@@ -177,7 +168,7 @@ fn path_signal_score(path: &str) -> i32 {
         score += 20;
     }
 
-    if looks_security_sensitive(path) {
+    if crate::util::is_security_sensitive_path(path) {
         score += 15;
     }
 
@@ -271,24 +262,6 @@ fn top_level_root(path: &str) -> &str {
     path.split('/').next().unwrap_or(path)
 }
 
-/// Prefer auth / crypto / infra paths when ranking samples (local copy to avoid
-/// coupling to the review pipeline module tree).
-fn looks_security_sensitive(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("auth")
-        || lower.contains("crypto")
-        || lower.contains("secret")
-        || lower.contains("password")
-        || lower.contains("middleware")
-        || lower.contains("rbac")
-        || lower.contains("permission")
-        || lower.contains("/k8s/")
-        || lower.contains("/kubernetes/")
-        || lower.contains("/helm/")
-        || lower.ends_with(".tf")
-        || lower.ends_with(".tfvars")
-}
-
 async fn collect_related_for_path(
     client: &reqwest::Client,
     headers: &HeaderMap,
@@ -298,7 +271,7 @@ async fn collect_related_for_path(
     sem: Arc<Semaphore>,
 ) -> Vec<(i64, String)> {
     let mut out = Vec::new();
-    let encoded = encode_path_query(path);
+    let encoded = crate::util::url_encode_path(path);
     let url = format!(
         "https://api.github.com/repos/{repo}/commits?path={encoded}&per_page={MAX_COMMITS_PER_PATH}"
     );
@@ -392,19 +365,6 @@ fn format_ranked(mut candidates: Vec<RelatedCandidate>) -> Vec<String> {
             }
         })
         .collect()
-}
-
-fn encode_path_query(path: &str) -> String {
-    let mut out = String::new();
-    for b in path.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 async fn fetch_json_array(

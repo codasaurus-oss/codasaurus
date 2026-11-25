@@ -36,6 +36,26 @@ fn invite_url(raw_token: &str) -> String {
     format!("{}/#/invite/{}", public_base_url(), raw_token)
 }
 
+/// Public user fields; never the password hash.
+/// Role is normalized (`admin` → `owner`) like `list_users` so every
+/// endpoint agrees on legacy rows.
+fn user_json(u: &db::User) -> serde_json::Value {
+    json!({
+        "id": u.id,
+        "email": u.email,
+        "role": rbac::normalize_role(&u.role),
+        "is_bootstrap": u.is_bootstrap,
+    })
+}
+
+async fn audit_user(pool: &db::DbPool, event: &str, actor: &str, id: i64) {
+    db::audit::log_event(pool, event, Some(actor), Some("user"), Some(id)).await;
+}
+
+async fn audit_invite(pool: &db::DbPool, event: &str, actor: &str, id: i64) {
+    db::audit::log_event(pool, event, Some(actor), Some("invite"), Some(id)).await;
+}
+
 #[derive(Deserialize)]
 pub struct CreateInviteBody {
     pub email: Option<String>,
@@ -78,18 +98,21 @@ pub(crate) async fn list_users(
     Ok(Json(json!({ "users": items })))
 }
 
-/// POST /api/users/invites
-async fn create_invite(
+/// Owner role check shared by invite and role-change handlers.
+fn require_valid_role(role: &str) -> Result<(), ApiError> {
+    is_valid_role(role)
+        .then_some(())
+        .ok_or_else(|| ApiError::bad_request("role must be owner, maintainer, or viewer"))
+}
+
+#[utoipa::path(post, path = "/api/users/invites", tag = "users", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn create_invite(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<CreateInviteBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = rbac::require_owner(&state, &headers).await?;
-    if !is_valid_role(&body.role) {
-        return Err(ApiError::bad_request(
-            "role must be owner, maintainer, or viewer",
-        ));
-    }
+    require_valid_role(&body.role)?;
     let email = body
         .email
         .as_ref()
@@ -112,16 +135,9 @@ async fn create_invite(
     let (invite, raw) =
         db::invites::create_invite(&state.pool, email.as_deref(), &body.role, &actor.email, 7)
             .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
+            .map_err(ApiError::internal_error)?;
 
-    db::audit::log_event(
-        &state.pool,
-        "user.invite",
-        Some(&actor.email),
-        Some("invite"),
-        Some(invite.id),
-    )
-    .await;
+    audit_invite(&state.pool, "user.invite", &actor.email, invite.id).await;
 
     Ok(Json(json!({
         "id": invite.id,
@@ -134,7 +150,8 @@ async fn create_invite(
 }
 
 /// GET /api/users/invites
-async fn list_invites(
+#[utoipa::path(get, path = "/api/users/invites", tag = "users", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn list_invites(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -157,7 +174,8 @@ async fn list_invites(
 }
 
 /// DELETE /api/users/invites/:id
-async fn revoke_invite(
+#[utoipa::path(delete, path = "/api/users/invites/{id}", tag = "users", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn revoke_invite(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
@@ -167,30 +185,20 @@ async fn revoke_invite(
     if !ok {
         return Err(ApiError::not_found("Invite not found"));
     }
-    db::audit::log_event(
-        &state.pool,
-        "user.invite_revoke",
-        Some(&actor.email),
-        Some("invite"),
-        Some(id),
-    )
-    .await;
+    audit_invite(&state.pool, "user.invite_revoke", &actor.email, id).await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
 /// PATCH /api/users/:id
-async fn update_user(
+#[utoipa::path(patch, path = "/api/users/{id}", tag = "users", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn update_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Json(body): Json<UpdateUserBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = rbac::require_owner(&state, &headers).await?;
-    if !is_valid_role(&body.role) {
-        return Err(ApiError::bad_request(
-            "role must be owner, maintainer, or viewer",
-        ));
-    }
+    require_valid_role(&body.role)?;
     let target = db::users::get_user_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("User not found"))?;
@@ -208,24 +216,13 @@ async fn update_user(
         }
     }
     let updated = db::users::update_user_role(&state.pool, id, &body.role).await?;
-    db::audit::log_event(
-        &state.pool,
-        "user.role_change",
-        Some(&actor.email),
-        Some("user"),
-        Some(id),
-    )
-    .await;
-    Ok(Json(json!({
-        "id": updated.id,
-        "email": updated.email,
-        "role": updated.role,
-        "is_bootstrap": updated.is_bootstrap,
-    })))
+    audit_user(&state.pool, "user.role_change", &actor.email, id).await;
+    Ok(Json(user_json(&updated)))
 }
 
 /// DELETE /api/users/:id
-async fn remove_user(
+#[utoipa::path(delete, path = "/api/users/{id}", tag = "users", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn remove_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
@@ -245,39 +242,23 @@ async fn remove_user(
             return Err(ApiError::bad_request("Cannot remove the last owner"));
         }
     }
-    if target.email == actor.email {
-        let owners = db::users::owner_count(&state.pool).await?;
-        if owners <= 1 {
-            return Err(ApiError::bad_request("Cannot remove the last owner"));
-        }
-    }
-    db::users::delete_sessions_for_email(&state.pool, &target.email).await?;
     let ok = db::users::delete_user(&state.pool, id).await?;
     if !ok {
         return Err(ApiError::not_found("User not found"));
     }
-    db::audit::log_event(
-        &state.pool,
-        "user.remove",
-        Some(&actor.email),
-        Some("user"),
-        Some(id),
-    )
-    .await;
+    audit_user(&state.pool, "user.remove", &actor.email, id).await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
 /// POST /api/users/:id/transfer-bootstrap — hand the instance superuser flag to another owner.
-async fn transfer_bootstrap(
+#[utoipa::path(post, path = "/api/users/{id}/transfer-bootstrap", tag = "users", params(("id" = i64, Path, description = "Resource id")), responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn transfer_bootstrap(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = rbac::require_owner(&state, &headers).await?;
-    let actor_user = db::users::get_user_by_email(&state.pool, &actor.email)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Authentication required"))?;
-    if !actor_user.is_bootstrap {
+    if !actor.is_bootstrap {
         return Err(ApiError::forbidden(
             "Only the bootstrap owner can transfer that role",
         ));
@@ -285,7 +266,7 @@ async fn transfer_bootstrap(
     let target = db::users::get_user_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("User not found"))?;
-    if target.id == actor_user.id {
+    if target.email == actor.email {
         return Err(ApiError::bad_request("Already the bootstrap owner"));
     }
     if rbac::normalize_role(&target.role) != "owner" {
@@ -294,24 +275,13 @@ async fn transfer_bootstrap(
         ));
     }
     let updated = db::users::transfer_bootstrap(&state.pool, id).await?;
-    db::audit::log_event(
-        &state.pool,
-        "user.bootstrap_transfer",
-        Some(&actor.email),
-        Some("user"),
-        Some(id),
-    )
-    .await;
-    Ok(Json(json!({
-        "id": updated.id,
-        "email": updated.email,
-        "role": updated.role,
-        "is_bootstrap": updated.is_bootstrap,
-    })))
+    audit_user(&state.pool, "user.bootstrap_transfer", &actor.email, id).await;
+    Ok(Json(user_json(&updated)))
 }
 
 /// POST /api/users/me/password
-async fn change_my_password(
+#[utoipa::path(post, path = "/api/users/me/password", tag = "users", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
+pub(crate) async fn change_my_password(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<ChangePasswordBody>,
@@ -320,18 +290,20 @@ async fn change_my_password(
     if let Err(msg) = db::users::validate_password_policy(&body.new_password, &actor.email) {
         return Err(ApiError::bad_request(msg));
     }
-    let user = db::users::get_user_by_email(&state.pool, &actor.email)
+    // `verify_password` already loads the user; only re-read on failure to
+    // tell OIDC accounts ("no local password") apart from a wrong password.
+    if db::users::verify_password(&state.pool, &actor.email, &body.current_password)
         .await?
-        .ok_or_else(|| ApiError::unauthorized("Authentication required"))?;
-    if user.password_hash.is_empty() {
-        return Err(ApiError::bad_request(
-            "OIDC accounts cannot set a local password here",
-        ));
-    }
-    let ok = db::users::verify_password(&state.pool, &actor.email, &body.current_password)
-        .await?
-        .is_some();
-    if !ok {
+        .is_none()
+    {
+        let oidc_only = db::users::get_user_by_email(&state.pool, &actor.email)
+            .await?
+            .is_some_and(|u| u.password_hash.is_empty());
+        if oidc_only {
+            return Err(ApiError::bad_request(
+                "OIDC accounts cannot set a local password here",
+            ));
+        }
         return Err(ApiError::unauthorized("Current password is incorrect"));
     }
     if !db::users::set_password(&state.pool, &actor.email, &body.new_password).await? {

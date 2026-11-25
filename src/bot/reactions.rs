@@ -7,34 +7,31 @@ const DISMISS_REACTIONS: &[&str] = &["-1", "confused"];
 /// Soft positive signal (telemetry / optional always_warn reverse — we only log).
 const LGTM_REACTIONS: &[&str] = &["+1", "heart", "hooray", "rocket"];
 
+/// Fingerprint token after a `fingerprint:` marker, ignoring markdown backticks.
+fn fingerprint_token(rest: &str) -> Option<String> {
+    let fp = rest
+        .trim()
+        .trim_matches('`')
+        .split(|c: char| c == '`' || c.is_whitespace() || c == '·')
+        .next()
+        .unwrap_or("")
+        .trim();
+    (fp.len() >= 8).then(|| fp.to_string())
+}
+
 /// Extract a finding fingerprint from a Codasaurus comment body.
 pub fn fingerprint_from_comment_body(body: &str) -> Option<String> {
     // Prefer explicit fingerprint: line
     for line in body.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("`fingerprint:") {
-            let fp = rest
-                .trim()
-                .trim_start_matches('`')
-                .split(|c: char| c == '`' || c.is_whitespace() || c == '·')
-                .next()
-                .unwrap_or("")
-                .trim();
-            if fp.len() >= 8 {
-                return Some(fp.to_string());
+            if let Some(fp) = fingerprint_token(rest) {
+                return Some(fp);
             }
         }
         if let Some(idx) = t.find("fingerprint:") {
-            let rest = &t[idx + "fingerprint:".len()..];
-            let fp = rest
-                .trim()
-                .trim_matches('`')
-                .split(|c: char| c == '`' || c.is_whitespace() || c == '·')
-                .next()
-                .unwrap_or("")
-                .trim();
-            if fp.len() >= 8 {
-                return Some(fp.to_string());
+            if let Some(fp) = fingerprint_token(&t[idx + "fingerprint:".len()..]) {
+                return Some(fp);
             }
         }
     }

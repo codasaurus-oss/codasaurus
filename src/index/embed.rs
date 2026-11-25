@@ -6,13 +6,20 @@ use anyhow::Result;
 use serde_json::json;
 
 /// Embed a batch of texts (≤100, per OpenAI's `/embeddings` batch limit).
-/// Returns `Ok(vec![])` when offline — callers should treat that as "skip
-/// indexing this batch", not an error.
+/// Returns `Ok(vec![])` when offline or when no embedding model is configured —
+/// callers should treat that as "skip indexing this batch", not an error.
+///
+/// # Errors
+/// Returns an error when endpoint validation or the HTTP request fails.
 pub async fn embed_texts(
     config: &crate::llm::LlmConfig,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !embedding_configured(&config.embedding_model) {
+        tracing::debug!("no embedding model configured; skipping semantic index batch");
         return Ok(Vec::new());
     }
     if crate::bot::offline::offline_mode_from_env_and_db(None) {
@@ -51,7 +58,7 @@ pub async fn embed_texts(
                 .as_array()
                 .map(|a| {
                     a.iter()
-                        .filter_map(|v| v.as_f64())
+                        .filter_map(serde_json::Value::as_f64)
                         .map(|v| v as f32)
                         .collect::<Vec<f32>>()
                 })
@@ -63,4 +70,21 @@ pub async fn embed_texts(
     // distance comparisons downstream.
     out.retain(|v| !v.is_empty() && v.iter().all(|f| f.is_finite()));
     Ok(out)
+}
+
+/// An unconfigured embedding model must skip rather than POST an empty name.
+fn embedding_configured(model: &str) -> bool {
+    !model.trim().is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_skip_requires_a_configured_model() {
+        assert!(!embedding_configured(""));
+        assert!(!embedding_configured("   "));
+        assert!(embedding_configured("my-embedding-alias"));
+    }
 }

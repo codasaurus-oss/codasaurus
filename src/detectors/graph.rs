@@ -19,30 +19,18 @@ fn build_graph(files: &[ParsedFile]) -> CodeGraph {
     for file in files {
         let path = &file.path;
 
-        for import in &file.imports {
-            let package = crate::detectors::extract_package_name(&import.name);
-            if let Some(pkg) = package {
-                if !pkg.starts_with('.') && !pkg.starts_with('/') {
-                    graph.add_symbol(&pkg, path, crate::graph::SymbolKind::Import);
-                    graph.add_symbol(
-                        &format!("{}::{}", path, import.name),
-                        path,
-                        crate::graph::SymbolKind::Variable,
-                    );
-                    graph.add_edge(
-                        &format!("{}::{}", path, import.name),
-                        &pkg,
-                        crate::graph::EdgeKind::Imports,
-                    );
-                }
-            }
-        }
-    }
-
-    let mut all_imports: Vec<(&str, &str)> = Vec::new();
-    for file in files.iter().take(MAX_WORD_EDGE_FILES) {
-        for import in &file.imports {
-            all_imports.push((import.name.as_str(), file.path.as_str()));
+        for (import, package) in crate::detectors::external_imports(file) {
+            graph.add_symbol(&package, path, crate::graph::SymbolKind::Import);
+            graph.add_symbol(
+                &format!("{}::{}", path, import.name),
+                path,
+                crate::graph::SymbolKind::Variable,
+            );
+            graph.add_edge(
+                &format!("{}::{}", path, import.name),
+                &package,
+                crate::graph::EdgeKind::Imports,
+            );
         }
     }
 
@@ -50,13 +38,16 @@ fn build_graph(files: &[ParsedFile]) -> CodeGraph {
         std::collections::HashSet::new();
 
     let mut word_to_imports: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
-    for &(import_name, file_b_path) in &all_imports {
-        for word in import_name.split(|c: char| !c.is_alphanumeric() && c != '_') {
-            if word.len() >= 3 {
+    for file in files.iter().take(MAX_WORD_EDGE_FILES) {
+        for import in &file.imports {
+            let import_name = import.name.as_str();
+            if import_name.len() >= 3
+                && import_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
                 word_to_imports
-                    .entry(word)
+                    .entry(import_name)
                     .or_default()
-                    .push((import_name, file_b_path));
+                    .push((import_name, file.path.as_str()));
             }
         }
     }
@@ -77,23 +68,17 @@ fn build_graph(files: &[ParsedFile]) -> CodeGraph {
                         if file_b_path == a_path {
                             continue;
                         }
-                        if word == import_name {
-                            let from_sym = format!("{a_path}::{word}");
-                            let to_sym = format!("{file_b_path}::{import_name}");
-                            let edge_key = (from_sym.clone(), to_sym.clone());
-                            if seen_edges.insert(edge_key) {
-                                graph.add_symbol(
-                                    &from_sym,
-                                    a_path,
-                                    crate::graph::SymbolKind::Variable,
-                                );
-                                graph.add_symbol(
-                                    &to_sym,
-                                    file_b_path,
-                                    crate::graph::SymbolKind::Variable,
-                                );
-                                graph.add_edge(&from_sym, &to_sym, crate::graph::EdgeKind::Calls);
-                            }
+                        let from_sym = format!("{a_path}::{word}");
+                        let to_sym = format!("{file_b_path}::{import_name}");
+                        let edge_key = (from_sym.clone(), to_sym.clone());
+                        if seen_edges.insert(edge_key) {
+                            graph.add_symbol(&from_sym, a_path, crate::graph::SymbolKind::Variable);
+                            graph.add_symbol(
+                                &to_sym,
+                                file_b_path,
+                                crate::graph::SymbolKind::Variable,
+                            );
+                            graph.add_edge(&from_sym, &to_sym, crate::graph::EdgeKind::Calls);
                         }
                     }
                 }
@@ -116,15 +101,8 @@ pub fn detect(parsed_files: &[ParsedFile]) -> Vec<Finding> {
     }
     let graph = build_graph(parsed_files);
 
-    // Input files are the changed/scanned set for this review — only BFS those.
-    let changed: std::collections::HashSet<&str> =
-        parsed_files.iter().map(|f| f.path.as_str()).collect();
-
     let mut bfs_done = 0usize;
     'outer: for (file_path, symbols) in &graph.file_to_nodes {
-        if !changed.contains(file_path.as_str()) {
-            continue;
-        }
         for sym in symbols {
             if bfs_done >= MAX_BFS_SYMBOLS {
                 break 'outer;

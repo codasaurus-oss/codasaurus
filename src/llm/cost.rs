@@ -2,8 +2,8 @@
 
 /// Paths that rarely need LLM review (generated / lock / vendor noise).
 pub fn is_low_signal_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase().replace('\\', "/");
-    let file = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    let lower = path.to_ascii_lowercase();
+    let file = lower.rsplit(['/', '\\']).next().unwrap_or(lower.as_str());
 
     // Lockfiles & package metadata churn
     if matches!(
@@ -120,26 +120,6 @@ pub fn estimate_spend_microdollars(prompt_chars: usize, max_out_tokens: u32, str
     (usd * 1_000_000.0).round().max(1.0) as u64
 }
 
-/// Default cheap model when operators only set a strong primary model.
-pub fn default_cheap_model(primary: &str) -> String {
-    let p = primary.to_ascii_lowercase();
-    if p.contains("claude") || p.contains("sonnet") || p.contains("opus") {
-        return "anthropic/claude-haiku-4.5".into();
-    }
-    if p.contains("gpt-4") || p.contains("o1") || p.contains("o3") {
-        return "openai/gpt-4o-mini".into();
-    }
-    if p.ends_with("/free")
-        || p.contains(":free")
-        || p.contains("qwen")
-        || p.contains("haiku")
-        || p.contains("mini")
-    {
-        return primary.to_string();
-    }
-    "openai/gpt-4o-mini".into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,11 +162,5 @@ mod tests {
             1,
             40
         ));
-    }
-
-    #[test]
-    fn cheap_model_for_sonnet() {
-        let m = default_cheap_model("anthropic/claude-sonnet-4.6");
-        assert!(m.contains("haiku") || m.contains("mini"));
     }
 }

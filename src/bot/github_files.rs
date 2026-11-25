@@ -26,25 +26,8 @@ fn cache_key(repo: &str, path: &str, git_ref: &str) -> String {
     format!("{repo}\0{path}\0{git_ref}")
 }
 
-fn encode_path_segments(path: &str) -> String {
-    path.split('/')
-        .map(|seg| {
-            let mut out = String::new();
-            for b in seg.bytes() {
-                match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                        out.push(b as char);
-                    }
-                    _ => out.push_str(&format!("%{b:02X}")),
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn decode_contents_json(path: &str, body: &serde_json::Value) -> Result<Option<String>> {
+/// Decode a Contents API body into text, rejecting non-files and oversized blobs.
+fn decode_file_content(path: &str, body: &serde_json::Value) -> Result<Option<String>> {
     if body.get("type").and_then(|t| t.as_str()) != Some("file") {
         return Ok(None);
     }
@@ -53,9 +36,8 @@ fn decode_contents_json(path: &str, body: &serde_json::Value) -> Result<Option<S
         tracing::debug!(path, size, "skipping oversized repo file");
         return Ok(None);
     }
-    let encoded = match body["content"].as_str() {
-        Some(c) => c,
-        None => return Ok(None),
+    let Some(encoded) = body["content"].as_str() else {
+        return Ok(None);
     };
     let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD
@@ -118,10 +100,10 @@ pub async fn fetch_repo_file(
         })
     };
 
-    let encoded = encode_path_segments(path);
+    let encoded = crate::util::url_encode_path(path);
     let url = format!(
         "https://api.github.com/repos/{repo}/contents/{encoded}?ref={}",
-        urlencoding_query(git_ref)
+        crate::util::url_encode(git_ref)
     );
 
     let resp = retry_async(
@@ -167,7 +149,7 @@ pub async fn fetch_repo_file(
         .unwrap_or("")
         .to_string();
     let body: serde_json::Value = resp.json().await?;
-    let content = decode_contents_json(path, &body)?;
+    let content = decode_file_content(path, &body)?;
     if let (Some(text), true) = (&content, !etag.is_empty()) {
         store_gh_cache(key, etag, text.clone());
     }
@@ -185,26 +167,11 @@ pub async fn fetch_repo_file_with_sha(
     if path.is_empty() || git_ref.is_empty() {
         return Ok(None);
     }
-    let encoded = path
-        .split('/')
-        .map(|seg| {
-            let mut out = String::new();
-            for b in seg.bytes() {
-                match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                        out.push(b as char);
-                    }
-                    _ => out.push_str(&format!("%{b:02X}")),
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("/");
+    let encoded = crate::util::url_encode_path(path);
 
     let url = format!(
         "https://api.github.com/repos/{repo}/contents/{encoded}?ref={}",
-        urlencoding_query(git_ref)
+        crate::util::url_encode(git_ref)
     );
     let resp = retry_async(
         &RetryConfig::api_default(),
@@ -224,26 +191,14 @@ pub async fn fetch_repo_file_with_sha(
         return Ok(None);
     }
     let body: serde_json::Value = resp.json().await?;
-    if body.get("type").and_then(|t| t.as_str()) != Some("file") {
-        return Ok(None);
-    }
     let sha = body["sha"].as_str().unwrap_or("").to_string();
     if sha.is_empty() {
         return Ok(None);
     }
-    let size = body["size"].as_u64().unwrap_or(0) as usize;
-    if size > MAX_FILE_BYTES {
+    let Some(content) = decode_file_content(path, &body)? else {
         return Ok(None);
-    }
-    let encoded = match body["content"].as_str() {
-        Some(c) => c,
-        None => return Ok(None),
     };
-    let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(cleaned)
-        .map_err(|e| anyhow::anyhow!("base64 decode failed for {path}: {e}"))?;
-    Ok(Some((String::from_utf8_lossy(&bytes).into_owned(), sha)))
+    Ok(Some((content, sha)))
 }
 
 /// Create or update a file on a branch via Contents API.
@@ -258,22 +213,7 @@ pub async fn put_repo_file(
     sha: &str,
     message: &str,
 ) -> Result<()> {
-    let encoded = path
-        .split('/')
-        .map(|seg| {
-            let mut out = String::new();
-            for b in seg.bytes() {
-                match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                        out.push(b as char);
-                    }
-                    _ => out.push_str(&format!("%{b:02X}")),
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("/");
+    let encoded = crate::util::url_encode_path(path);
     let url = format!("https://api.github.com/repos/{repo}/contents/{encoded}");
     let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
     let body = serde_json::json!({
@@ -365,26 +305,11 @@ pub async fn fetch_repo_files_parallel(
     out
 }
 
-fn urlencoding_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn query_encoding_keeps_simple_refs() {
-        assert_eq!(urlencoding_query("main"), "main");
-        assert!(urlencoding_query("feat/foo").contains('%'));
+        assert_eq!(crate::util::url_encode("main"), "main");
+        assert!(crate::util::url_encode("feat/foo").contains('%'));
     }
 }

@@ -22,7 +22,6 @@ pub fn detect_remote(
     files: &[GuidelineFile],
     branch: &str,
     commit_messages: &[String],
-    changed_paths: &[String],
     // Paths known to exist at the review ref (for FileRequired rules).
     present_paths: &[String],
     pr_title: &str,
@@ -32,7 +31,6 @@ pub fn detect_remote(
     }
 
     let mut findings: Vec<Finding> = Vec::new();
-    let _ = changed_paths;
 
     for gf in files {
         for rule in &gf.rules {
@@ -73,7 +71,9 @@ pub fn detect_remote(
                     }
                     let exists = present_paths.iter().any(|p| {
                         let p = p.trim_start_matches('/');
-                        p == needed || p.ends_with(needed) || p.ends_with(&format!("/{needed}"))
+                        p == needed
+                            || p.strip_suffix(needed)
+                                .is_some_and(|prefix| prefix.ends_with('/'))
                     });
                     if !exists {
                         findings.push(Finding {
@@ -120,16 +120,17 @@ fn check_branch_pattern_remote(
     let branch_lower = branch.to_lowercase();
 
     let matches = if clean_pattern.contains('/') || clean_pattern.contains('-') {
-        let parts: Vec<&str> = clean_pattern
+        let mut parts = clean_pattern
             .split(['/', '|'])
             .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .collect();
-        parts
-            .first()
-            .map(|prefix| branch_lower.starts_with(&format!("{prefix}/")))
-            .unwrap_or(false)
-            || parts.iter().any(|part| branch_lower.contains(part))
+            .filter(|part| !part.is_empty());
+        let first = parts.next();
+        first.is_some_and(|prefix| {
+            branch_lower
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+        }) || first.is_some_and(|part| branch_lower.contains(part))
+            || parts.any(|part| branch_lower.contains(part))
     } else if clean_pattern.starts_with("feat") {
         branch_lower.starts_with("feat/") || branch_lower.starts_with("feature/")
     } else if clean_pattern.starts_with("fix") {
@@ -260,15 +261,20 @@ fn check_conventional_remote(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_detect_remote_branch_and_commits() {
-        let mut gf = GuidelineFile::from_content(
+    fn guideline(rules: Vec<ExtractedRule>) -> GuidelineFile {
+        let mut file = GuidelineFile::from_content(
             "CONTRIBUTING.md",
             "CONTRIBUTING.md",
             "# Contributing\n".into(),
         )
         .unwrap();
-        gf.rules = vec![
+        file.rules = rules;
+        file
+    }
+
+    #[test]
+    fn test_detect_remote_branch_and_commits() {
+        let gf = guideline(vec![
             ExtractedRule::BranchPattern {
                 pattern: "feat/".into(),
             },
@@ -276,31 +282,18 @@ mod tests {
                 text: "Add tests".into(),
                 checked: false,
             },
-        ];
-        let findings = detect_remote(
-            &[gf],
-            "fix/typo",
-            &["wip stuff".into()],
-            &["src/a.rs".into()],
-            &[],
-            "Fix typo",
-        );
+        ]);
+        let findings = detect_remote(&[gf], "fix/typo", &["wip stuff".into()], &[], "Fix typo");
         assert!(findings.iter().any(|f| f.message.contains("doesn't match")));
         assert!(findings.iter().any(|f| f.message.contains("checklist")));
     }
 
     #[test]
     fn file_required_blocks_when_missing() {
-        let mut gf = GuidelineFile::from_content(
-            "CONTRIBUTING.md",
-            "CONTRIBUTING.md",
-            "# Contributing\n".into(),
-        )
-        .unwrap();
-        gf.rules = vec![ExtractedRule::FileRequired {
+        let gf = guideline(vec![ExtractedRule::FileRequired {
             path: "CHANGELOG.md".into(),
-        }];
-        let findings = detect_remote(&[gf], "feat/x", &[], &[], &["src/a.rs".into()], "feat: x");
+        }]);
+        let findings = detect_remote(&[gf], "feat/x", &[], &["src/a.rs".into()], "feat: x");
         assert!(findings
             .iter()
             .any(|f| { f.severity == "blocking" && f.message.contains("CHANGELOG.md") }));
@@ -308,25 +301,29 @@ mod tests {
 
     #[test]
     fn conventional_flags_non_conventional_pr_title() {
-        let mut gf = GuidelineFile::from_content(
-            "CONTRIBUTING.md",
-            "CONTRIBUTING.md",
-            "# Contributing\n".into(),
-        )
-        .unwrap();
-        gf.rules = vec![ExtractedRule::CommitRule {
+        let gf = guideline(vec![ExtractedRule::CommitRule {
             description: "Use conventional commits".into(),
-        }];
-        let findings = detect_remote(
-            &[gf],
-            "feat/x",
-            &["feat: ok".into()],
-            &[],
-            &[],
-            "Update stuff",
-        );
+        }]);
+        let findings = detect_remote(&[gf], "feat/x", &["feat: ok".into()], &[], "Update stuff");
         assert!(findings
             .iter()
             .any(|f| f.message.contains("PR title") && f.severity == "info"));
+    }
+
+    #[test]
+    fn required_file_match_respects_path_boundaries() {
+        let gf = guideline(vec![ExtractedRule::FileRequired {
+            path: "CHANGELOG.md".into(),
+        }]);
+        let findings = detect_remote(
+            &[gf],
+            "feat/x",
+            &[],
+            &["docs/NOTCHANGELOG.md".into()],
+            "feat: x",
+        );
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == "blocking" && f.message.contains("CHANGELOG.md")));
     }
 }

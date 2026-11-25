@@ -38,6 +38,22 @@ pub async fn get_session(pool: &DbPool, token: &str) -> Result<Option<String>, s
     )
 }
 
+/// Resolve a session and its user in one round-trip.
+pub async fn get_session_user(
+    pool: &DbPool,
+    token: &str,
+) -> Result<Option<crate::db::User>, sqlx::Error> {
+    let token_hash = hash_token(token);
+    crate::db::db_fetch_optional!(
+        pool,
+        crate::db::User,
+        "SELECT u.* FROM sessions s
+         JOIN users u ON u.email = s.email
+         WHERE s.token = ? AND s.expires_at > NOW()",
+        &token_hash
+    )
+}
+
 /// Delete a session (logout) by raw token.
 pub async fn delete_session(pool: &DbPool, token: &str) -> Result<(), sqlx::Error> {
     let token_hash = hash_token(token);
