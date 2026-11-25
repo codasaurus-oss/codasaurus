@@ -24,6 +24,8 @@ jobs:
       archive_sha: ${{ steps.package.outputs.archive_sha }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
@@ -87,6 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Download release artifacts
