@@ -24,6 +24,10 @@ RUN if [ "$SKIP_FRONTEND" = "1" ]; then \
 # Pin to rust-toolchain.toml: a mismatch makes rustup install a second
 # toolchain and recompile every dependency.
 FROM rust:1.90-slim-bookworm AS backend
+# utoipa-swagger-ui's build script downloads its UI bundle with curl.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
