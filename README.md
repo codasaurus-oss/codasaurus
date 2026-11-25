@@ -143,7 +143,7 @@ Also: `summarize`, `labels`, `changelog`, `add_docs`. React 👎 on a finding co
 | Repository | Contents |
 | --- | --- |
 | [codasaurus](https://github.com/codasaurus-oss/codasaurus) | Review engine, HTTP API, webhook handler, deployment, and dashboard submodule at `codasaurus-frontend/` |
-| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Upstream React + shadcn dashboard source mirrored into the monorepo |
+| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Upstream React + shadcn dashboard source, pinned here as a submodule |
 | [docs](https://github.com/codasaurus-oss/docs) | Documentation site (Astro Starlight), published at <https://codasaurus-oss.github.io/> |
 
 ## vs the field
@@ -203,7 +203,7 @@ CODASAURUS_SKIP_FRONTEND_BUILD=1 cargo test
 cargo build --release
 ```
 
-Security reports: contact the maintainers privately. Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
+Security reports: [private vulnerability reporting](https://github.com/codasaurus-oss/codasaurus/security/advisories/new) or `iam@thelohit.in`. Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
 
 ---
 

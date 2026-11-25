@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# ── Stage 1: Build the SPA from the vendored codasaurus-frontend ─
+# ── Stage 1: Build the SPA from the pinned codasaurus-frontend submodule ─
 FROM node:26-alpine AS frontend
 ARG SKIP_FRONTEND=0
 WORKDIR /app
