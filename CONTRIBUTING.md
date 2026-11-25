@@ -2,7 +2,7 @@
 
 Thank you for your interest in improving Codasaurus. This document explains how to set up a development environment, what we expect in pull requests, and how contributions are licensed.
 
-> **Security issues:** contact the maintainers privately; do not open a public issue or PR.
+> **Security issues:** use [private vulnerability reporting](https://github.com/codasaurus-oss/codasaurus/security/advisories/new) or email `iam@thelohit.in`; do not open a public issue or PR.
 
 ## Code of conduct
 
@@ -31,7 +31,7 @@ Be respectful and constructive. Harassment, spam, or bad-faith contributions wil
 ### Clone and run (API + dashboard from the binary)
 
 ```bash
-git clone https://github.com/codasaurus-oss/codasaurus.git
+git clone --recurse-submodules https://github.com/codasaurus-oss/codasaurus.git
 cd codasaurus
 cp .env.example .env          # optional; Compose defaults work locally
 docker compose up -d postgres
@@ -43,10 +43,10 @@ Open [http://localhost:3000](http://localhost:3000) and complete the onboarding 
 
 ### Dashboard
 
-The dashboard lives in [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend). Clone it next to this repository and run:
+The dashboard is a git submodule at `codasaurus-frontend/`, pointing at [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend). Initialize it and run:
 
 ```bash
-git clone https://github.com/codasaurus-oss/codasaurus-frontend.git
+git submodule update --init codasaurus-frontend
 cd codasaurus-frontend
 npm ci
 CODASAURUS_API=http://127.0.0.1:3000 npm run dev
@@ -124,4 +124,4 @@ By submitting a contribution, you agree that your changes are licensed under the
 ## Questions
 
 - Product / docs: open a GitHub Discussion or Issue
-- Security: contact the maintainers privately
+- Security: [private vulnerability reporting](https://github.com/codasaurus-oss/codasaurus/security/advisories/new) or `iam@thelohit.in`
