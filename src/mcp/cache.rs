@@ -8,8 +8,13 @@ use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 
-const TTL_SECS: u64 = 300;
-const MAX_CACHED_SERVERS: usize = 256;
+fn ttl_secs() -> u64 {
+    crate::env::u64("CODASAURUS_MCP_CACHE_TTL_SECS", 300)
+}
+
+fn max_cached_servers() -> usize {
+    crate::env::usize("CODASAURUS_MCP_MAX_CACHED_SERVERS", 256)
+}
 
 struct CachedTools {
     base_url: String,
@@ -19,7 +24,7 @@ struct CachedTools {
 
 impl CachedTools {
     fn is_fresh(&self, base_url: &str) -> bool {
-        self.base_url == base_url && self.fetched_at.elapsed() < Duration::from_secs(TTL_SECS)
+        self.base_url == base_url && self.fetched_at.elapsed() < Duration::from_secs(ttl_secs())
     }
 }
 
@@ -85,16 +90,16 @@ where
 }
 
 fn trim_cache(cache: &mut Cache, server_id: &str) {
-    if cache.contains_key(server_id) || cache.len() < MAX_CACHED_SERVERS {
+    if cache.contains_key(server_id) || cache.len() < max_cached_servers() {
         return;
     }
     let now = Instant::now();
+    let ttl = Duration::from_secs(ttl_secs());
     cache.retain(|_, cell| {
-        cell.get().is_none_or(|entry| {
-            now.duration_since(entry.fetched_at) < Duration::from_secs(TTL_SECS)
-        })
+        cell.get()
+            .is_none_or(|entry| now.duration_since(entry.fetched_at) < ttl)
     });
-    if cache.len() < MAX_CACHED_SERVERS {
+    if cache.len() < max_cached_servers() {
         return;
     }
     let oldest = cache
@@ -180,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_size_stays_bounded() {
-        for index in 0..MAX_CACHED_SERVERS + 1 {
+        for index in 0..max_cached_servers() + 1 {
             let id = format!("{}-{index}", server_id());
             let tools = get_or_fetch_with(&id, "https://example.test/mcp", || async {
                 Ok(Vec::<Value>::new())
@@ -190,6 +195,6 @@ mod tests {
         }
 
         let cache = CACHE.read().unwrap();
-        assert!(cache.len() <= MAX_CACHED_SERVERS);
+        assert!(cache.len() <= max_cached_servers());
     }
 }

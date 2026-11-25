@@ -1,11 +1,13 @@
-# Git
+# Git (including the submodule's own .git)
 .git/
+**/.git
 .gitignore
 .gitattributes
 
 # Build artifacts
 target/
-node_modules/
+**/node_modules/
+codasaurus-frontend/dist/
 *.rs.bk
 
 # Docker
@@ -16,6 +18,12 @@ docker-compose.yml
 # Dev & CI
 .github/
 .omo/
+.superpowers/
+.serena/
+agent/
+graphify-out/
+skills-lock.json
+tests/
 Makefile
 
 # Docs (not needed at build time)
@@ -28,8 +36,7 @@ assets/*.svg
 !assets/review-banner.svg
 
 # Secrets
-.env
-.env.example
+.env*
 .envsitter/
 
 # OS junk

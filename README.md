@@ -10,22 +10,22 @@
 
 <p align="center">
   Tier-1 detectors first · optional BYOK LLM · zero seat tax · run for $0<br>
-  <code>codasaurus</code> on any PR · Svelte dashboard · PostgreSQL only
+  <code>codasaurus</code> on any PR · React dashboard · PostgreSQL only
 </p>
 
 <p align="center">
   <a href="https://github.com/codasaurus-oss/codasaurus/releases"><img src="https://img.shields.io/badge/release-v0.1.0-111827" alt="v0.1.0"></a>
   <a href="https://github.com/codasaurus-oss/codasaurus/actions/workflows/ci.yml"><img src="https://github.com/codasaurus-oss/codasaurus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.90+-dea584?logo=rust&logoColor=white" alt="Rust"></a>
-  <a href="https://codasaurus-oss.github.io/docs/database.html"><img src="https://img.shields.io/badge/db-PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL"></a>
-  <a href="https://codasaurus-oss.github.io/docs/run-for-free.html"><img src="https://img.shields.io/badge/host-run%20for%20%240-2ea44f" alt="Run for free"></a>
+  <a href="https://codasaurus-oss.github.io/database/"><img src="https://img.shields.io/badge/db-PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL"></a>
+  <a href="https://codasaurus-oss.github.io/run-for-free/"><img src="https://img.shields.io/badge/host-run%20for%20%240-2ea44f" alt="Run for free"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License"></a>
 </p>
 
 <p align="center">
-  <a href="https://codasaurus-oss.github.io/docs/setup-onboarding.html"><img src="https://img.shields.io/badge/docs-onboarding-0ea5e9" alt="Onboarding"></a>
-  <a href="https://codasaurus-oss.github.io/docs/commands.html"><img src="https://img.shields.io/badge/docs-codasaurus%20commands-8b5cf6" alt="Commands"></a>
-  <a href="https://codasaurus-oss.github.io/docs/configuration.html"><img src="https://img.shields.io/badge/docs-config-64748b" alt="Config"></a>
+  <a href="https://codasaurus-oss.github.io/setup-onboarding/"><img src="https://img.shields.io/badge/docs-onboarding-0ea5e9" alt="Onboarding"></a>
+  <a href="https://codasaurus-oss.github.io/commands/"><img src="https://img.shields.io/badge/docs-codasaurus%20commands-8b5cf6" alt="Commands"></a>
+  <a href="https://codasaurus-oss.github.io/configuration/"><img src="https://img.shields.io/badge/docs-config-64748b" alt="Config"></a>
   <a href="https://github.com/codasaurus-oss/codasaurus/releases"><img src="https://img.shields.io/badge/changelog-releases-orange" alt="Changelog"></a>
 </p>
 
@@ -62,6 +62,8 @@ docker compose up -d
 ```
 
 If you already cloned without the flag: `git submodule update --init --recursive`.
+
+Upgrading an older stack: PostgreSQL 19 cannot start on a 16.x data volume, and its volume mount moved to `/var/lib/postgresql`. Dump and restore your data into a fresh volume before switching images.
 
 Open [http://localhost:3000](http://localhost:3000) and finish the three-step wizard:
 
@@ -198,10 +200,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and PR checks.
 
 ```bash
 cargo fmt --check
-cargo clippy -- -D warnings
-CODASAURUS_SKIP_FRONTEND_BUILD=1 cargo test
-cargo build --release
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked              # needs DATABASE_URL, CODASAURUS_TEST_DATABASE_URL, REDIS_URL
+cargo build --release --locked
 ```
+
+Dashboard checks run from `codasaurus-frontend/`: `npm ci && npm run lint && npm test && npm run build`.
 
 Security reports: [private vulnerability reporting](https://github.com/codasaurus-oss/codasaurus/security/advisories/new) or `iam@thelohit.in`. Release history: [GitHub Releases](https://github.com/codasaurus-oss/codasaurus/releases).
 

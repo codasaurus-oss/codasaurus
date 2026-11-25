@@ -20,7 +20,9 @@ struct StatsCache {
 static STATS_CACHE: LazyLock<tokio::sync::Mutex<StatsCache>> =
     LazyLock::new(|| tokio::sync::Mutex::new(StatsCache::default()));
 
-const STATS_CACHE_TTL: Duration = Duration::from_secs(30);
+fn stats_cache_ttl() -> Duration {
+    Duration::from_secs(crate::env::u64("CODASAURUS_STATS_CACHE_TTL_SECS", 30))
+}
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(stats))
@@ -67,7 +69,7 @@ pub(crate) async fn stats(
     let mut cache = STATS_CACHE.lock().await;
     if cache
         .fetched_at
-        .is_some_and(|at| at.elapsed() < STATS_CACHE_TTL)
+        .is_some_and(|at| at.elapsed() < stats_cache_ttl())
     {
         if let Some(cached) = &cache.value {
             return Ok(Json(cached.clone()));

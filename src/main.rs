@@ -99,7 +99,7 @@ fn resolve_database_url(value: Option<&str>, on_render: bool) -> Result<String> 
         anyhow::bail!(
             "DATABASE_URL is required on Render. Set it to a Neon Free \
              (or other always-free) Postgres URI — not Render free Postgres \
-             (that plan expires). See https://codasaurus-oss.github.io/docs/run-for-free.html."
+             (that plan expires). See https://codasaurus-oss.github.io/run-for-free/."
         );
     }
     Ok(DEFAULT_DATABASE_URL.to_string())

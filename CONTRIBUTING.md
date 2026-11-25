@@ -24,8 +24,8 @@ Be respectful and constructive. Harassment, spam, or bad-faith contributions wil
 | Tool | Version |
 | ---- | ------- |
 | Rust | **1.90+** (pinned in [`rust-toolchain.toml`](rust-toolchain.toml)) |
-| Node.js | **20+** (dashboard) |
-| PostgreSQL | **16+** (local or Docker) |
+| Node.js | **26+** (dashboard; CI uses 26) |
+| PostgreSQL | **19+** with pgvector (local or Docker Compose) |
 | Docker / Compose | Optional, recommended for Postgres |
 
 ### Clone and run (API + dashboard from the binary)
@@ -59,16 +59,23 @@ The Docker image builds that repository and serves the output; a plain `cargo bu
 ```bash
 # Format + lint (must pass CI)
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --locked --all-targets -- -D warnings
 
-# Tests
-CODASAURUS_SKIP_FRONTEND_BUILD=1 cargo test
+# Tests — use a dedicated test database; the suite clears review_jobs
+cargo test --locked
 
-# Release binary
+# Security and release checks
+cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0387
+cargo-deny check licenses bans sources
 cargo build --release --locked
+
+# Dashboard (from codasaurus-frontend/)
+npm ci && npm run lint && npm test && npm run build
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests (with Postgres), `cargo deny`, actionlint, and a release-style build.
+The ignore flags are documented in `.github/workflows/ci.yml`. CI also lints workflows with actionlint and builds the Docker image.
+
+Every non-merge commit must carry a `Signed-off-by:` line (`git commit -s`); the CI DCO job enforces it.
 
 ### LLM gateway (LiteLLM)
 
@@ -80,7 +87,7 @@ LiteLLM uses a dedicated database on the same Postgres server. `LITELLM_SALT_KEY
 
 ### Before you open a PR
 
-1. Rebase or merge `main` so CI starts from a current tip.
+1. Rebase onto `main` so CI starts from a current tip.
 2. Run the checks above locally.
 3. Update docs when you change user-facing behavior, env vars, Settings IA, or schema.
 4. Add or adjust tests for non-trivial Rust logic when practical.
@@ -90,6 +97,8 @@ LiteLLM uses a dedicated database on the same Postgres server. `LITELLM_SALT_KEY
 - **Small and focused.** One concern per PR when possible.
 - **Match existing style.** Prefer the patterns already in `src/`; avoid drive-by refactors.
 - **Describe the why.** Summary + test plan in the PR body (what you ran, what to click in the dashboard).
+- **Green CI before review.** All jobs in `.github/workflows/ci.yml` must pass, including the Dashboard job.
+- **Signed commits.** Every non-merge commit needs `Signed-off-by:` (`git commit -s`).
 - **No secrets.** Never commit `.env`, private keys, API tokens, or research dumps.
 
 ### Commit messages
@@ -97,11 +106,11 @@ LiteLLM uses a dedicated database on the same Postgres server. `LITELLM_SALT_KEY
 Prefer short, imperative subjects in the style already used on `main`:
 
 ```text
-fix: pin Settings nav on scroll and reshape Review UX.
-docs: prepare 0.1.0 release notes and fix doc/UI drifts.
+fix: pin settings nav on scroll
+docs: fix setup and configuration links
 ```
 
-Optional body for non-obvious context. [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `docs:`, `perf:`, `chore:`) are welcome but not required.
+Optional body for non-obvious context. [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `docs:`, `perf:`, `chore:`) are preferred: release-please derives the changelog from them.
 
 ### Changelog
 
@@ -112,7 +121,7 @@ Releases and changelog entries are generated from Conventional Commit messages b
 | Repository | Role |
 | ---- | ---- |
 | `codasaurus` (this repo) | Rust binary: webhooks, queue, detectors, LLM, API, deployment |
-| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | Svelte 5 dashboard |
+| [codasaurus-frontend](https://github.com/codasaurus-oss/codasaurus-frontend) | React 19 + TypeScript dashboard |
 | [docs](https://github.com/codasaurus-oss/docs) | Documentation site |
 
 ## License

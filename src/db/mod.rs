@@ -259,8 +259,14 @@ pub async fn create_pool(database_url: &str) -> Result<DbPool, sqlx::Error> {
             .max_connections(max_connections)
             .min_connections(0)
             .acquire_timeout(Duration::from_secs(acquire_secs))
-            .idle_timeout(Duration::from_secs(600))
-            .max_lifetime(Duration::from_secs(1800))
+            .idle_timeout(Duration::from_secs(crate::env::u64(
+                "CODASAURUS_DB_IDLE_TIMEOUT_SECS",
+                600,
+            )))
+            .max_lifetime(Duration::from_secs(crate::env::u64(
+                "CODASAURUS_DB_MAX_LIFETIME_SECS",
+                1800,
+            )))
             // Neon/idle proxies can drop sockets; validate before reuse.
             .test_before_acquire(true)
             .after_connect(|conn, _meta| {

@@ -10,8 +10,13 @@ use std::time::{Duration, Instant};
 
 /// Soft cap so we never pull huge binaries / lockfiles into memory.
 const MAX_FILE_BYTES: usize = 512_000;
-const GH_CACHE_MAX: usize = 2_000;
-const GH_CACHE_TTL: Duration = Duration::from_secs(3_600);
+fn gh_cache_max() -> usize {
+    crate::env::usize("CODASAURUS_GH_CACHE_MAX_ENTRIES", 2_000)
+}
+
+fn gh_cache_ttl() -> Duration {
+    Duration::from_secs(crate::env::u64("CODASAURUS_GH_CACHE_TTL_SECS", 3_600))
+}
 
 struct GhCacheEntry {
     etag: String,
@@ -59,14 +64,15 @@ fn store_gh_cache(key: String, etag: String, body: String) {
             at: Instant::now(),
         },
     );
-    if cache.len() > GH_CACHE_MAX {
+    if cache.len() > gh_cache_max() {
         let now = Instant::now();
-        cache.retain(|_, e| now.duration_since(e.at) < GH_CACHE_TTL);
-        if cache.len() > GH_CACHE_MAX {
+        let ttl = gh_cache_ttl();
+        cache.retain(|_, e| now.duration_since(e.at) < ttl);
+        if cache.len() > gh_cache_max() {
             let mut keys: Vec<(String, Instant)> =
                 cache.iter().map(|(k, e)| (k.clone(), e.at)).collect();
             keys.sort_unstable_by_key(|(_, t)| *t);
-            let drop_n = cache.len() - GH_CACHE_MAX / 2;
+            let drop_n = cache.len() - gh_cache_max() / 2;
             for (k, _) in keys.into_iter().take(drop_n) {
                 cache.remove(&k);
             }
@@ -92,7 +98,7 @@ pub async fn fetch_repo_file(
     let cached_etag = {
         let cache = GH_CONTENTS_CACHE.read().unwrap_or_else(|e| e.into_inner());
         cache.get(&key).and_then(|e| {
-            if e.at.elapsed() < GH_CACHE_TTL {
+            if e.at.elapsed() < gh_cache_ttl() {
                 Some(e.etag.clone())
             } else {
                 None
