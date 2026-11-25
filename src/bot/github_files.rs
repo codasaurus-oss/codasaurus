@@ -66,7 +66,8 @@ fn store_gh_cache(key: String, etag: String, body: String) {
     );
     if cache.len() > gh_cache_max() {
         let now = Instant::now();
-        cache.retain(|_, e| now.duration_since(e.at) < gh_cache_ttl());
+        let ttl = gh_cache_ttl();
+        cache.retain(|_, e| now.duration_since(e.at) < ttl);
         if cache.len() > gh_cache_max() {
             let mut keys: Vec<(String, Instant)> =
                 cache.iter().map(|(k, e)| (k.clone(), e.at)).collect();

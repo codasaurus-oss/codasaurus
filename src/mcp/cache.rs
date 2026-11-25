@@ -94,10 +94,10 @@ fn trim_cache(cache: &mut Cache, server_id: &str) {
         return;
     }
     let now = Instant::now();
+    let ttl = Duration::from_secs(ttl_secs());
     cache.retain(|_, cell| {
-        cell.get().is_none_or(|entry| {
-            now.duration_since(entry.fetched_at) < Duration::from_secs(ttl_secs())
-        })
+        cell.get()
+            .is_none_or(|entry| now.duration_since(entry.fetched_at) < ttl)
     });
     if cache.len() < max_cached_servers() {
         return;

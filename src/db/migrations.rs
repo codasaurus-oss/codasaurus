@@ -1280,19 +1280,21 @@ mod tests {
     }
 
     #[test]
-    fn v22_is_skipped_only_when_version_and_table_agree() {
+    fn v22_is_skipped_when_version_recorded_and_table_exists() {
         assert!(!v22_needs_run(Some(29), true));
         assert!(!v22_needs_run(Some(22), true));
     }
 
     #[test]
-    fn v22_reruns_after_a_failed_extension_install() {
+    fn v22_runs_when_table_missing_even_at_a_newer_version() {
         // A failed CREATE EXTENSION used to skip recording version 22, so a
         // later version made the >= 22 guard hide the missing table forever.
         assert!(v22_needs_run(Some(29), false));
         assert!(v22_needs_run(Some(5), false));
-        assert!(v22_needs_run(Some(5), true));
         assert!(v22_needs_run(None, false));
+        // A pre-existing table still needs the version row recorded; all v22
+        // DDL is IF NOT EXISTS, so the re-run is harmless.
+        assert!(v22_needs_run(Some(5), true));
     }
 
     #[test]

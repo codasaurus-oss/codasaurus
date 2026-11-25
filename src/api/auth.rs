@@ -152,11 +152,9 @@ async fn check_auth_rate_limit(
     )
     .await
     .map_err(|retry_after| {
+        let minutes = (login_rate_window().as_secs() / 60).max(1);
         ApiError::too_many_requests_after(
-            format!(
-                "Too many attempts. Try again in {} minutes.",
-                login_rate_window().as_secs() / 60
-            ),
+            format!("Too many attempts. Try again in {minutes} minutes."),
             retry_after.as_secs().max(1),
         )
     })
