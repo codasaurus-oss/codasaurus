@@ -19,7 +19,7 @@ RUN if [ "$SKIP_FRONTEND" = "1" ]; then \
     fi
 
 # ── Stage 2: Build Rust binary ──────────────────────────────────
-FROM rust:1.90-slim-bookworm AS backend
+FROM rust:1.99-slim-bookworm AS backend
 RUN apt-get update \
     && apt-get install -y --no-install-recommends pkg-config libssl-dev curl \
     && rm -rf /var/lib/apt/lists/*
