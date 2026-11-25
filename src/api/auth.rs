@@ -18,10 +18,18 @@ use super::rbac;
 use super::AppState;
 
 const SESSION_COOKIE: &str = "codasaurus_session";
-const SESSION_MAX_AGE: &str = "604800"; // 7 days
 
-const LOGIN_RATE_LIMIT: u32 = 10;
-const LOGIN_RATE_WINDOW: Duration = Duration::from_secs(15 * 60);
+fn session_max_age() -> u64 {
+    crate::env::u64("CODASAURUS_SESSION_MAX_AGE_SECS", 604_800)
+}
+
+fn login_rate_limit() -> u32 {
+    crate::env::u32("CODASAURUS_LOGIN_RATE_LIMIT", 10)
+}
+
+fn login_rate_window() -> Duration {
+    Duration::from_secs(crate::env::u64("CODASAURUS_LOGIN_RATE_WINDOW_SECS", 900))
+}
 
 #[derive(Deserialize)]
 pub struct LoginBody {
@@ -107,7 +115,8 @@ fn cookie_should_be_secure() -> bool {
 
 fn set_cookie(token: &str) -> String {
     let mut cookie = format!(
-        "{SESSION_COOKIE}={token}; HttpOnly; Path=/; Max-Age={SESSION_MAX_AGE}; SameSite=Lax"
+        "{SESSION_COOKIE}={token}; HttpOnly; Path=/; Max-Age={}; SameSite=Lax",
+        session_max_age()
     );
     if cookie_should_be_secure() {
         cookie.push_str("; Secure");
@@ -138,13 +147,16 @@ async fn check_auth_rate_limit(
     super::rate_limit::check(
         store,
         &auth_rate_key(peer, headers, email),
-        LOGIN_RATE_LIMIT,
-        LOGIN_RATE_WINDOW,
+        login_rate_limit(),
+        login_rate_window(),
     )
     .await
     .map_err(|retry_after| {
         ApiError::too_many_requests_after(
-            "Too many attempts. Try again in 15 minutes.",
+            format!(
+                "Too many attempts. Try again in {} minutes.",
+                login_rate_window().as_secs() / 60
+            ),
             retry_after.as_secs().max(1),
         )
     })

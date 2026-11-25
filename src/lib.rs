@@ -8,6 +8,7 @@ pub mod context;
 pub mod db;
 pub mod dep_parser;
 pub mod detectors;
+pub mod env;
 pub mod gates;
 pub mod github_jwt;
 pub mod graph;

@@ -2,7 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:0.8.7-pg19-trixie
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: codasaurus
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-codasaurus}
@@ -27,7 +27,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -96,7 +96,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "${APP_PORT:-3000}:3000"
     environment:
       - DATABASE_URL=postgres://codasaurus:${POSTGRES_PASSWORD:-codasaurus}@postgres:5432/codasaurus
       # Required to create the first owner on an empty database.

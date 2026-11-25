@@ -19,10 +19,10 @@ impl Default for RetryConfig {
 
 impl RetryConfig {
     /// Liberal retry budget for network-intensive API calls.
-    pub const fn api_default() -> Self {
+    pub fn api_default() -> Self {
         Self {
-            max_retries: 3,
-            base_delay_ms: 1000,
+            max_retries: crate::env::u32("CODASAURUS_RETRY_MAX_ATTEMPTS", 3),
+            base_delay_ms: crate::env::u64("CODASAURUS_RETRY_BASE_DELAY_MS", 1000),
         }
     }
 
@@ -39,7 +39,8 @@ impl RetryConfig {
         let ms = self.base_delay_ms.saturating_mul(factor);
         // Add simple jitter (±25%) without requiring the rand crate.
         let jitter = (ms / 4).saturating_mul((attempt as u64 % 3) + 1) / 3;
-        Duration::from_millis(ms.saturating_add(jitter).min(30_000))
+        let cap = crate::env::u64("CODASAURUS_RETRY_MAX_DELAY_MS", 30_000);
+        Duration::from_millis(ms.saturating_add(jitter).min(cap))
     }
 }
 

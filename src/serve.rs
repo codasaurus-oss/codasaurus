@@ -138,7 +138,12 @@ pub async fn serve(
                  when no owner exists — set it before starting to enable first-owner creation"
             );
         }
-        api::bootstrap::arm(&redis, &secret, Duration::from_secs(900)).await?;
+        api::bootstrap::arm(
+            &redis,
+            &secret,
+            Duration::from_secs(crate::env::u64("CODASAURUS_BOOTSTRAP_TTL_SECS", 900)),
+        )
+        .await?;
     }
 
     let app = build_router(pool.clone(), redis, bot_config);
@@ -290,9 +295,15 @@ pub fn build_router(
                         StatusCode::INTERNAL_SERVER_ERROR
                     }
                 }))
-                .timeout(Duration::from_secs(120)),
+                .timeout(Duration::from_secs(crate::env::u64(
+                    "CODASAURUS_HTTP_TIMEOUT_SECS",
+                    120,
+                ))),
         )
-        .layer(RequestBodyLimitLayer::new(25 * 1024 * 1024));
+        .layer(RequestBodyLimitLayer::new(crate::env::usize(
+            "CODASAURUS_MAX_BODY_BYTES",
+            25 * 1024 * 1024,
+        )));
 
     app
 }

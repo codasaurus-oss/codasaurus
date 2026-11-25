@@ -12,8 +12,14 @@ use std::time::Duration;
 
 static LLM_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(crate::env::u64(
+            "CODASAURUS_LLM_TIMEOUT_SECS",
+            60,
+        )))
+        .connect_timeout(Duration::from_secs(crate::env::u64(
+            "CODASAURUS_LLM_CONNECT_TIMEOUT_SECS",
+            10,
+        )))
         .pool_max_idle_per_host(4)
         .build()
         .ok()
