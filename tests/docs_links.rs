@@ -35,7 +35,8 @@ fn relative_docs_refs(text: &str) -> Vec<String> {
     refs
 }
 
-const DOCS_BASE: &str = "https://codasaurus-oss.github.io/docs/";
+const DOCS_BASE: &str = "https://codasaurus-oss.github.io/";
+const RETIRED_DOCS_BASE: &str = "https://codasaurus-oss.github.io/docs/";
 
 #[test]
 fn dead_docs_links_resolve() {
@@ -49,6 +50,10 @@ fn dead_docs_links_resolve() {
         assert!(
             text.contains(DOCS_BASE),
             "{file} must link the published docs base {DOCS_BASE}"
+        );
+        assert!(
+            !text.contains(RETIRED_DOCS_BASE),
+            "{file} still links the retired {RETIRED_DOCS_BASE} URLs"
         );
     }
 
