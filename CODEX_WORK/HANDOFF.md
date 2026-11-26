@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-09: inspect the remaining GitHub PR fetching, pagination, review orchestration,
-persistence, and external API retry paths. The repository-sync status handling fix is committed;
-preserve existing external behavior and add focused coverage for any further confirmed defect.
+Continue R-10: inspect parser, dependency parsing, confidence, baseline, gates, offline policy,
+and review-policy decisions. R-09 is complete with live GitHub/PostgreSQL contract validation
+remaining environment-dependent.
 
 ## Tooling note
 

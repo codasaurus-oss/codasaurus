@@ -54,3 +54,6 @@ behavior therefore remains source-reviewed but not database-smoke-validated here
 GitHub review helper tests were retained and passed. The two source fixes cover non-success
 installation-sync responses and review-history pagination; live GitHub contract testing remains
 outside the local environment.
+
+R-09 persistence ordering was validated through compilation, focused review tests, formatting,
+and locked Clippy; PostgreSQL-backed failure/retry behavior remains an integration-test follow-up.
