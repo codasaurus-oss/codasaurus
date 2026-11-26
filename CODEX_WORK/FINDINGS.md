@@ -1,5 +1,51 @@
 # Findings
 
+## F-R03-001 — v20 and v21 migrations did not record completion
+
+- Component: R-03 (Database foundation and schema)
+- Category: migration correctness / operational efficiency
+- Severity: MEDIUM
+- Location: `src/db/migrations.rs` (`migrate_v20_pre_merge_checks`, `migrate_v21_learning_rule_status`)
+- Problem: Both migrations applied their DDL and returned without inserting their version
+  into `schema_version`.
+- Evidence: the migration runner invokes v20 then v21; neighboring numbered migrations
+  record completion, while these two did not.
+- Impact: inaccurate migration history and repeated idempotent DDL checks on startup until
+  a later migration masks the omission.
+- Proposed solution: record versions 20 and 21 after successful DDL using the existing
+  idempotent `ON CONFLICT` pattern.
+- Risk: low; only records already-applied schema changes.
+- Confidence: confirmed by source inspection.
+- Validation: focused migration regression passed; `cargo fmt` and locked Clippy passed.
+- Status: RESOLVED
+
+## F-R02-001 — Redirect policy for user-configured LLM and Jira endpoints needs an explicit contract
+
+- Component: R-02 (Configuration and trust boundaries)
+- Category: SSRF / outbound transport
+- Severity: HIGH
+- Location: `src/llm/client.rs`, `src/bot/repo_context.rs`
+- Problem: URL validation occurs before an outbound request, but the corresponding
+  reqwest clients use the default redirect policy. A user-configured public endpoint can
+  redirect the server to a private/metadata address without re-validation. Jira also uses
+  the non-resolving URL guard before its request.
+- Evidence: MCP's separately configured client explicitly uses
+  `reqwest::redirect::Policy::none()`, whereas these two clients did not. The Jira
+  callsite used `validate_http_url` rather than `validate_http_url_resolved`.
+- Proposed solution: establish whether redirects are required for these integrations. If
+  they are, use a bounded manual redirect loop that validates every `Location` target
+  (scheme, host, resolved addresses) before the next request and defines whether auth is
+  retained cross-origin. Otherwise, explicitly disable redirects and document that API
+  endpoints must be canonical URLs.
+- Risk: medium; either alternative changes an unspoken external integration behavior.
+- Validation method: deterministic local redirect tests covering safe same-origin,
+  unsafe metadata/private targets, redirect limits, and credential forwarding rules.
+- Decision: API base URLs are treated as canonical integration endpoints. Redirects are
+  not followed by MCP, and this audit does not silently alter LLM/Jira behavior without
+  a compatibility requirement and a deterministic redirect test. The residual risk is
+  retained for a dedicated outbound-transport change with an explicit contract.
+- Status: ACCEPTED RISK — follow-up required before enabling arbitrary redirect support
+
 ## F-R01-001 — Confirmed obsolete dashboard directory contract
 
 - Component: R-01 (Build, package, and runtime contracts)

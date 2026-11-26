@@ -2,11 +2,11 @@
 
 ## Overall status
 
-- Phase: R-01 complete; R-02 is next.
+- Phase: R-03 audited; R-04 is next.
 - Rust components mapped: 17 of 17.
-- Components audited: 1 of 17 (R-01).
+- Components audited: 3 of 17 (R-01, R-02, R-03).
 - Components changed: 1 of 17 (R-01).
-- Current component: R-02 — Configuration and trust boundaries (not yet started).
+- Current component: R-04 — Database repositories and identity state (not yet started).
 
 ## Completed in this batch
 
@@ -20,6 +20,11 @@
 - Audited R-01 and resolved F-R01-001: migrated the Rust build, server, container
   artifact handoff, and related-PR source-path heuristic from the removed
   `svelte-dashboard` directory to `codasaurus-frontend`.
+- Started and audited R-02: mapped SSRF, LLM endpoint, MCP endpoint, OIDC, GitHub key,
+  and issue-tracker configuration boundaries. Core controls passed focused tests; redirect
+  behavior is retained as an accepted-risk follow-up pending an explicit compatibility contract.
+- Audited R-03: verified migration ordering and corrected missing schema-version records for
+  v20 and v21 without changing their DDL.
 
 ## Validation performed
 
@@ -34,6 +39,9 @@
 | `cargo build --locked` | Passed after allowing utoipa-swagger-ui to download its pinned Swagger UI bundle. |
 | Focused build/related-PR tests | Passed: direct `build.rs` test plus `source_paths_outrank_meta` and `select_skips_meta_when_source_available`. |
 | Docker frontend stage | Passed; produced and verified `codasaurus-frontend/dist/index.html` in the image. |
+| R-02 focused security tests with DNS access | Passed: 10 SSRF, 4 OIDC/redaction, and 5 GitHub JWT tests. |
+| `cargo fmt --check`; `cargo clippy --locked --all-targets -- -D warnings` | Passed for the current tree. |
+| R-03 focused migration regression | Passed: `versioned_migrations_record_their_version`. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.
@@ -46,6 +54,7 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Begin R-02: configuration and trust boundaries.
-2. Establish its test baseline and trace all URL/credential configuration entry points.
-3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after that component batch.
+1. Start R-04: database repositories and identity state.
+2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
+   without a compatibility requirement and redirect-specific tests.
+3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.

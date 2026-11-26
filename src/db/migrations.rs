@@ -667,6 +667,11 @@ async fn migrate_v21_learning_rule_status(pool: &PgPool) -> Result<(), sqlx::Err
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (21) ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -691,6 +696,11 @@ async fn migrate_v20_pre_merge_checks(pool: &PgPool) -> Result<(), sqlx::Error> 
             PRIMARY KEY (repo_full_name, pr_number, check_name)
         )
         "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES (20) ON CONFLICT (version) DO NOTHING",
     )
     .execute(pool)
     .await?;
@@ -1305,5 +1315,17 @@ mod tests {
             split_sql("CREATE TABLE a (x INT); -- the review's batch\nCREATE TABLE b (y INT);");
         assert_eq!(stmts.len(), 2);
         assert!(stmts[1].contains("TABLE b"));
+    }
+
+    #[test]
+    fn versioned_migrations_record_their_version() {
+        let source = include_str!("migrations.rs");
+        for version in [20, 21] {
+            let marker = format!("VALUES ({version}) ON CONFLICT (version) DO NOTHING");
+            assert!(
+                source.contains(&marker),
+                "migration v{version} has no version row"
+            );
+        }
     }
 }
