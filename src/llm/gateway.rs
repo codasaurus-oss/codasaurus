@@ -137,6 +137,7 @@ fn catalog_categories(
         .collect())
 }
 
+#[derive(Clone)]
 pub struct GatewayClient {
     base_url: String,
     admin_key: String,
@@ -704,6 +705,51 @@ impl GatewayClient {
         }
         let _: Value = self
             .request(Method::POST, "/key/update", Some(body), None)
+            .await?;
+        Ok(())
+    }
+
+    /// Reconcile one remote MCP server into LiteLLM's database-backed gateway.
+    /// The stable alias lets inference requests address it as
+    /// `litellm_proxy/mcp/<alias>` without exposing the upstream URL to the
+    /// model request. LiteLLM stores the upstream credential and executes the
+    /// MCP calls itself.
+    pub async fn upsert_mcp_server(
+        &self,
+        alias: &str,
+        base_url: &str,
+        api_key: &str,
+        allowed_tools: &[String],
+    ) -> Result<()> {
+        let mut body = json!({
+            "server_id": alias,
+            "server_name": alias,
+            "alias": alias,
+            "url": base_url,
+            "transport": "http",
+            "allowed_tools": allowed_tools,
+            "allow_all_keys": true,
+            "mcp_info": { "skip_tool_output_validation": false },
+        });
+        if !api_key.is_empty() {
+            body["auth_type"] = json!("bearer_token");
+            body["credentials"] = json!({ "auth_value": api_key });
+        }
+        let _: Value = self
+            .request(Method::PUT, "/v1/mcp/server", Some(body), None)
+            .await?;
+        Ok(())
+    }
+
+    /// Remove a Codasaurus-owned MCP server from LiteLLM after it is deleted.
+    pub async fn delete_mcp_server(&self, alias: &str) -> Result<()> {
+        let _: Value = self
+            .request(
+                Method::DELETE,
+                &format!("/v1/mcp/server/{alias}"),
+                None,
+                None,
+            )
             .await?;
         Ok(())
     }

@@ -181,6 +181,12 @@ pub(crate) async fn delete_server(
         keys.extend([base_url_key.as_str(), name_key.as_str()]);
     }
     db::config::delete_configs(&state.pool, &keys).await?;
+    if let Some(gateway) = crate::llm::gateway::GatewayClient::from_env() {
+        let alias = format!("codasaurus_{id}");
+        if let Err(error) = gateway.delete_mcp_server(&alias).await {
+            tracing::warn!(server = %id, error = %error, "could not remove MCP server from LiteLLM");
+        }
+    }
     if custom {
         update_custom_server_ids(&state.pool, &id, false).await?;
     }

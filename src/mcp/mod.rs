@@ -3,15 +3,13 @@
 //!
 //! Remote HTTP/SSE servers only, instance-wide config, per-repo opt-in via
 //! `.codasaurus.toml`'s `checks.mcp_tools`. Structurally inert in offline
-//! mode: [`list_enabled_tools`] always returns empty there.
+//! mode: [`list_enabled_servers`] always returns empty there.
 
 pub mod cache;
 pub mod catalog;
 pub mod client;
 
 use crate::db::DbPool;
-use anyhow::{bail, Result};
-use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -77,13 +75,11 @@ fn is_write_tool(name: &str) -> bool {
     })
 }
 
-/// One tool exposed to the LLM, qualified with its server so names never collide.
+/// One enabled MCP server exposed to LiteLLM for a review.
 #[derive(Debug, Clone)]
-pub struct McpToolSpec {
-    /// `"<server_id>__<tool_name>"`
-    pub qualified_name: String,
-    pub description: String,
-    pub input_schema: Value,
+pub struct McpServerSpec {
+    pub alias: String,
+    pub allowed_tools: Vec<String>,
 }
 
 /// Instance-wide server record merged from the static catalog + DB overrides.
@@ -167,10 +163,10 @@ pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
     list_servers_from_config(&server_configs(pool).await)
 }
 
-/// Tool specs for every enabled server, in OpenAI-compatible shape. Empty in
-/// offline mode or when a server's `tools/list` call fails (fails open —
-/// one broken server doesn't kill review).
-pub async fn list_enabled_tools(pool: &DbPool) -> Vec<McpToolSpec> {
+/// Reconcile enabled servers into LiteLLM and return safe tool allowlists.
+/// Empty in offline mode or when a server's `tools/list` call fails (fails open
+/// — one broken server doesn't kill review).
+pub async fn list_enabled_servers(pool: &DbPool) -> Vec<McpServerSpec> {
     if crate::registry::offline_mode() {
         return Vec::new();
     }
@@ -188,95 +184,55 @@ pub async fn list_enabled_tools(pool: &DbPool) -> Vec<McpToolSpec> {
         })
         .collect();
     let server_count = servers.len();
+    let gateway = crate::llm::gateway::GatewayClient::from_env();
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_MCP_FETCHES));
     let mut tasks = JoinSet::new();
 
     for (index, (server, api_key)) in servers.into_iter().enumerate() {
         let semaphore = Arc::clone(&semaphore);
+        let gateway = gateway.clone();
         tasks.spawn(async move {
             let Ok(_permit) = semaphore.acquire().await else {
-                return (index, Vec::new());
+                return (index, None);
             };
             let tools = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
-            let specs = tools
+            let allowed_tools: Vec<String> = tools
                 .into_iter()
                 .filter_map(|tool| {
                     let name = tool.get("name")?.as_str()?;
                     if is_write_tool(name) {
                         return None;
                     }
-                    Some(McpToolSpec {
-                        qualified_name: format!("{}__{name}", server.id),
-                        description: tool
-                            .get("description")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        input_schema: tool
-                            .get("inputSchema")
-                            .cloned()
-                            .unwrap_or_else(|| serde_json::json!({"type": "object"})),
-                    })
+                    Some(name.to_string())
                 })
                 .collect();
-            (index, specs)
+            if allowed_tools.is_empty() {
+                return (index, None);
+            }
+            let alias = format!("codasaurus_{}", server.id);
+            let Some(gateway) = gateway else {
+                tracing::warn!(server = %server.id, "LiteLLM gateway unavailable; skipping MCP server");
+                return (index, None);
+            };
+            if let Err(error) = gateway
+                .upsert_mcp_server(&alias, &server.base_url, &api_key, &allowed_tools)
+                .await
+            {
+                tracing::warn!(server = %server.id, error = %error, "LiteLLM MCP server reconciliation failed");
+                return (index, None);
+            }
+            (index, Some(McpServerSpec { alias, allowed_tools }))
         });
     }
 
-    let mut batches = vec![Vec::new(); server_count];
+    let mut batches: Vec<Option<McpServerSpec>> = vec![None; server_count];
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok((index, specs)) => batches[index] = specs,
+            Ok((index, spec)) => batches[index] = spec,
             Err(error) => tracing::warn!(error = %error, "MCP tool discovery task failed"),
         }
     }
     batches.into_iter().flatten().collect()
-}
-
-/// Truncated at 8000 chars — bounds what a tool result can cost in the next
-/// LLM round-trip, matching `llm::truncate_chars`'s cap on diffs.
-const MAX_TOOL_RESULT_CHARS: usize = 8000;
-
-pub async fn call_tool(pool: &DbPool, qualified_name: &str, arguments: &Value) -> Result<String> {
-    let Some((server_id, tool_name)) = qualified_name.split_once("__") else {
-        bail!("malformed MCP tool name: {qualified_name}");
-    };
-
-    // Re-check the live allowlist: injected content or a config change can
-    // introduce a tool name that was unavailable when tools were offered.
-    let config = server_configs(pool).await;
-    let server = list_servers_from_config(&config)
-        .into_iter()
-        .find(|s| s.id == server_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server_id}"))?;
-    if !server.enabled || server.base_url.is_empty() {
-        bail!("MCP server {server_id} is not enabled");
-    }
-    let api_key = config
-        .get(&format!("mcp_{server_id}_api_key"))
-        .cloned()
-        .unwrap_or_default();
-    let available = cache::get_or_fetch_tools(&server.id, &server.base_url, &api_key).await;
-    let allowed = available
-        .iter()
-        .any(|t| t.get("name").and_then(|v| v.as_str()) == Some(tool_name));
-    if !allowed {
-        bail!("tool {tool_name} is not in {server_id}'s current tool list");
-    }
-    if is_write_tool(tool_name) {
-        bail!("tool {qualified_name} looks state-mutating; write tools are not permitted");
-    }
-
-    let result = client::tools_call(&server.base_url, &api_key, tool_name, arguments).await;
-
-    crate::db::audit::log_event(pool, "mcp.tool_called", None, Some(qualified_name), None).await;
-
-    let text = match &result {
-        Ok(v) => v.to_string(),
-        Err(e) => format!("Error calling {qualified_name}: {e}"),
-    };
-    let truncated: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
-    Ok(truncated)
 }
 
 #[cfg(test)]

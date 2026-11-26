@@ -1,7 +1,7 @@
 //! Minimal JSON-RPC 2.0 client for remote MCP servers over Streamable HTTP.
 //!
-//! Deliberately narrow: only the three methods the review loop needs
-//! (`initialize`, `tools/list`, `tools/call`). No stdio/subprocess transport —
+//! Deliberately narrow: only the methods needed to test and discover a server
+//! (`initialize`, `tools/list`). No stdio/subprocess transport —
 //! that would mean spawning binaries influenced indirectly by PR content.
 
 use anyhow::{bail, Context, Result};
@@ -157,21 +157,6 @@ pub async fn tools_list(base_url: &str, api_key: &str) -> Result<Vec<Value>> {
         .and_then(|t| t.as_array())
         .cloned()
         .unwrap_or_default())
-}
-
-pub async fn tools_call(
-    base_url: &str,
-    api_key: &str,
-    tool_name: &str,
-    arguments: &Value,
-) -> Result<Value> {
-    call_rpc(
-        base_url,
-        api_key,
-        "tools/call",
-        json!({ "name": tool_name, "arguments": arguments }),
-    )
-    .await
 }
 
 #[cfg(test)]

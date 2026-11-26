@@ -34,7 +34,7 @@ pub(crate) async fn maybe_post_auto_improve(
     state: &Option<ReviewState>,
     max_diff_chars: usize,
     max_issues: usize,
-    mcp_tools: &[crate::mcp::McpToolSpec],
+    mcp_servers: &[crate::mcp::McpServerSpec],
     pool: Option<&crate::db::DbPool>,
     semantic_index_enabled: bool,
 ) -> Result<()> {
@@ -106,7 +106,7 @@ pub(crate) async fn maybe_post_auto_improve(
         });
     }
 
-    let output = crate::llm::review_diff(&diff, llm_cfg, Some(&grounded_ctx), mcp_tools).await?;
+    let output = crate::llm::review_diff(&diff, llm_cfg, Some(&grounded_ctx), mcp_servers).await?;
     let known_paths: Vec<String> = files
         .iter()
         .filter_map(|f| f["filename"].as_str().map(str::to_string))
