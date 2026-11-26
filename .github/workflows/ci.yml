@@ -81,7 +81,10 @@ jobs:
         # RUSTSEC-2026-0459 (SQLite WAL memory disclosure): libsqlite3-sys is
         # only locked as an optional sqlx sqlite dependency. The binary is built
         # with the postgres feature, so no SQLite code is linked.
-        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
+        # RUSTSEC-2026-0387 is retained as a documented policy exception;
+        # the current lockfile resolves crypto-bigint 0.7.11, above the
+        # advisory's patched 0.7.6 floor.
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0387
       - name: Run tests
         run: cargo test --locked
 

@@ -19,6 +19,19 @@ use super::AppState;
 
 const SESSION_COOKIE: &str = "codasaurus_session";
 
+fn zitadel_managed() -> bool {
+    std::env::var("CODASAURUS_AUTH_MODE")
+        .map(|mode| mode.eq_ignore_ascii_case("zitadel"))
+        .unwrap_or(false)
+}
+
+/// Provider-managed auth is only active once the provider can actually start
+/// an OIDC flow. This keeps a fresh/local install recoverable when the
+/// optional ZITADEL mode is selected before its client credentials exist.
+fn provider_managed() -> bool {
+    zitadel_managed() && crate::oidc::OidcConfig::enabled()
+}
+
 fn session_max_age() -> u64 {
     crate::env::u64("CODASAURUS_SESSION_MAX_AGE_SECS", 604_800)
 }
@@ -192,6 +205,11 @@ pub(crate) async fn login(
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if provider_managed() {
+        return Err(ApiError::gone(
+            "Local password sign-in is disabled; use the configured ZITADEL sign-in",
+        ));
+    }
     check_auth_rate_limit(&state.redis, peer.ip(), &headers, &body.email).await?;
 
     let user = db::users::verify_password(&state.pool, &body.email, &body.password)
@@ -270,7 +288,12 @@ pub(crate) async fn logout(
 
 #[utoipa::path(get, path = "/api/auth/oidc/status", tag = "auth", responses((status = 200, description = "OK"), (status = 401, description = "Authentication required")))]
 pub(crate) async fn oidc_status() -> Json<serde_json::Value> {
-    Json(json!({ "enabled": crate::oidc::OidcConfig::enabled() }))
+    Json(json!({
+        "enabled": crate::oidc::OidcConfig::enabled(),
+        "provider": if zitadel_managed() { "zitadel" } else { "oidc" },
+        "managed_by_provider": provider_managed(),
+        "local_password_enabled": !provider_managed(),
+    }))
 }
 
 fn oidc_login_error(err: impl std::fmt::Display) -> ApiError {
@@ -385,6 +408,11 @@ pub(crate) async fn accept_invite(
     Path(token): Path<String>,
     Json(body): Json<AcceptInviteBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if provider_managed() {
+        return Err(ApiError::gone(
+            "Local invites are disabled; manage organization invitations in ZITADEL",
+        ));
+    }
     let invite = db::invites::get_pending_by_token(&state.pool, &token)
         .await?
         .ok_or_else(|| ApiError::not_found("Invite not found or expired"))?;

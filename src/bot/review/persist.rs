@@ -11,14 +11,14 @@ pub(crate) async fn save_review_to_db(
     head_sha: &str,
     findings: &Findings,
     has_blocking: bool,
-) {
+) -> bool {
     let pool = match crate::bot::CONFIG_POOL.get() {
         Some(p) => p,
-        None => return,
+        None => return false,
     };
     let repo_id = match crate::db::repos::get_repo_by_full_name(pool, repo_name).await {
         Ok(Some(r)) => r.id,
-        _ => return,
+        _ => return false,
     };
     let review = match crate::db::reviews::create_review(
         pool,
@@ -51,7 +51,10 @@ pub(crate) async fn save_review_to_db(
     .await
     {
         Ok(r) => r,
-        Err(_) => return,
+        Err(error) => {
+            tracing::error!(error = %error, repo = repo_name, pr = pr_number, "failed to create review record");
+            return false;
+        }
     };
     let batch: Vec<crate::db::models::FindingCreate> = findings
         .findings
@@ -93,6 +96,7 @@ pub(crate) async fn save_review_to_db(
             findings = batch.len(),
             "persisting findings failed; the next review of this PR loses its delta"
         );
+        return false;
     }
     let tier1 = findings
         .findings
@@ -113,6 +117,7 @@ pub(crate) async fn save_review_to_db(
     .await
     {
         tracing::error!(error = %e, "failed to update review status");
+        return false;
     }
     crate::db::audit::log_event(
         pool,
@@ -122,4 +127,5 @@ pub(crate) async fn save_review_to_db(
         Some(review.id),
     )
     .await;
+    true
 }

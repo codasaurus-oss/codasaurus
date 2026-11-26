@@ -5,6 +5,8 @@
 use anyhow::Result;
 use serde_json::json;
 
+const MAX_EMBEDDING_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Embed a batch of texts (≤100, per OpenAI's `/embeddings` batch limit).
 /// Returns `Ok(vec![])` when offline or when no embedding model is configured —
 /// callers should treat that as "skip indexing this batch", not an error.
@@ -33,21 +35,21 @@ pub async fn embed_texts(
         "model": config.embedding_model,
         "input": texts,
     });
-    let resp = client
-        .post(&url)
-        .bearer_auth(&config.api_key)
-        .json(&body)
-        .send()
-        .await?;
+    let mut request = client.post(&url).json(&body);
+    if !config.api_key.is_empty() {
+        request = request.bearer_auth(&config.api_key);
+    }
+    let resp = request.send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = bounded_response_text(resp, 16 * 1024).await;
         anyhow::bail!(
             "embeddings endpoint returned {status}: {}",
             text.chars().take(300).collect::<String>()
         );
     }
-    let parsed: serde_json::Value = resp.json().await?;
+    let bytes = bounded_response_bytes(resp, MAX_EMBEDDING_RESPONSE_BYTES).await?;
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes)?;
     let data = parsed["data"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("embeddings response missing `data` array"))?;
@@ -75,6 +77,27 @@ pub async fn embed_texts(
 /// An unconfigured embedding model must skip rather than POST an empty name.
 fn embedding_configured(model: &str) -> bool {
     !model.trim().is_empty()
+}
+
+async fn bounded_response_bytes(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        anyhow::bail!("embeddings response exceeded {limit} bytes");
+    }
+    let bytes = response.bytes().await?;
+    if bytes.len() > limit {
+        anyhow::bail!("embeddings response exceeded {limit} bytes");
+    }
+    Ok(bytes.to_vec())
+}
+
+async fn bounded_response_text(response: reqwest::Response, limit: usize) -> String {
+    match bounded_response_bytes(response, limit).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => format!("response body unavailable: {error}"),
+    }
 }
 
 #[cfg(test)]

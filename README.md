@@ -177,6 +177,10 @@ A positive `llm_daily_budget_usd` is enforced by LiteLLM on the virtual key with
 
 Toggle per repo in the dashboard. `offline_mode` / `CODASAURUS_OFFLINE=1` never opens an LLM socket. Details: [configuration.md](https://codasaurus-oss.github.io/configuration/).
 
+Configured MCP servers are available to review agents by default through LiteLLM. Codasaurus
+filters out write-looking tools and preserves the per-repository `checks.mcp_tools = false` opt-out;
+offline mode always disables MCP access.
+
 ---
 
 ## Config sketch

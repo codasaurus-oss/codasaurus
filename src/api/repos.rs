@@ -15,6 +15,8 @@ use super::AppState;
 pub struct UpdateRepoBody {
     pub config_json: String,
     pub active: bool,
+    /// Manual override; GitHub sync no longer overwrites it.
+    pub default_branch: Option<String>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -155,6 +157,7 @@ async fn installation_repos(
                     .headers(token_headers.clone())
                     .send()
                     .await
+                    .and_then(|response| response.error_for_status())
                     .map_err(Into::into)
             },
         )
@@ -205,7 +208,21 @@ pub(crate) async fn update_repo(
     {
         return Err(ApiError::bad_request("config_json must be valid JSON"));
     }
-    db::repos::update_repo(&state.pool, id, &body.config_json, body.active).await?;
+    if body
+        .default_branch
+        .as_deref()
+        .is_some_and(|branch| branch.trim().is_empty())
+    {
+        return Err(ApiError::bad_request("default_branch must not be empty"));
+    }
+    db::repos::update_repo(
+        &state.pool,
+        id,
+        &body.config_json,
+        body.active,
+        body.default_branch.as_deref(),
+    )
+    .await?;
     Ok(Json(json!({ "status": "ok" })))
 }
 

@@ -385,6 +385,7 @@ pub async fn review_pr_with_options(
                         .headers(headers.clone())
                         .send()
                         .await
+                        .and_then(|response| response.error_for_status())
                         .map_err(Into::into)
                 },
             )
@@ -397,7 +398,10 @@ pub async fn review_pr_with_options(
                         .collect(),
                     Err(_) => vec![],
                 },
-                Err(_) => vec![],
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to fetch PR commits; continuing without commit context");
+                    vec![]
+                }
             }
         },
     );
@@ -989,7 +993,7 @@ pub async fn review_pr_with_options(
         persist_finished_review(
             &state, repo_name, pr_number, &pr_title, pr, head_sha, &findings, false,
         )
-        .await;
+        .await?;
         if policy_pack.create_check_run {
             if let Err(e) = crate::bot::github_extra::create_findings_check_run(
                 client,
@@ -1142,7 +1146,7 @@ pub async fn review_pr_with_options(
         &findings,
         has_blocking,
     )
-    .await;
+    .await?;
 
     let mut premerge_md = String::new();
     let mut premerge_blockers: Vec<String> = Vec::new();
@@ -1286,11 +1290,11 @@ pub async fn review_pr_with_options(
                 files.len(),
                 runtime.auto_improve_max_files,
             ) {
-                // Per-repo opt-in choke point: only fetch MCP tools when this
-                // repo's config explicitly enables them. Empty elsewhere.
-                let mcp_tools = if config.checks.mcp_tools {
+                // Per-repo policy choke point: configured MCP servers are
+                // available by default, while an explicit false disables them.
+                let mcp_servers = if config.checks.mcp_tools {
                     match pool {
-                        Some(pool) => crate::mcp::list_enabled_tools(pool).await,
+                        Some(pool) => crate::mcp::list_enabled_servers(pool).await,
                         None => Vec::new(),
                     }
                 } else {
@@ -1309,7 +1313,7 @@ pub async fn review_pr_with_options(
                     &state,
                     runtime.auto_improve_max_diff_chars,
                     crate::bot::agent_mode::agent_llm_issue_cap(agent_signal.is_agent),
-                    &mcp_tools,
+                    &mcp_servers,
                     pool,
                     config.checks.semantic_index,
                 )
@@ -1336,9 +1340,8 @@ async fn persist_finished_review(
     head_sha: &str,
     findings: &Findings,
     has_blocking: bool,
-) {
-    remember_reviewed_sha(state, repo_name, pr_number, head_sha).await;
-    save_review_to_db(
+) -> Result<()> {
+    let persisted = save_review_to_db(
         repo_name,
         pr_number,
         pr_title,
@@ -1350,6 +1353,20 @@ async fn persist_finished_review(
         has_blocking,
     )
     .await;
+    if persisted {
+        remember_reviewed_sha(state, repo_name, pr_number, head_sha).await;
+        Ok(())
+    } else if let Some(state) = state {
+        if let Err(error) = state
+            .release_sha_claim(repo_name, pr_number, head_sha)
+            .await
+        {
+            tracing::warn!(error = %error, "failed to release SHA claim after persistence failure");
+        }
+        anyhow::bail!("review persistence failed")
+    } else {
+        anyhow::bail!("review persistence unavailable")
+    }
 }
 
 /// Best-effort record of the reviewed commit for incremental review.

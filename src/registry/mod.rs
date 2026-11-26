@@ -97,18 +97,30 @@ pub(super) async fn fetch_json(
     accept: Option<&str>,
 ) -> Result<Option<serde_json::Value>> {
     let client = async_client().context("registry HTTP client not available")?;
-    let mut request = client.get(url).header(
-        "User-Agent",
-        concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-    );
-    if let Some(accept) = accept {
-        request = request.header("Accept", accept);
-    }
-    let response = request.send().await?;
-    if response.status().as_u16() != 200 {
-        return Ok(None);
-    }
-    Ok(Some(response.json().await?))
+    retry_async(
+        &RetryConfig::quick(),
+        "registry_fetch_json",
+        &is_registry_retryable,
+        || async {
+            let mut request = client.get(url).header(
+                "User-Agent",
+                concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
+            );
+            if let Some(accept) = accept {
+                request = request.header("Accept", accept);
+            }
+            let response = request.send().await?;
+            let status = response.status().as_u16();
+            if is_transient_status(status) {
+                anyhow::bail!("registry HTTP {status}");
+            }
+            if status != 200 {
+                return Ok(None);
+            }
+            Ok(Some(response.json().await?))
+        },
+    )
+    .await
 }
 
 /// Status-only registry probe; the caller maps codes to exists/missing/soft-fail.
@@ -118,14 +130,39 @@ pub(super) async fn status_code(
     accept: Option<&str>,
 ) -> Result<u16> {
     let client = async_client().context("registry HTTP client not available")?;
-    let mut request = client.request(method, url).header(
-        "User-Agent",
-        concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
-    );
-    if let Some(accept) = accept {
-        request = request.header("Accept", accept);
-    }
-    Ok(request.send().await?.status().as_u16())
+    retry_async(
+        &RetryConfig::quick(),
+        "registry_status",
+        &is_registry_retryable,
+        || async {
+            let mut request = client.request(method.clone(), url).header(
+                "User-Agent",
+                concat!("codasaurus/", env!("CARGO_PKG_VERSION")),
+            );
+            if let Some(accept) = accept {
+                request = request.header("Accept", accept);
+            }
+            let status = request.send().await?.status().as_u16();
+            if is_transient_status(status) {
+                anyhow::bail!("registry HTTP {status}");
+            }
+            Ok(status)
+        },
+    )
+    .await
+}
+
+fn is_transient_status(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
+}
+
+fn is_registry_retryable(error: &anyhow::Error) -> bool {
+    is_reqwest_error_retryable(error)
+        || error
+            .to_string()
+            .strip_prefix("registry HTTP ")
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(is_transient_status)
 }
 
 pub fn async_client() -> Result<&'static reqwest::Client> {
@@ -883,6 +920,18 @@ mod tests {
         );
         assert_eq!(classify_status(410, &[200], &[404]), None);
         assert_eq!(classify_status(503, &[200], &[404]), None);
+    }
+
+    #[test]
+    fn transient_registry_statuses_are_retryable_but_missing_is_not() {
+        assert!(is_transient_status(429));
+        assert!(is_transient_status(500));
+        assert!(is_transient_status(503));
+        assert!(!is_transient_status(404));
+        assert!(is_registry_retryable(&anyhow::anyhow!("registry HTTP 503")));
+        assert!(!is_registry_retryable(&anyhow::anyhow!(
+            "registry HTTP 404"
+        )));
     }
 
     #[test]

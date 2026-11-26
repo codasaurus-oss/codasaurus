@@ -23,6 +23,21 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/test", post(test_server))
 }
 
+fn validate_server_id(id: &str) -> Result<(), ApiError> {
+    let valid = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "MCP server id must be 1-64 ASCII letters, numbers, '-' or '_'",
+        ))
+    }
+}
+
 #[derive(Deserialize)]
 pub(crate) struct UpsertServerBody {
     enabled: bool,
@@ -88,6 +103,7 @@ pub(crate) async fn upsert_server(
     Json(body): Json<UpsertServerBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
+    validate_server_id(&id)?;
     let custom = mcp::catalog::find(&id).is_none();
     let base_url = if custom {
         let base_url = body
@@ -130,6 +146,19 @@ pub(crate) async fn upsert_server(
         }
     }
     db::config::set_configs(&state.pool, &entries).await?;
+    if let Some(key) = body.api_key.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(ticket_key) = db::config::mcp_ticket_key(&api_key_key) {
+            db::config::set_config(&state.pool, ticket_key, key).await?;
+        }
+    }
+    if !body.enabled {
+        if let Some(gateway) = crate::llm::gateway::GatewayClient::from_env() {
+            let alias = format!("codasaurus_{id}");
+            if let Err(error) = gateway.delete_mcp_server(&alias).await {
+                tracing::warn!(server = %id, error = %error, "could not disable MCP server in LiteLLM");
+            }
+        }
+    }
     if custom {
         update_custom_server_ids(&state.pool, &id, true).await?;
     }
@@ -154,6 +183,7 @@ pub(crate) async fn delete_server(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
+    validate_server_id(&id)?;
     let custom = mcp::catalog::find(&id).is_none();
     let enabled_key = format!("mcp_{id}_enabled");
     let api_key_key = format!("mcp_{id}_api_key");
@@ -164,6 +194,12 @@ pub(crate) async fn delete_server(
         keys.extend([base_url_key.as_str(), name_key.as_str()]);
     }
     db::config::delete_configs(&state.pool, &keys).await?;
+    if let Some(gateway) = crate::llm::gateway::GatewayClient::from_env() {
+        let alias = format!("codasaurus_{id}");
+        if let Err(error) = gateway.delete_mcp_server(&alias).await {
+            tracing::warn!(server = %id, error = %error, "could not remove MCP server from LiteLLM");
+        }
+    }
     if custom {
         update_custom_server_ids(&state.pool, &id, false).await?;
     }
@@ -188,6 +224,7 @@ pub(crate) async fn test_server(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
+    validate_server_id(&id)?;
 
     let base_url_key = format!("mcp_{id}_base_url");
     let api_key_key = format!("mcp_{id}_api_key");
@@ -217,4 +254,20 @@ pub(crate) async fn test_server(
         "ok": true,
         "tool_count": tools.len(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_server_id;
+
+    #[test]
+    fn server_ids_are_safe_dynamic_config_key_components() {
+        for id in ["context7", "my-server_2", "A1"] {
+            assert!(validate_server_id(id).is_ok(), "{id}");
+        }
+        for id in ["", "has space", "../escape", "a/b", "a.b", "é"] {
+            assert!(validate_server_id(id).is_err(), "{id}");
+        }
+        assert!(validate_server_id(&"a".repeat(65)).is_err());
+    }
 }

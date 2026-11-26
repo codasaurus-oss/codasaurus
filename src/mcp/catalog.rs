@@ -23,12 +23,6 @@ pub const CATALOG: &[CatalogEntry] = &[
         docs_url: "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
     },
     CatalogEntry {
-        id: "github",
-        name: "GitHub",
-        base_url: "https://api.githubcopilot.com/mcp/",
-        docs_url: "https://github.com/github/github-mcp-server",
-    },
-    CatalogEntry {
         id: "sentry",
         name: "Sentry",
         base_url: "https://mcp.sentry.dev/mcp",
@@ -39,12 +33,6 @@ pub const CATALOG: &[CatalogEntry] = &[
         name: "Linear",
         base_url: "https://mcp.linear.app/mcp",
         docs_url: "https://linear.app/docs/mcp",
-    },
-    CatalogEntry {
-        id: "notion",
-        name: "Notion",
-        base_url: "https://mcp.notion.com/mcp",
-        docs_url: "https://developers.notion.com/docs/mcp",
     },
     CatalogEntry {
         id: "atlassian",
@@ -62,4 +50,29 @@ pub const CATALOG: &[CatalogEntry] = &[
 
 pub fn find(id: &str) -> Option<&'static CatalogEntry> {
     CATALOG.iter().find(|e| e.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CATALOG;
+
+    #[test]
+    fn default_catalog_excludes_redundant_servers() {
+        let ids: Vec<&str> = CATALOG.iter().map(|entry| entry.id).collect();
+        assert!(!ids.contains(&"github"));
+        assert!(!ids.contains(&"notion"));
+        for expected in [
+            "context7",
+            "deepwiki",
+            "sentry",
+            "linear",
+            "atlassian",
+            "cloudflare-docs",
+        ] {
+            assert!(
+                ids.contains(&expected),
+                "missing default MCP server {expected}"
+            );
+        }
+    }
 }

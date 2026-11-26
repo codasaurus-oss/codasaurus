@@ -372,6 +372,9 @@ pub(crate) async fn set_setting(
     }
 
     db::config::set_config(&state.pool, &key, &body.value).await?;
+    if let Some(mcp_key) = db::config::ticket_mcp_key(&key) {
+        db::config::set_config(&state.pool, mcp_key, &body.value).await?;
+    }
     db::config::apply_setting_to_env(&key, &body.value);
     db::audit::log_event(
         &state.pool,

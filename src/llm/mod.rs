@@ -24,14 +24,20 @@ use client::{chat_body, chat_text, llm_client, post_chat};
 use prompts::truncate_chars;
 use serde_json::{json, Value};
 
-/// Bounded tool-calling round-trips per review. Always terminates: the final
-/// allowed round is sent with `tool_choice: "none"` so a parseable structured
-/// output comes back even if the model still wants to call a tool.
-const MAX_TOOL_ITERATIONS: usize = 4;
-
 /// System-prompt overhead in the review cost estimate: the prompt string is
 /// built separately, so its length is approximated rather than measured.
 const REVIEW_PROMPT_OVERHEAD_CHARS: usize = 800;
+
+fn mcp_tool_descriptor(server: &crate::mcp::McpServerSpec) -> serde_json::Value {
+    let tool = json!({
+        "type": "mcp",
+        "server_label": server.alias,
+        "server_url": format!("litellm_proxy/mcp/{}", server.alias),
+        "require_approval": "never",
+        "allowed_tools": server.allowed_tools,
+    });
+    tool
+}
 
 /// Minimal gateway probe for the setup wizard. One chat call, no budget gate.
 pub async fn check_connection(config: &LlmConfig) -> Result<()> {
@@ -58,9 +64,8 @@ pub async fn review_diff(
     diff: &str,
     config: &LlmConfig,
     context: Option<&ReviewContext>,
-    mcp_tools: &[crate::mcp::McpToolSpec],
+    mcp_servers: &[crate::mcp::McpServerSpec],
 ) -> Result<LlmReviewOutput> {
-    let pool = crate::bot::CONFIG_POOL.get();
     let max_diff = crate::bot_runtime::BotRuntimeConfig::default().max_llm_diff_chars;
     let diff = truncate_chars(diff, max_diff);
     let prompt = build_review_prompt(&diff, context);
@@ -69,80 +74,30 @@ pub async fn review_diff(
 
     let client = llm_client()?;
     let model = config.model.as_str();
-    let mut messages = vec![
+    let messages = vec![
         json!({"role": "system", "content": prompts::REVIEW_SYSTEM_PROMPT}),
         json!({"role": "user", "content": prompt}),
     ];
 
-    let tool_specs: Vec<serde_json::Value> = mcp_tools
-        .iter()
-        .map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.qualified_name,
-                    "description": t.description,
-                    "parameters": t.input_schema,
-                }
-            })
-        })
-        .collect();
+    let tool_specs: Vec<serde_json::Value> = mcp_servers.iter().map(mcp_tool_descriptor).collect();
 
-    let resp_json = loop {
-        let force_final = messages.len() > 2 * MAX_TOOL_ITERATIONS;
+    let mut body = chat_body(config, model, &messages, config.max_tokens);
+    if !tool_specs.is_empty() {
+        let obj = body.as_object_mut().expect("body is an object");
+        obj.insert("tools".to_string(), json!(tool_specs));
+        obj.insert("tool_choice".to_string(), json!("auto"));
+    }
 
-        let mut body = chat_body(config, model, &messages, config.max_tokens);
-        if !tool_specs.is_empty() {
-            let obj = body.as_object_mut().expect("body is an object");
-            obj.insert("tools".to_string(), json!(tool_specs));
-            obj.insert(
-                "tool_choice".to_string(),
-                json!(if force_final { "none" } else { "auto" }),
-            );
-        }
-
-        let resp = post_chat(
-            client,
-            config,
-            model,
-            &body,
-            "review_diff",
-            prompt_chars,
-            true,
-        )
-        .await?;
-        let message = &resp["choices"][0]["message"];
-        let tool_calls = message["tool_calls"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-
-        if tool_calls.is_empty() || force_final {
-            break resp;
-        }
-
-        messages.push(message.clone());
-        for call in &tool_calls {
-            let call_id = call["id"].as_str().unwrap_or_default().to_string();
-            let name = call["function"]["name"].as_str().unwrap_or_default();
-            let args_str = call["function"]["arguments"].as_str().unwrap_or("{}");
-            let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or(json!({}));
-
-            let result_text = match pool {
-                Some(pool) => match crate::mcp::call_tool(pool, name, &args).await {
-                    Ok(text) => text,
-                    Err(e) => format!("error calling tool: {e}"),
-                },
-                None => "error: no database pool available for tool calls".to_string(),
-            };
-
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": result_text,
-            }));
-        }
-    };
+    let resp_json = post_chat(
+        client,
+        config,
+        model,
+        &body,
+        "review_diff",
+        prompt_chars,
+        true,
+    )
+    .await?;
 
     let content = resp_json["choices"][0]["message"]["content"]
         .as_str()
@@ -421,6 +376,22 @@ mod tests {
     #[test]
     fn garbage_input_yields_empty() {
         assert!(parse_judge_verdicts("not json at all").is_empty());
+    }
+
+    #[test]
+    fn mcp_descriptor_delegates_execution_to_litellm() {
+        let descriptor = mcp_tool_descriptor(&crate::mcp::McpServerSpec {
+            alias: "codasaurus_docs".into(),
+            allowed_tools: vec!["search".into()],
+        });
+        assert_eq!(descriptor["type"], "mcp");
+        assert_eq!(descriptor["server_label"], "codasaurus_docs");
+        assert_eq!(descriptor["require_approval"], "never");
+        assert_eq!(
+            descriptor["server_url"],
+            "litellm_proxy/mcp/codasaurus_docs"
+        );
+        assert_eq!(descriptor["allowed_tools"][0], "search");
     }
 
     #[tokio::test]

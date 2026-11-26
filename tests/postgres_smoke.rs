@@ -302,7 +302,7 @@ async fn bulk_repo_upsert_preserves_local_config_and_active_state() {
     .await
     .expect("create existing repo");
     let config = r#"{"checks":{"secrets":false}}"#;
-    db::repos::update_repo(&pool, existing.id, config, true)
+    db::repos::update_repo(&pool, existing.id, config, true, None)
         .await
         .expect("configure existing repo");
 

@@ -9,6 +9,8 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct ModelRequest {
     pub alias: String,
@@ -135,6 +137,7 @@ fn catalog_categories(
         .collect())
 }
 
+#[derive(Clone)]
 pub struct GatewayClient {
     base_url: String,
     admin_key: String,
@@ -151,6 +154,7 @@ impl GatewayClient {
             admin_key,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("valid gateway HTTP client"),
         }
@@ -190,17 +194,15 @@ impl GatewayClient {
         }
         let resp = req.send().await.context("LiteLLM gateway request failed")?;
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .context("LiteLLM gateway response unreadable")?;
         if !status.is_success() {
+            let text = bounded_response_text(resp, 16 * 1024).await;
             bail!(
                 "LiteLLM gateway {path} returned {status}: {}",
                 text.chars().take(200).collect::<String>()
             );
         }
-        serde_json::from_str(&text)
+        let bytes = bounded_response_bytes(resp, MAX_GATEWAY_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&bytes)
             .with_context(|| format!("LiteLLM gateway {path} returned invalid JSON"))
     }
 
@@ -705,6 +707,75 @@ impl GatewayClient {
             .request(Method::POST, "/key/update", Some(body), None)
             .await?;
         Ok(())
+    }
+
+    /// Reconcile one remote MCP server into LiteLLM's database-backed gateway.
+    /// The stable alias lets inference requests address it as
+    /// `litellm_proxy/mcp/<alias>` without exposing the upstream URL to the
+    /// model request. LiteLLM stores the upstream credential and executes the
+    /// MCP calls itself.
+    pub async fn upsert_mcp_server(
+        &self,
+        alias: &str,
+        base_url: &str,
+        api_key: &str,
+        allowed_tools: &[String],
+    ) -> Result<()> {
+        let mut body = json!({
+            "server_id": alias,
+            "server_name": alias,
+            "alias": alias,
+            "url": base_url,
+            "transport": "http",
+            "allowed_tools": allowed_tools,
+            "allow_all_keys": true,
+            "mcp_info": { "skip_tool_output_validation": false },
+        });
+        if !api_key.is_empty() {
+            body["auth_type"] = json!("bearer_token");
+            body["credentials"] = json!({ "auth_value": api_key });
+        }
+        let _: Value = self
+            .request(Method::PUT, "/v1/mcp/server", Some(body), None)
+            .await?;
+        Ok(())
+    }
+
+    /// Remove a Codasaurus-owned MCP server from LiteLLM after it is deleted.
+    pub async fn delete_mcp_server(&self, alias: &str) -> Result<()> {
+        let _: Value = self
+            .request(
+                Method::DELETE,
+                &format!("/v1/mcp/server/{alias}"),
+                None,
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+async fn bounded_response_bytes(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        bail!("LiteLLM gateway response exceeded {limit} bytes");
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .context("LiteLLM gateway response unreadable")?;
+    if bytes.len() > limit {
+        bail!("LiteLLM gateway response exceeded {limit} bytes");
+    }
+    Ok(bytes.to_vec())
+}
+
+async fn bounded_response_text(response: reqwest::Response, limit: usize) -> String {
+    match bounded_response_bytes(response, limit).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => format!("response body unavailable: {error}"),
     }
 }
 

@@ -4,7 +4,6 @@
 
 use super::config::{assert_endpoint_safe, LlmConfig};
 use super::schema::review_response_format;
-use crate::retry::{is_reqwest_error_retryable, retry_async, RetryConfig};
 use anyhow::{bail, Result};
 use serde_json::json;
 use std::sync::LazyLock;
@@ -20,10 +19,16 @@ static LLM_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
             "CODASAURUS_LLM_CONNECT_TIMEOUT_SECS",
             10,
         )))
+        // Redirects can change the destination after the SSRF check and can
+        // also forward a bearer token to an unexpected origin. LiteLLM's
+        // canonical endpoint must be configured explicitly.
+        .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(4)
         .build()
         .ok()
 });
+
+const MAX_CHAT_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 pub(crate) fn llm_client() -> Result<&'static reqwest::Client> {
     LLM_CLIENT
@@ -73,10 +78,10 @@ fn text_body(
 
 /// POST one body to `{base_url}/chat/completions`.
 ///
-/// The SSRF gate runs once here, not per attempt. Transport errors, 5xx and 429
-/// retry with the default API retry budget; any other non-2xx surfaces the
-/// gateway's body. Responses are parsed permissively: the gateway echoes the
-/// alias and adds `x-litellm-*` fields, so unknown fields are never rejected.
+/// LiteLLM owns provider retries, fallbacks, cooldowns, and rate-limit handling.
+/// Codasaurus therefore sends each inference request once: retrying a completion
+/// here can duplicate a billable or stateful provider call. Responses are
+/// bounded before JSON decoding and unknown LiteLLM fields are ignored.
 pub(crate) async fn post_chat(
     client: &reqwest::Client,
     config: &LlmConfig,
@@ -96,39 +101,14 @@ pub(crate) async fn post_chat(
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(0);
 
-    let resp = retry_async(
-        &RetryConfig::api_default(),
-        "llm_chat_completion",
-        &is_reqwest_error_retryable,
-        || async {
-            let mut request = client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .json(body);
-            if !config.api_key.is_empty() {
-                request = request.bearer_auth(&config.api_key);
-            }
-            let resp = request.send().await?;
-            // 5xx / 429 come back as a status-carrying reqwest error so the
-            // shared predicate retries them. Read the gateway body first so its
-            // diagnostic is not lost when the response is converted.
-            let status = resp.status();
-            if status.is_server_error() || status.as_u16() == 429 {
-                let err = resp
-                    .error_for_status_ref()
-                    .expect_err("retryable status yields an error");
-                let body = resp.text().await.unwrap_or_default();
-                tracing::warn!(
-                    %status,
-                    body = %body.chars().take(500).collect::<String>(),
-                    "LLM gateway returned a retryable status"
-                );
-                return Err(err.into());
-            }
-            Ok(resp)
-        },
-    )
-    .await;
+    let mut request = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(body);
+    if !config.api_key.is_empty() {
+        request = request.bearer_auth(&config.api_key);
+    }
+    let resp = request.send().await;
 
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let outcome = if resp.is_ok() { "ok" } else { "error" };
@@ -148,29 +128,44 @@ pub(crate) async fn post_chat(
 
     let resp = match resp {
         Ok(resp) => resp,
-        Err(e) => {
+        Err(error) => {
             crate::metrics::record_llm_error();
-            let status = e
-                .downcast_ref::<reqwest::Error>()
-                .and_then(reqwest::Error::status);
-            return Err(match status {
-                Some(status) => anyhow::anyhow!("LLM API returned {status}"),
-                None => e,
-            });
+            return Err(error.into());
         }
     };
     let status = resp.status();
     if !status.is_success() {
         crate::metrics::record_llm_error();
-        let error_text = resp.text().await.unwrap_or_default();
+        let error_text = bounded_response_text(resp, 16 * 1024).await;
         bail!("LLM API returned {status}: {error_text}");
     }
 
-    Ok(resp.json().await?)
+    let bytes = bounded_response_bytes(resp, MAX_CHAT_RESPONSE_BYTES).await?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// Plain-text chat completion on the cheap alias, with one retry when a
-/// reasoning model spends its whole token budget and returns no content.
+async fn bounded_response_bytes(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        bail!("LLM response exceeded {limit} bytes");
+    }
+    let bytes = response.bytes().await?;
+    if bytes.len() > limit {
+        bail!("LLM response exceeded {limit} bytes");
+    }
+    Ok(bytes.to_vec())
+}
+
+async fn bounded_response_text(response: reqwest::Response, limit: usize) -> String {
+    match bounded_response_bytes(response, limit).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => format!("response body unavailable: {error}"),
+    }
+}
+
+/// Plain-text chat completion on the configured alias.
 pub(crate) async fn chat_text(
     client: &reqwest::Client,
     config: &LlmConfig,
@@ -192,29 +187,9 @@ pub(crate) async fn chat_text(
     )
     .await?;
 
-    // Free / alias routers sometimes pick a reasoning model that spends the
-    // entire budget thinking and returns no content. Retry once with room to answer.
     match text_from_response(&resp) {
         TextOutcome::Text(text) => Ok(text),
-        TextOutcome::Empty => {
-            tracing::warn!("empty LLM content; retrying with a larger budget");
-            let retry_tokens = max_tokens.saturating_mul(3).max(1500);
-            let body = text_body(model, system_prompt, user_prompt, retry_tokens);
-            let resp = post_chat(
-                client,
-                config,
-                model,
-                &body,
-                "chat_text_retry",
-                prompt_chars,
-                false,
-            )
-            .await?;
-            match text_from_response(&resp) {
-                TextOutcome::Text(text) => Ok(text),
-                TextOutcome::Empty => Err(anyhow::anyhow!("LLM response missing content")),
-            }
-        }
+        TextOutcome::Empty => Err(anyhow::anyhow!("LLM response missing content")),
     }
 }
 

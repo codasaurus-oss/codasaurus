@@ -116,3 +116,55 @@ pub async fn require_review_read(
         .ok_or_else(|| ApiError::not_found(format!("Review {review_id} not found")))?;
     Ok((user, review))
 }
+
+/// Capability defaults for an invited role; explicit grants are additive and
+/// cannot exceed what the role already permits.
+pub fn preset_capabilities(role: &str, extra: &[String]) -> Vec<String> {
+    let mut caps: Vec<String> = match role {
+        "maintainer" => [
+            "repos:read",
+            "repos:write",
+            "reviews:read",
+            "reviews:write",
+            "settings:read",
+            "mcp:write",
+            "tickets:write",
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect(),
+        "owner" => vec!["*".into()],
+        _ => ["repos:read", "reviews:read"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+    };
+    for cap in extra {
+        if !caps.contains(cap) {
+            caps.push(cap.clone());
+        }
+    }
+    caps
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::preset_capabilities;
+
+    #[test]
+    fn role_presets_are_unchanged_without_overrides() {
+        assert_eq!(
+            preset_capabilities("viewer", &[]),
+            vec!["repos:read", "reviews:read"]
+        );
+        assert!(preset_capabilities("maintainer", &[]).contains(&"repos:write".into()));
+        assert_eq!(preset_capabilities("owner", &[]), vec!["*".to_string()]);
+    }
+
+    #[test]
+    fn explicit_grants_are_additive() {
+        let caps = preset_capabilities("viewer", &["tickets:write".into()]);
+        assert!(caps.contains(&"tickets:write".into()));
+        assert!(caps.contains(&"repos:read".into()));
+    }
+}

@@ -4,7 +4,9 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   store_model_in_db: true
 router_settings:
-  num_retries: 0 # the app owns retry; do not double-retry
+  # LiteLLM owns provider retries and cooldowns. Codasaurus sends each
+  # inference request once so retries cannot duplicate billable completions.
+  num_retries: 2
   allowed_fails: 1
   cooldown_time: 30
   retry_after: 0
