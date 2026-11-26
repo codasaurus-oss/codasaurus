@@ -122,6 +122,20 @@
 - Validation: formatting, focused GitHub review tests, and locked Clippy passed.
 - Status: RESOLVED
 
+## F-R09-004 — SHA completion preceded durable review persistence
+
+- Component: R-09 (GitHub PR data and review pipeline)
+- Category: persistence ordering / retry correctness
+- Severity: HIGH
+- Location: `src/bot/review/pipeline.rs::persist_finished_review`
+- Problem: the reviewed-commit marker was written before the review row, findings, and final
+  status. A database failure could therefore suppress future same-SHA processing without a
+  completed review record.
+- Fix: make persistence return success, complete the SHA only after all critical writes succeed,
+  release the claim on failure, and propagate the failure so the durable queue retries/dead-letters it.
+- Validation: focused review tests, formatting, and locked Clippy passed.
+- Status: RESOLVED
+
 ## F-R01-001 — Confirmed obsolete dashboard directory contract
 
 - Component: R-01 (Build, package, and runtime contracts)

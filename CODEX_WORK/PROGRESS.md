@@ -40,7 +40,8 @@
 - Started R-09: fixed installation repository pagination so non-success GitHub responses propagate
   as errors instead of being reported as an empty successful sync, and bounded same-SHA review
   detection across ten review-history pages. The PR commit-history fetch now validates status,
-  retries failures, and logs its explicit best-effort fallback.
+  retries failures, and logs its explicit best-effort fallback. Review SHA completion now follows
+  durable persistence and propagates failures to queue retry handling.
 
 ## Validation performed
 
@@ -65,6 +66,7 @@
 | R-09 focused Rust gates | `cargo fmt --check`, API test target (0 module tests), and locked Clippy passed. |
 | R-09 review-history tests | Passed 2 focused `bot::review::github::tests`; locked Clippy passed after pagination fix. |
 | R-09 pipeline status handling | Passed formatting, focused review tests, and locked Clippy after commit-history fix. |
+| R-09 persistence ordering | Passed formatting, focused review tests, and locked Clippy after SHA/persistence fix. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.

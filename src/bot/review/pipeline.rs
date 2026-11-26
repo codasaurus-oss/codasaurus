@@ -993,7 +993,7 @@ pub async fn review_pr_with_options(
         persist_finished_review(
             &state, repo_name, pr_number, &pr_title, pr, head_sha, &findings, false,
         )
-        .await;
+        .await?;
         if policy_pack.create_check_run {
             if let Err(e) = crate::bot::github_extra::create_findings_check_run(
                 client,
@@ -1146,7 +1146,7 @@ pub async fn review_pr_with_options(
         &findings,
         has_blocking,
     )
-    .await;
+    .await?;
 
     let mut premerge_md = String::new();
     let mut premerge_blockers: Vec<String> = Vec::new();
@@ -1340,9 +1340,8 @@ async fn persist_finished_review(
     head_sha: &str,
     findings: &Findings,
     has_blocking: bool,
-) {
-    remember_reviewed_sha(state, repo_name, pr_number, head_sha).await;
-    save_review_to_db(
+) -> Result<()> {
+    let persisted = save_review_to_db(
         repo_name,
         pr_number,
         pr_title,
@@ -1354,6 +1353,20 @@ async fn persist_finished_review(
         has_blocking,
     )
     .await;
+    if persisted {
+        remember_reviewed_sha(state, repo_name, pr_number, head_sha).await;
+        Ok(())
+    } else if let Some(state) = state {
+        if let Err(error) = state
+            .release_sha_claim(repo_name, pr_number, head_sha)
+            .await
+        {
+            tracing::warn!(error = %error, "failed to release SHA claim after persistence failure");
+        }
+        anyhow::bail!("review persistence failed")
+    } else {
+        anyhow::bail!("review persistence unavailable")
+    }
 }
 
 /// Best-effort record of the reviewed commit for incremental review.
