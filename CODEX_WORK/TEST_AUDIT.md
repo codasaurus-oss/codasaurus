@@ -109,3 +109,14 @@ server-ID contract; database-backed authorization/user-journey coverage remains 
 
 R-16 made no production-code changes. The test suite keeps deterministic tests runnable offline
 while preserving service-backed tests as mandatory CI/environment gates.
+
+## R-17 supply-chain review
+
+The manifest uses crates.io sources only; the committed lockfile is required by CI and locked
+build/test commands. Feature inspection found no unused direct production dependency that can be
+removed safely without changing behavior. Duplicate versions are transitive and arise from
+independent crypto/runtime constraints; no unsafe broad update was attempted. `deny.toml` covers
+allowed licenses, unknown registries/git sources, and duplicate-version warnings. Cargo package
+listing completed successfully. `cargo audit` passed with the three documented exceptions and
+reported only the accepted unmaintained-`chrono` warning. `cargo-deny` was not installed locally;
+the authoritative CI compliance job remains the execution gate.

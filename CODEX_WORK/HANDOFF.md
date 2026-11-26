@@ -36,9 +36,10 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-17: audit Cargo dependencies, lockfile reproducibility, advisories, licenses, bans,
-sources, and CI supply-chain gates. R-16 is complete; deterministic tests pass while service,
-socket, and public-network coverage remains explicitly classified as environment-dependent.
+Rust audit phases R-01 through R-17 are complete. Remaining work is follow-up risk management:
+F-R02-001 (explicit redirect contract) and F-R17-001 (chrono maintenance). The Rust package has
+documented dependency, test, migration, API, queue, detector, LLM, registry, and supply-chain
+evidence; frontend source remains out of scope.
 
 ## Tooling note
 

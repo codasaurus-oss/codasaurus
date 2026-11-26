@@ -2,11 +2,11 @@
 
 ## Overall status
 
-- Phase: R-17 mapped; R-16 complete.
+- Phase: Rust audit complete (R-01 through R-17).
 - Rust components mapped: 17 of 17.
-- Components audited: 16 of 17 (R-01 through R-16).
+- Components audited: 17 of 17 (R-01 through R-17).
 - Components changed: 11 of 17 (R-01, R-03, R-04, R-09, R-13, R-14, R-15, plus accepted-risk reviews).
-- Current component: R-17 — Dependency and supply-chain governance.
+- Current component: Complete; remaining items are documented follow-up risks only.
 
 ## Completed in this batch
 
@@ -56,6 +56,10 @@
 - Completed R-16: classified the complete Rust test inventory and retained the existing separation
   between deterministic tests and PostgreSQL/Redis, local HTTP-server, and public-network tests.
   No flaky-test workaround or coverage-reducing skip was introduced.
+- Completed R-17: audited direct/transitive dependency sources, feature selection, duplicates,
+  lockfile/package reproducibility, cargo-deny policy, and RustSec CI exceptions. Added the
+  documented third advisory exception to CI; cargo-audit reports no unignored vulnerabilities,
+  with chrono's unmaintained warning recorded as an accepted risk.
 - Completed R-11: reviewed detector registry and parallel execution, finding contracts, SARIF output,
   golden fixtures, and network/offline detector behavior; no confirmed detector defect was found.
 - Completed R-12: reviewed LLM config precedence, endpoint SSRF checks, offline blocking, prompt
@@ -98,6 +102,7 @@
 | R-14 focused registry tests | 12 of 13 registry tests passed, including retry/status classification, OSV parsing helpers, metadata extractors, cache/URL tests, and offline behavior; the local OSV mock-server test failed at socket bind with sandbox `Operation not permitted`. Locked Clippy passed. |
 | R-15 focused API tests | MCP server-ID validation regression passed; formatting and locked Clippy passed. Database-backed user-journey/auth tests remain environment-dependent. |
 | R-16 suite inventory and gates | Library target contains 392 tests; 370 passed and 22 were blocked by unavailable PostgreSQL/Redis, local socket permissions, or DNS/public network. Deterministic integration targets passed: detectors 19/19, golden 3/3, docs links 1/1. |
+| R-17 supply-chain checks | `cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0387` passed with one unmaintained-chrono warning; `cargo tree --locked`, metadata source review, `cargo package --locked --list`, and manifest/deny policy inspection completed. `cargo-deny` binary was unavailable locally, so its CI gate was not falsely claimed as executed. |
 | R-09 completion gate | No live GitHub or PostgreSQL contract test claimed; all available focused Rust checks passed. |
 | R-10 focused modules | Passed: parser/dep-parser (19), gates/policy (8), confidence (8), baseline (3), and offline/LLM/registry (7) tests. |
 
@@ -112,7 +117,6 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Start R-17: dependency and supply-chain governance.
-2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
+1. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
    without a compatibility requirement and redirect-specific tests.
-3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.
+2. Track F-R17-001 (chrono maintenance) for a future compatible time-stack migration.

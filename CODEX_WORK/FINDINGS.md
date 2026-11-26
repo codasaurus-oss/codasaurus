@@ -40,6 +40,19 @@
 - Validation: focused migration regression passed; `cargo fmt` and locked Clippy passed.
 - Status: RESOLVED
 
+## F-R17-001 — Chrono is currently unmaintained
+
+- Component: R-17 (Dependency and supply-chain governance)
+- Category: dependency lifecycle / maintenance risk
+- Severity: LOW
+- Location: `Cargo.toml` (`chrono = "0.4"`), transitive users include SQLx.
+- Evidence: `cargo audit` reports RUSTSEC-2026-0543 for `chrono 0.4.45`; no fixed
+  upgrade is available and the crate remains widely used by the current SQLx release.
+- Decision: retain for now because replacing the time model would expand scope and SQLx
+  still exposes chrono integration. Track upstream maintenance/replacement and revisit
+  before the next dependency-major upgrade.
+- Status: ACCEPTED RISK — follow-up required
+
 ## F-R02-001 — Redirect policy for user-configured LLM and Jira endpoints needs an explicit contract
 
 - Component: R-02 (Configuration and trust boundaries)
