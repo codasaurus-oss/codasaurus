@@ -155,6 +155,7 @@ async fn installation_repos(
                     .headers(token_headers.clone())
                     .send()
                     .await
+                    .and_then(|response| response.error_for_status())
                     .map_err(Into::into)
             },
         )

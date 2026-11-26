@@ -81,6 +81,21 @@
   bounded processing/outbox contract and integration tests; review with R-08 worker lifecycle.
 - Status: ACCEPTED RISK — follow-up in durable queue/worker phase
 
+## F-R09-001 — Installation repository sync accepted non-2xx responses
+
+- Component: R-09 (GitHub PR data and review pipeline)
+- Category: external API error handling
+- Severity: MEDIUM
+- Location: `src/api/repos.rs::installation_repos`
+- Problem: the paginated repository request decoded the response body without calling
+  `error_for_status`, so a GitHub 401/403/5xx response could be treated as an empty page
+  and reported as a successful zero-repository sync.
+- Fix: require a successful HTTP status before decoding each page, preserving retry/error
+  propagation to the authenticated API caller.
+- Validation: `cargo fmt --check`, focused API-library test target (no unit tests present),
+  and locked Clippy passed.
+- Status: RESOLVED
+
 ## F-R01-001 — Confirmed obsolete dashboard directory contract
 
 - Component: R-01 (Build, package, and runtime contracts)

@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-09: inspect GitHub PR fetching, pagination, review orchestration, persistence, and
-external API retry behavior. Preserve existing external behavior; make a source change only for
-a confirmed defect and bracket it with a focused regression test.
+Continue R-09: inspect the remaining GitHub PR fetching, pagination, review orchestration,
+persistence, and external API retry paths. The repository-sync status handling fix is committed;
+preserve existing external behavior and add focused coverage for any further confirmed defect.
 
 ## Tooling note
 
