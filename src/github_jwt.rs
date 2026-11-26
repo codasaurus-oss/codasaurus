@@ -73,12 +73,11 @@ PLACEHOLDER
         // Generate the key at test time: committing a private key, even a
         // throwaway one, trips secret scanners and teaches the wrong habit.
         use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
-        let mut rng = rand::thread_rng();
-        let key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("rsa key");
+        let mut rng = rand10::rngs::SysRng;
+        let key = rsa::PrivateKey::new(&mut rng, 2048).expect("rsa key");
         let pem = key.to_pkcs1_pem(LineEnding::LF).expect("pem");
 
-        // Regression: jsonwebtoken 10 panics at encode time when no crypto
-        // provider feature is enabled.
+        // Regression: encoding must work with the crypto provider feature on.
         let jwt = create_app_jwt("12345", &pem).expect("jwt");
         assert_eq!(jwt.split('.').count(), 3);
     }
