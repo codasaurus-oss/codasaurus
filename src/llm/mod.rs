@@ -89,7 +89,11 @@ pub async fn review_diff(
         .collect();
 
     let resp_json = loop {
-        let force_final = messages.len() > 2 * MAX_TOOL_ITERATIONS;
+        let iteration = messages
+            .iter()
+            .filter(|message| message["role"].as_str() == Some("assistant"))
+            .count();
+        let force_final = iteration + 1 >= MAX_TOOL_ITERATIONS;
 
         let mut body = chat_body(config, model, &messages, config.max_tokens);
         if !tool_specs.is_empty() {
