@@ -109,6 +109,19 @@
 - Validation: focused GitHub review tests, formatting, and locked Clippy passed.
 - Status: RESOLVED
 
+## F-R09-003 — PR commit history requests did not validate HTTP status
+
+- Component: R-09 (GitHub PR data and review pipeline)
+- Category: external API error handling / observability
+- Severity: LOW
+- Location: `src/bot/review/pipeline.rs` (PR commit-history fetch)
+- Problem: non-success responses were decoded as if they were successful JSON and reduced to
+  an empty commit list, hiding the API failure and skipping commit-context signals.
+- Fix: apply `error_for_status` before decoding, retain bounded retry behavior, and log the
+  best-effort fallback when commit context remains unavailable.
+- Validation: formatting, focused GitHub review tests, and locked Clippy passed.
+- Status: RESOLVED
+
 ## F-R01-001 — Confirmed obsolete dashboard directory contract
 
 - Component: R-01 (Build, package, and runtime contracts)

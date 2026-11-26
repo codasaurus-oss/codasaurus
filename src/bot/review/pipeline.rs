@@ -385,6 +385,7 @@ pub async fn review_pr_with_options(
                         .headers(headers.clone())
                         .send()
                         .await
+                        .and_then(|response| response.error_for_status())
                         .map_err(Into::into)
                 },
             )
@@ -397,7 +398,10 @@ pub async fn review_pr_with_options(
                         .collect(),
                     Err(_) => vec![],
                 },
-                Err(_) => vec![],
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to fetch PR commits; continuing without commit context");
+                    vec![]
+                }
             }
         },
     );

@@ -39,7 +39,8 @@
   and shutdown/task behavior. No confirmed queue defect was found; PostgreSQL-backed assertions remain pending.
 - Started R-09: fixed installation repository pagination so non-success GitHub responses propagate
   as errors instead of being reported as an empty successful sync, and bounded same-SHA review
-  detection across ten review-history pages.
+  detection across ten review-history pages. The PR commit-history fetch now validates status,
+  retries failures, and logs its explicit best-effort fallback.
 
 ## Validation performed
 
@@ -63,6 +64,7 @@
 | R-08 queue/worker tests | Queue notification test reached PostgreSQL setup and failed with sandbox `Operation not permitted`; no assertion result claimed. |
 | R-09 focused Rust gates | `cargo fmt --check`, API test target (0 module tests), and locked Clippy passed. |
 | R-09 review-history tests | Passed 2 focused `bot::review::github::tests`; locked Clippy passed after pagination fix. |
+| R-09 pipeline status handling | Passed formatting, focused review tests, and locked Clippy after commit-history fix. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.
