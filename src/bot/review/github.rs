@@ -218,6 +218,8 @@ pub(crate) async fn posted_inline_fingerprints(
 /// Pages of inline comments to scan. Past this a PR has more review comments
 /// than we would ever post, and the scan costs more than a duplicate.
 const MAX_INLINE_COMMENT_PAGES: usize = 10;
+/// Bound review-history scans while still covering ordinary high-activity PRs.
+const MAX_REVIEW_PAGES: usize = 10;
 
 /// Pull every `fingerprint: <hex>` marker out of one comment body. The marker is
 /// written by [`crate::bot::markdown::inline_finding_comment`]; keep the two in step.
@@ -381,29 +383,39 @@ pub(crate) async fn review_exists(
     if head_sha.is_empty() {
         return Ok(false);
     }
-    let url =
-        format!("https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews?per_page=100");
     let headers = github_api_headers(auth_header)?;
-    let reviews: Vec<serde_json::Value> = github_get(
-        client,
-        &headers,
-        &url,
-        "list_pr_reviews",
-        &RetryConfig::quick(),
-    )
-    .await?;
-    Ok(reviews.iter().any(|r| {
-        let sha_matches = r
-            .get("commit_id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|sha| sha == head_sha);
-        sha_matches
-            && marker.is_none_or(|m| {
-                r.get("body")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|body| body.contains(m))
-            })
-    }))
+    for page in 1..=MAX_REVIEW_PAGES {
+        let url = format!(
+            "https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews?per_page=100&page={page}"
+        );
+        let reviews: Vec<serde_json::Value> = github_get(
+            client,
+            &headers,
+            &url,
+            "list_pr_reviews",
+            &RetryConfig::quick(),
+        )
+        .await?;
+        let page_len = reviews.len();
+        if reviews.iter().any(|r| {
+            let sha_matches = r
+                .get("commit_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|sha| sha == head_sha);
+            sha_matches
+                && marker.is_none_or(|m| {
+                    r.get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|body| body.contains(m))
+                })
+        }) {
+            return Ok(true);
+        }
+        if page_len < 100 {
+            break;
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

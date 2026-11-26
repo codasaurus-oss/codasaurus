@@ -38,7 +38,8 @@
   heartbeats, exponential retry/dead-letter transitions, LISTEN wakeups, bounded worker permits,
   and shutdown/task behavior. No confirmed queue defect was found; PostgreSQL-backed assertions remain pending.
 - Started R-09: fixed installation repository pagination so non-success GitHub responses propagate
-  as errors instead of being reported as an empty successful sync.
+  as errors instead of being reported as an empty successful sync, and bounded same-SHA review
+  detection across ten review-history pages.
 
 ## Validation performed
 
@@ -61,6 +62,7 @@
 | R-07 bot-library tests | 120 passed; 2 PostgreSQL-backed tests failed before assertions because local DB access is unavailable in the sandbox. |
 | R-08 queue/worker tests | Queue notification test reached PostgreSQL setup and failed with sandbox `Operation not permitted`; no assertion result claimed. |
 | R-09 focused Rust gates | `cargo fmt --check`, API test target (0 module tests), and locked Clippy passed. |
+| R-09 review-history tests | Passed 2 focused `bot::review::github::tests`; locked Clippy passed after pagination fix. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.

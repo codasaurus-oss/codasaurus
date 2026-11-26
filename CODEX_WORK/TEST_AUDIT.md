@@ -48,3 +48,9 @@ assertions. No test was weakened or removed.
 Queue and worker tests were retained. The notification integration test requires PostgreSQL and
 could not reach its assertion in the restricted environment; claim, lease, retry, and dead-letter
 behavior therefore remains source-reviewed but not database-smoke-validated here.
+
+## R-09 review
+
+GitHub review helper tests were retained and passed. The two source fixes cover non-success
+installation-sync responses and review-history pagination; live GitHub contract testing remains
+outside the local environment.

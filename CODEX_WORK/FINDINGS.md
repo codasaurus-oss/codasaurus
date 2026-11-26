@@ -96,6 +96,19 @@
   and locked Clippy passed.
 - Status: RESOLVED
 
+## F-R09-002 — Review idempotency scanned only the first review page
+
+- Component: R-09 (GitHub PR data and review pipeline)
+- Category: pagination / duplicate side effects
+- Severity: MEDIUM
+- Location: `src/bot/review/github.rs::review_exists`
+- Problem: same-SHA review detection requested one page of 100 reviews. On a high-activity
+  pull request, a matching marker beyond that page was missed and a duplicate review could be posted.
+- Fix: scan up to ten pages, stopping early when a short page is returned; preserve the existing
+  bounded-request policy.
+- Validation: focused GitHub review tests, formatting, and locked Clippy passed.
+- Status: RESOLVED
+
 ## F-R01-001 — Confirmed obsolete dashboard directory contract
 
 - Component: R-01 (Build, package, and runtime contracts)
