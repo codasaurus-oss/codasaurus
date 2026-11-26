@@ -74,3 +74,8 @@ weakened or removed.
 
 Focused module coverage passed: parser/dependency parsing (19), gates/policy (8), confidence (8),
 baseline (3), and offline/LLM/registry invariants (7). No tests were weakened or removed.
+
+## R-13 review
+
+Learning scope/mine tests (8), index/extraction tests (13), and the embedding batch-limit
+regression passed. PostgreSQL/pgvector persistence smoke remains environment-dependent.

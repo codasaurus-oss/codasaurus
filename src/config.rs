@@ -277,7 +277,7 @@ impl IndexConfig {
     /// Clamped to the provider's documented ceiling: a larger batch is rejected
     /// wholesale, which silently drops the embeddings for that chunk.
     pub fn batch_size(&self) -> usize {
-        self.embedding_batch_size.clamp(1, 2_048)
+        self.embedding_batch_size.clamp(1, 100)
     }
 }
 
@@ -887,5 +887,14 @@ mod tests {
         };
 
         assert_eq!(config.distance_threshold(), 0.5);
+    }
+
+    #[test]
+    fn embedding_batch_size_is_capped_at_provider_limit() {
+        let config = IndexConfig {
+            embedding_batch_size: usize::MAX,
+            ..IndexConfig::default()
+        };
+        assert_eq!(config.batch_size(), 100);
     }
 }

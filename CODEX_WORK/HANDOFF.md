@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-13: inspect learning rules, dismissal scope, semantic indexing/embeddings, dependency
-graph persistence, and background storage behavior. R-12 is complete; gateway HTTP-server tests
-remain environment-blocked and were not treated as passing claims.
+Continue R-14: inspect registry clients, OSV lookups, cache and retry behavior, offline guarantees,
+and detector-facing failure semantics. R-13 is complete; gateway HTTP-server tests from R-12 remain
+environment-blocked and were not treated as passing claims.
 
 ## Tooling note
 
