@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-16: classify the full Rust test suite, fixtures, integration setup, and environment-
-dependent coverage. R-15 is complete; dynamic MCP server IDs are now validated before becoming
-configuration-key components, while gateway/OSV HTTP-server tests remain environment-blocked.
+Continue R-17: audit Cargo dependencies, lockfile reproducibility, advisories, licenses, bans,
+sources, and CI supply-chain gates. R-16 is complete; deterministic tests pass while service,
+socket, and public-network coverage remains explicitly classified as environment-dependent.
 
 ## Tooling note
 

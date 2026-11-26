@@ -93,3 +93,19 @@ The protected router and each dashboard handler's RBAC checks were reviewed toge
 masking, setup secret handling, GitHub credential usage, audit pagination, and MCP SSRF, redirect,
 response-size, tool-filtering, and cache boundaries. Added a unit regression for the MCP dynamic
 server-ID contract; database-backed authorization/user-journey coverage remains environment-dependent.
+
+## R-16 suite architecture review
+
+| Target or artifact | Classification | Evidence / disposition |
+| --- | --- | --- |
+| `cargo test --locked --lib` | Deterministic plus environment-sensitive unit tests | 370/392 passed. The 22 failures were isolated to PostgreSQL/Redis setup, local HTTP socket binding, public DNS/network access, or the network-backed npm lookup; no assertion was weakened. |
+| `tests/detectors_integration.rs` | Deterministic integration | 19/19 passed. |
+| `tests/golden_detectors.rs` and `tests/fixtures/golden/` | Byte-stable golden fixtures | 3/3 passed; fixture inputs/expectations remain tracked and readable. |
+| `tests/docs_links.rs` | Repository/documentation integrity | 1/1 passed. |
+| `tests/production_hardening.rs`, `full_backend.rs`, `postgres_smoke.rs`, `redis_state.rs`, `user_journey_qa.rs` | Service-backed integration | Retained as real Postgres/Redis gates; local services were unavailable, so no false pass or skip was recorded. |
+| Local HTTP-server tests in gateway, MCP, setup, and registry modules | Transport contract tests | Retained; sandbox denied loopback socket binding. |
+| Public DNS/npm tests | External-network contract tests | Retained; restricted DNS/network prevented execution. |
+| Build script and doctest inventory | Build/documentation coverage | Build-script unit test and rustdoc examples were inventoried; no ignored or `should_panic` tests were found requiring disposition. |
+
+R-16 made no production-code changes. The test suite keeps deterministic tests runnable offline
+while preserving service-backed tests as mandatory CI/environment gates.

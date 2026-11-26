@@ -25,7 +25,7 @@ and intentionally starts with contracts that constrain subsequent work.
 | R-13 | Learning, semantic index, and graph | `learning/`, `index/`, `graph/`, `storage.rs`, `context/` | Rules/guidelines, dismissal learning, code embedding/extraction, dependency graph and persistence. | Module tests; learning/API tests | Medium-high: scope isolation, data retention, query cost, background work reviewed; embedding batches now honor the provider limit. | R-03–R-04, R-09–R-11 | 13 | DONE |
 | R-14 | External registries and vulnerability lookups | `registry/`, `detectors/{dependency_confusion,dependency_vulns,vulnerabilities,hallucinated_imports,phantom_deps}.rs` | Package registry and OSV interactions that support dependency detectors. | Detector integration/golden tests, registry unit tests | High: network retries, caching, parsing, offline behavior and request volume. | R-02, R-10–R-11 | 14 | DONE |
 | R-15 | Dashboard API feature modules and MCP | `api/{audit,github,learning,mcp,openapi,repos,reviews,settings,setup,stats,users}.rs`, `mcp/` | Authenticated dashboard resources plus MCP configuration/catalog/client contracts. | `full_backend.rs`, `user_journey_qa.rs`, API/module tests | High: authorization consistency, secret redaction, SSRF and API compatibility. | R-02–R-06, R-11–R-13 | 15 | DONE |
-| R-16 | Test suite architecture and test data | `tests/`, all `#[cfg(test)]` modules, fixtures | Classifies coverage, fixtures, integration setup and redundant/fragile tests across all components. | Entire suite | High: cannot simplify before each production component’s contract and baseline are understood. | Baseline per R-01–R-15 | Continuous | MAPPED |
+| R-16 | Test suite architecture and test data | `tests/`, all `#[cfg(test)]` modules, fixtures | Classifies coverage, fixtures, integration setup and redundant/fragile tests across all components. | Entire suite | High: cannot simplify before each production component’s contract and baseline are understood. | Baseline per R-01–R-15 | Continuous | DONE |
 | R-17 | Dependency and supply-chain governance | `Cargo.toml`, `Cargo.lock`, `deny.toml`, Dependabot/CI | Direct/transitive dependencies, features, advisories, licenses, source policy and reproducibility. | CI cargo audit/deny checks | Medium-high: do not update/remove dependencies without use/feature and lockfile evidence. | R-01 plus cargo tree/audit/deny evidence | 16 | MAPPED |
 
 ## Cross-cutting rules
@@ -44,3 +44,6 @@ and intentionally starts with contracts that constrain subsequent work.
   redaction, GitHub credential handling, audit pagination, MCP SSRF/redirect/body limits, tool
   allowlisting, and cache behavior. Added strict validation for dynamic MCP server IDs before
   they become configuration-key components.
+- Completed R-16: inventoried all eight integration targets, 392 library tests, fixtures, doctests,
+  build-script tests, and service-backed harnesses. Classified deterministic, database/Redis,
+  local-socket, and public-network coverage without weakening environment-dependent assertions.
