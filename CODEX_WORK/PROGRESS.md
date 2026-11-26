@@ -6,7 +6,7 @@
 - Rust components mapped: 17 of 17.
 - Components audited: 5 of 17 (R-01 through R-05).
 - Components changed: 4 of 17 (R-01, R-03, R-04, plus the R-02 accepted-risk review).
-- Current component: R-06 — Server composition and operations.
+- Current component: R-07 — Webhook authentication and GitHub event dispatch.
 
 ## Completed in this batch
 
@@ -29,6 +29,8 @@
   identified and fixed concurrent OIDC provisioning.
 - Audited R-05: reviewed session/bootstrap state, auth middleware, RBAC, rate limiting,
   and trusted-proxy handling; no additional confirmed source defect was found.
+- Audited R-06: reviewed startup ordering, router and middleware layering, static/API fallback,
+  health/readiness, metrics authorization, and graceful shutdown; no confirmed source defect was found.
 
 ## Validation performed
 
@@ -47,6 +49,7 @@
 | `cargo fmt --check`; `cargo clippy --locked --all-targets -- -D warnings` | Passed for the current tree. |
 | R-03 focused migration regression | Passed: `every_numbered_migration_records_its_version` (v8–v29). |
 | R-04 focused database-library tests | Passed: 17 tests, including OIDC provisioning coverage. |
+| R-06 focused server-library tests | Passed: 2 tests in `serve::`. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.
@@ -59,7 +62,7 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Start R-06: server composition and operations.
+1. Start R-07: webhook authentication and GitHub event dispatch.
 2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
    without a compatibility requirement and redirect-specific tests.
 3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.

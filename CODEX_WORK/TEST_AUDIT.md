@@ -29,3 +29,9 @@ being audited; no test simplification is authorized without equivalent behaviora
 | Test file/group | Production component | Purpose and coverage | Setup complexity | Classification | Recommendation and validation |
 | --- | --- | --- | --- | --- | --- |
 | OIDC auth integration path | `db/users.rs::upsert_oidc_user` | Concurrent first-login provisioning must return one stored user without a unique-key race. | PostgreSQL and concurrent requests | ADD | Add a PostgreSQL-backed two-task regression test; current source fix is validated by compile/Clippy only until the service is available. |
+
+## R-05 and R-06 review
+
+The existing Redis/API and server-operation tests were retained. Focused Rust-library coverage
+passed for the server module (`cargo test --locked --lib serve::`); Redis/PostgreSQL-backed
+integration coverage remains environment-dependent and was not promoted to a passing claim.
