@@ -79,3 +79,10 @@ baseline (3), and offline/LLM/registry invariants (7). No tests were weakened or
 
 Learning scope/mine tests (8), index/extraction tests (13), and the embedding batch-limit
 regression passed. PostgreSQL/pgvector persistence smoke remains environment-dependent.
+
+## R-14 review
+
+Registry unit coverage was retained and extended with transient-status retry classification.
+OSV batch parsing, unique detail hydration, fallback vulnerability records, URL encoding,
+metadata extraction, cache eviction, and offline cache-miss behavior remain covered. Tests that
+bind local HTTP servers may fail during setup under the restricted sandbox; no test was weakened.
