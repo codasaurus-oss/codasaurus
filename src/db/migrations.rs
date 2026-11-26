@@ -1318,9 +1318,9 @@ mod tests {
     }
 
     #[test]
-    fn versioned_migrations_record_their_version() {
+    fn every_numbered_migration_records_its_version() {
         let source = include_str!("migrations.rs");
-        for version in [20, 21] {
+        for version in 8..=29 {
             let marker = format!("VALUES ({version}) ON CONFLICT (version) DO NOTHING");
             assert!(
                 source.contains(&marker),

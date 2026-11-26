@@ -22,7 +22,7 @@ being audited; no test simplification is authorized without equivalent behaviora
 
 | Test file/group | Production component | Purpose and coverage | Setup complexity | Classification | Recommendation and validation |
 | --- | --- | --- | --- | --- | --- |
-| `src/db/migrations.rs::versioned_migrations_record_their_version` | Embedded migrations | Guards the invariant that numbered migrations write their completion record. | None | ADD | Passed as a focused library test; database smoke validation remains pending local PostgreSQL. |
+| `src/db/migrations.rs::every_numbered_migration_records_its_version` | Embedded migrations | Guards the invariant that every numbered migration (v8–v29) writes its completion record. | None | ADD | Passed as a focused library test; database smoke validation remains pending local PostgreSQL. |
 
 ## R-04 additions
 

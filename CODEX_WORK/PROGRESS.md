@@ -2,11 +2,11 @@
 
 ## Overall status
 
-- Phase: R-04 implementation in progress.
+- Phase: R-06 auditing in progress.
 - Rust components mapped: 17 of 17.
-- Components audited: 3 of 17 (R-01, R-02, R-03).
-- Components changed: 1 of 17 (R-01).
-- Current component: R-04 — Database repositories and identity state.
+- Components audited: 5 of 17 (R-01 through R-05).
+- Components changed: 4 of 17 (R-01, R-03, R-04, plus the R-02 accepted-risk review).
+- Current component: R-06 — Server composition and operations.
 
 ## Completed in this batch
 
@@ -25,8 +25,10 @@
   behavior is retained as an accepted-risk follow-up pending an explicit compatibility contract.
 - Audited R-03: verified migration ordering and corrected missing schema-version records for
   v20 and v21 without changing their DDL.
-- Started R-04: traced user, session, invite, repo, review, and config repository paths;
+- Audited R-04: traced user, session, invite, repo, review, and config repository paths;
   identified and fixed concurrent OIDC provisioning.
+- Audited R-05: reviewed session/bootstrap state, auth middleware, RBAC, rate limiting,
+  and trusted-proxy handling; no additional confirmed source defect was found.
 
 ## Validation performed
 
@@ -43,7 +45,8 @@
 | Docker frontend stage | Passed; produced and verified `codasaurus-frontend/dist/index.html` in the image. |
 | R-02 focused security tests with DNS access | Passed: 10 SSRF, 4 OIDC/redaction, and 5 GitHub JWT tests. |
 | `cargo fmt --check`; `cargo clippy --locked --all-targets -- -D warnings` | Passed for the current tree. |
-| R-03 focused migration regression | Passed: `versioned_migrations_record_their_version`. |
+| R-03 focused migration regression | Passed: `every_numbered_migration_records_its_version` (v8–v29). |
+| R-04 focused database-library tests | Passed: 17 tests, including OIDC provisioning coverage. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.
@@ -56,7 +59,7 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Start R-04: database repositories and identity state.
+1. Start R-06: server composition and operations.
 2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
    without a compatibility requirement and redirect-specific tests.
 3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.

@@ -19,7 +19,7 @@
 - Confidence: confirmed.
 - Validation method: focused database-library tests, formatting, Clippy, and PostgreSQL
   concurrency smoke coverage when the local service is available.
-- Status: IMPLEMENTED_PENDING_VALIDATION
+- Status: RESOLVED (focused library tests passed; PostgreSQL concurrency smoke remains environment-dependent)
 
 ## F-R03-001 — v20 and v21 migrations did not record completion
 

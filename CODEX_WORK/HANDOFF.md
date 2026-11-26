@@ -36,16 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Start R-02 only:
-
-1. Re-read its paths (`config.rs`, `env.rs`, `ssrf.rs`, `github_jwt.rs`, `oidc.rs`,
-   `retry.rs`) and relevant CI commands.
-2. Record the existing command baseline (including failures, if any) without changing code.
-3. Enumerate all user-controlled URLs and credential resolution paths before proposing
-   source changes.
-4. `FINDINGS.md` and `TEST_AUDIT.md` already exist; extend them with R-02 evidence.
-5. Propose the smallest change only after the evidence is documented and the component
-   is approved for implementation.
+Continue R-06: inspect server startup, router/layer ordering, health/readiness, graceful
+shutdown, and metrics. Preserve existing external behavior; make a source change only for
+a confirmed defect and bracket it with a focused regression test.
 
 ## Tooling note
 
