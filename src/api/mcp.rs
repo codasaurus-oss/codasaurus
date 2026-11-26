@@ -146,6 +146,11 @@ pub(crate) async fn upsert_server(
         }
     }
     db::config::set_configs(&state.pool, &entries).await?;
+    if let Some(key) = body.api_key.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(ticket_key) = db::config::mcp_ticket_key(&api_key_key) {
+            db::config::set_config(&state.pool, ticket_key, key).await?;
+        }
+    }
     if !body.enabled {
         if let Some(gateway) = crate::llm::gateway::GatewayClient::from_env() {
             let alias = format!("codasaurus_{id}");

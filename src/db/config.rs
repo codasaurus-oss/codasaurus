@@ -347,6 +347,24 @@ pub const ENV_MIRROR_KEYS: &[(&str, &str)] = &[
 /// Keys that require a process restart to fully apply (concurrency / worker count).
 pub const RESTART_REQUIRED_KEYS: &[&str] = &["queue_workers", "max_concurrent_reviews"];
 
+/// Ticket credentials and MCP credentials are the same secret for the
+/// Atlassian and Linear servers; keep both key names in sync.
+pub fn ticket_mcp_key(db_key: &str) -> Option<&'static str> {
+    match db_key {
+        "jira_api_token" => Some("mcp_atlassian_api_key"),
+        "linear_api_key" => Some("mcp_linear_api_key"),
+        _ => None,
+    }
+}
+
+pub fn mcp_ticket_key(db_key: &str) -> Option<&'static str> {
+    match db_key {
+        "mcp_atlassian_api_key" => Some("jira_api_token"),
+        "mcp_linear_api_key" => Some("linear_api_key"),
+        _ => None,
+    }
+}
+
 pub fn env_key_for(db_key: &str) -> Option<&'static str> {
     ENV_MIRROR_KEYS
         .iter()
@@ -457,5 +475,25 @@ mod tests {
         assert_eq!(cache_get("k2"), None);
         std::env::remove_var("CODASAURUS_CONFIG_CACHE_TTL_SECS");
         invalidate_config_cache(None);
+    }
+
+    #[cfg(test)]
+    mod credential_mapping_tests {
+        use super::{mcp_ticket_key, ticket_mcp_key};
+
+        #[test]
+        fn ticket_and_mcp_keys_map_both_ways() {
+            assert_eq!(
+                ticket_mcp_key("jira_api_token"),
+                Some("mcp_atlassian_api_key")
+            );
+            assert_eq!(ticket_mcp_key("linear_api_key"), Some("mcp_linear_api_key"));
+            assert_eq!(
+                mcp_ticket_key("mcp_atlassian_api_key"),
+                Some("jira_api_token")
+            );
+            assert_eq!(mcp_ticket_key("mcp_linear_api_key"), Some("linear_api_key"));
+            assert_eq!(ticket_mcp_key("jira_email"), None);
+        }
     }
 }
