@@ -1,6 +1,7 @@
 //! Generic OIDC (Authorization Code + PKCE) for dashboard SSO.
 //!
-//! Env: `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, optional
+//! Env: `OIDC_ISSUER`/`ZITADEL_ISSUER`, `OIDC_CLIENT_ID`/`ZITADEL_CLIENT_ID`,
+//! `OIDC_CLIENT_SECRET`/`ZITADEL_CLIENT_SECRET`, optional
 //! `OIDC_REDIRECT_URI` / `OIDC_SCOPES` / `PUBLIC_URL`.
 //!
 //! Optional: `OIDC_ALLOW_PUBLIC_CLIENT=1` (empty client secret),
@@ -47,14 +48,19 @@ impl OidcConfig {
     /// Load from env. Returns None if issuer/client_id missing (OIDC disabled).
     pub fn from_env() -> Option<Self> {
         let issuer = std::env::var("OIDC_ISSUER")
+            .or_else(|_| std::env::var("ZITADEL_ISSUER"))
             .ok()?
             .trim_end_matches('/')
             .to_string();
-        let client_id = std::env::var("OIDC_CLIENT_ID").ok()?;
+        let client_id = std::env::var("OIDC_CLIENT_ID")
+            .or_else(|_| std::env::var("ZITADEL_CLIENT_ID"))
+            .ok()?;
         if issuer.is_empty() || client_id.is_empty() {
             return None;
         }
-        let client_secret = std::env::var("OIDC_CLIENT_SECRET").unwrap_or_default();
+        let client_secret = std::env::var("OIDC_CLIENT_SECRET")
+            .or_else(|_| std::env::var("ZITADEL_CLIENT_SECRET"))
+            .unwrap_or_default();
         let redirect_uri = std::env::var("OIDC_REDIRECT_URI").unwrap_or_else(|_| {
             let base =
                 std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into());
