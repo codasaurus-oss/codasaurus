@@ -39,7 +39,6 @@ async fn create_repo_with_active(
            github_id = excluded.github_id,
            installation_id = excluded.installation_id,
            private = excluded.private,
-           default_branch = COALESCE(excluded.default_branch, repos.default_branch),
            -- Reactivate on reinstall; never deactivate an already-active repo via upsert.
            active = repos.active OR excluded.active,
            updated_at = CURRENT_TIMESTAMP
@@ -95,8 +94,7 @@ async fn upsert_repos_with_active(
                github_id = excluded.github_id,
                installation_id = excluded.installation_id,
                private = excluded.private,
-               default_branch = COALESCE(excluded.default_branch, repos.default_branch),
-               active = repos.active OR excluded.active,
+                   active = repos.active OR excluded.active,
                updated_at = CURRENT_TIMESTAMP",
         );
         match query.build().execute(pool.as_pg()).await {
@@ -119,12 +117,14 @@ pub async fn update_repo(
     id: i64,
     config_json: &str,
     active: bool,
+    default_branch: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     db_execute!(
         pool,
-        "UPDATE repos SET config_json = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        "UPDATE repos SET config_json = ?, active = ?,          default_branch = COALESCE(?, default_branch),          updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         config_json,
         active,
+        default_branch,
         id
     )?;
     Ok(())

@@ -2176,3 +2176,30 @@ fn cli_smoke_version_and_health() {
     );
     assert!(!output.contains("panicked"), "health panicked: {output}");
 }
+
+#[tokio::test]
+async fn manual_default_branch_survives_sync() {
+    let pool = test_pool().await;
+    let repo = seed_repo(&pool).await;
+    db::repos::update_repo(&pool, repo.id, "", true, Some("develop"))
+        .await
+        .unwrap();
+    let synced = db::repos::create_repo(
+        &pool,
+        &db::models::RepoCreate {
+            github_id: repo.github_id,
+            full_name: repo.full_name.clone(),
+            owner: repo.owner.clone(),
+            name: repo.name.clone(),
+            default_branch: Some("main".into()),
+            installation_id: repo.installation_id,
+            private: repo.private,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(synced.default_branch.as_deref(), Some("develop"));
+    let stored = db::repos::get_repo(&pool, repo.id).await.unwrap().unwrap();
+    assert_eq!(stored.default_branch.as_deref(), Some("develop"));
+    db::repos::delete_repo(&pool, repo.id).await.unwrap();
+}
