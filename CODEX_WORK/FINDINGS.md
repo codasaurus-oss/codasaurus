@@ -1,5 +1,26 @@
 # Findings
 
+## F-R04-001 — OIDC user provisioning used a read-then-insert race
+
+- Component: R-04 (Database repositories and identity state)
+- Category: concurrency / identity correctness
+- Severity: HIGH
+- Location: `src/db/users.rs::upsert_oidc_user`
+- Problem: The function first queried by email and then inserted a new user. Concurrent
+  OIDC callbacks for a new email could both observe absence and one would fail on the
+  unique `users.email` constraint.
+- Evidence: the old implementation had separate `SELECT` and `INSERT` statements;
+  `users.email` is unique in the embedded schema.
+- Impact: an otherwise valid concurrent login could return an internal database error.
+- Proposed solution: use PostgreSQL `INSERT ... ON CONFLICT (email) DO NOTHING RETURNING *`,
+  then select the existing row when another request won the race.
+- Risk: low; existing users and roles are unchanged, and the function still returns the
+  stored user rather than overwriting identity state.
+- Confidence: confirmed.
+- Validation method: focused database-library tests, formatting, Clippy, and PostgreSQL
+  concurrency smoke coverage when the local service is available.
+- Status: IMPLEMENTED_PENDING_VALIDATION
+
 ## F-R03-001 — v20 and v21 migrations did not record completion
 
 - Component: R-03 (Database foundation and schema)

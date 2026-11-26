@@ -23,3 +23,9 @@ being audited; no test simplification is authorized without equivalent behaviora
 | Test file/group | Production component | Purpose and coverage | Setup complexity | Classification | Recommendation and validation |
 | --- | --- | --- | --- | --- | --- |
 | `src/db/migrations.rs::versioned_migrations_record_their_version` | Embedded migrations | Guards the invariant that numbered migrations write their completion record. | None | ADD | Passed as a focused library test; database smoke validation remains pending local PostgreSQL. |
+
+## R-04 additions
+
+| Test file/group | Production component | Purpose and coverage | Setup complexity | Classification | Recommendation and validation |
+| --- | --- | --- | --- | --- | --- |
+| OIDC auth integration path | `db/users.rs::upsert_oidc_user` | Concurrent first-login provisioning must return one stored user without a unique-key race. | PostgreSQL and concurrent requests | ADD | Add a PostgreSQL-backed two-task regression test; current source fix is validated by compile/Clippy only until the service is available. |

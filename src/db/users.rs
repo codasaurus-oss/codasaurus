@@ -131,17 +131,21 @@ pub async fn create_first_owner_tx(
 }
 
 pub async fn upsert_oidc_user(pool: &DbPool, email: &str, role: &str) -> Result<User, sqlx::Error> {
-    if let Some(u) = db_fetch_optional!(pool, User, "SELECT * FROM users WHERE email = ?", email)? {
-        return Ok(u);
-    }
-    db_fetch_one!(
-        pool,
-        User,
+    if let Some(user) = sqlx::query_as::<_, User>(
         "INSERT INTO users (email, password_hash, role, auth_provider, is_bootstrap)
-         VALUES (?, '', ?, 'oidc', false) RETURNING *",
-        email,
-        role
+         VALUES ($1, '', $2, 'oidc', false)
+         ON CONFLICT (email) DO NOTHING
+         RETURNING *",
     )
+    .bind(email)
+    .bind(role)
+    .fetch_optional(pool.as_pg())
+    .await?
+    {
+        return Ok(user);
+    }
+
+    db_fetch_one!(pool, User, "SELECT * FROM users WHERE email = ?", email)
 }
 
 pub async fn verify_password(

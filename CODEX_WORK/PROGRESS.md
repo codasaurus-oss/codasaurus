@@ -2,11 +2,11 @@
 
 ## Overall status
 
-- Phase: R-03 audited; R-04 is next.
+- Phase: R-04 implementation in progress.
 - Rust components mapped: 17 of 17.
 - Components audited: 3 of 17 (R-01, R-02, R-03).
 - Components changed: 1 of 17 (R-01).
-- Current component: R-04 — Database repositories and identity state (not yet started).
+- Current component: R-04 — Database repositories and identity state.
 
 ## Completed in this batch
 
@@ -25,6 +25,8 @@
   behavior is retained as an accepted-risk follow-up pending an explicit compatibility contract.
 - Audited R-03: verified migration ordering and corrected missing schema-version records for
   v20 and v21 without changing their DDL.
+- Started R-04: traced user, session, invite, repo, review, and config repository paths;
+  identified and fixed concurrent OIDC provisioning.
 
 ## Validation performed
 
