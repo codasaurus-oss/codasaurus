@@ -25,6 +25,13 @@ fn zitadel_managed() -> bool {
         .unwrap_or(false)
 }
 
+/// Provider-managed auth is only active once the provider can actually start
+/// an OIDC flow. This keeps a fresh/local install recoverable when the
+/// optional ZITADEL mode is selected before its client credentials exist.
+fn provider_managed() -> bool {
+    zitadel_managed() && crate::oidc::OidcConfig::enabled()
+}
+
 fn session_max_age() -> u64 {
     crate::env::u64("CODASAURUS_SESSION_MAX_AGE_SECS", 604_800)
 }
@@ -198,7 +205,7 @@ pub(crate) async fn login(
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if zitadel_managed() {
+    if provider_managed() {
         return Err(ApiError::gone(
             "Local password sign-in is disabled; use the configured ZITADEL sign-in",
         ));
@@ -284,8 +291,8 @@ pub(crate) async fn oidc_status() -> Json<serde_json::Value> {
     Json(json!({
         "enabled": crate::oidc::OidcConfig::enabled(),
         "provider": if zitadel_managed() { "zitadel" } else { "oidc" },
-        "managed_by_provider": zitadel_managed(),
-        "local_password_enabled": !zitadel_managed(),
+        "managed_by_provider": provider_managed(),
+        "local_password_enabled": !provider_managed(),
     }))
 }
 
@@ -401,7 +408,7 @@ pub(crate) async fn accept_invite(
     Path(token): Path<String>,
     Json(body): Json<AcceptInviteBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if zitadel_managed() {
+    if provider_managed() {
         return Err(ApiError::gone(
             "Local invites are disabled; manage organization invitations in ZITADEL",
         ));
