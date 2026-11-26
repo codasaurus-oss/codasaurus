@@ -23,6 +23,21 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/test", post(test_server))
 }
 
+fn validate_server_id(id: &str) -> Result<(), ApiError> {
+    let valid = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "MCP server id must be 1-64 ASCII letters, numbers, '-' or '_'",
+        ))
+    }
+}
+
 #[derive(Deserialize)]
 pub(crate) struct UpsertServerBody {
     enabled: bool,
@@ -88,6 +103,7 @@ pub(crate) async fn upsert_server(
     Json(body): Json<UpsertServerBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
+    validate_server_id(&id)?;
     let custom = mcp::catalog::find(&id).is_none();
     let base_url = if custom {
         let base_url = body
@@ -154,6 +170,7 @@ pub(crate) async fn delete_server(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = super::rbac::require_owner(&state, &headers).await?;
+    validate_server_id(&id)?;
     let custom = mcp::catalog::find(&id).is_none();
     let enabled_key = format!("mcp_{id}_enabled");
     let api_key_key = format!("mcp_{id}_api_key");
@@ -188,6 +205,7 @@ pub(crate) async fn test_server(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::rbac::require_maintainer(&state, &headers).await?;
+    validate_server_id(&id)?;
 
     let base_url_key = format!("mcp_{id}_base_url");
     let api_key_key = format!("mcp_{id}_api_key");
@@ -217,4 +235,20 @@ pub(crate) async fn test_server(
         "ok": true,
         "tool_count": tools.len(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_server_id;
+
+    #[test]
+    fn server_ids_are_safe_dynamic_config_key_components() {
+        for id in ["context7", "my-server_2", "A1"] {
+            assert!(validate_server_id(id).is_ok(), "{id}");
+        }
+        for id in ["", "has space", "../escape", "a/b", "a.b", "é"] {
+            assert!(validate_server_id(id).is_err(), "{id}");
+        }
+        assert!(validate_server_id(&"a".repeat(65)).is_err());
+    }
 }

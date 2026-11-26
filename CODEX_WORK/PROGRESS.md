@@ -2,11 +2,11 @@
 
 ## Overall status
 
-- Phase: R-15 mapped; R-14 complete.
+- Phase: R-16 mapped; R-15 complete.
 - Rust components mapped: 17 of 17.
-- Components audited: 14 of 17 (R-01 through R-14).
-- Components changed: 10 of 17 (R-01, R-03, R-04, R-09, R-13, R-14, plus accepted-risk reviews).
-- Current component: R-15 — Dashboard API feature modules and MCP.
+- Components audited: 15 of 17 (R-01 through R-15).
+- Components changed: 11 of 17 (R-01, R-03, R-04, R-09, R-13, R-14, R-15, plus accepted-risk reviews).
+- Current component: R-16 — Test suite architecture and test data.
 
 ## Completed in this batch
 
@@ -50,6 +50,9 @@
   retry behavior, cache TTL/eviction, batch/detail parsing, bounded prefetch, and detector
   handling of unknown results. Added shared retries for transient registry 429/5xx responses;
   missing and soft-failure semantics remain fail-open.
+- Completed R-15: reviewed authenticated route composition, per-handler RBAC, secret redaction,
+  setup/config validation, audit pagination, GitHub credential paths, and MCP SSRF/redirect/body
+  limits and tool allowlisting. Added strict dynamic MCP server-ID validation.
 - Completed R-11: reviewed detector registry and parallel execution, finding contracts, SARIF output,
   golden fixtures, and network/offline detector behavior; no confirmed detector defect was found.
 - Completed R-12: reviewed LLM config precedence, endpoint SSRF checks, offline blocking, prompt
@@ -90,6 +93,7 @@
 | R-12 LLM module tests | 32 passed; 13 gateway tests failed during local test-server setup with sandbox `Operation not permitted`. |
 | R-13 focused modules | Passed: config batch-limit regression (1), index/extraction (13), learning scope/mine (8), and locked Clippy. |
 | R-14 focused registry tests | 12 of 13 registry tests passed, including retry/status classification, OSV parsing helpers, metadata extractors, cache/URL tests, and offline behavior; the local OSV mock-server test failed at socket bind with sandbox `Operation not permitted`. Locked Clippy passed. |
+| R-15 focused API tests | MCP server-ID validation regression passed; formatting and locked Clippy passed. Database-backed user-journey/auth tests remain environment-dependent. |
 | R-09 completion gate | No live GitHub or PostgreSQL contract test claimed; all available focused Rust checks passed. |
 | R-10 focused modules | Passed: parser/dep-parser (19), gates/policy (8), confidence (8), baseline (3), and offline/LLM/registry (7) tests. |
 
@@ -104,7 +108,7 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Start R-15: dashboard API feature modules and MCP.
+1. Start R-16: test suite architecture and test data.
 2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
    without a compatibility requirement and redirect-specific tests.
 3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.

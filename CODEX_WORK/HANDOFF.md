@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-15: inspect authenticated dashboard API modules and MCP authorization, secret redaction,
-SSRF boundaries, and API compatibility. R-14 is complete; registry transient retries were added
-at the shared request boundary while gateway HTTP-server tests from R-12 remain environment-blocked.
+Continue R-16: classify the full Rust test suite, fixtures, integration setup, and environment-
+dependent coverage. R-15 is complete; dynamic MCP server IDs are now validated before becoming
+configuration-key components, while gateway/OSV HTTP-server tests remain environment-blocked.
 
 ## Tooling note
 

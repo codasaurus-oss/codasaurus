@@ -86,3 +86,10 @@ Registry unit coverage was retained and extended with transient-status retry cla
 OSV batch parsing, unique detail hydration, fallback vulnerability records, URL encoding,
 metadata extraction, cache eviction, and offline cache-miss behavior remain covered. Tests that
 bind local HTTP servers may fail during setup under the restricted sandbox; no test was weakened.
+
+## R-15 review
+
+The protected router and each dashboard handler's RBAC checks were reviewed together with settings
+masking, setup secret handling, GitHub credential usage, audit pagination, and MCP SSRF, redirect,
+response-size, tool-filtering, and cache boundaries. Added a unit regression for the MCP dynamic
+server-ID contract; database-backed authorization/user-journey coverage remains environment-dependent.
