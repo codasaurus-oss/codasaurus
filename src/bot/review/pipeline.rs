@@ -1290,8 +1290,8 @@ pub async fn review_pr_with_options(
                 files.len(),
                 runtime.auto_improve_max_files,
             ) {
-                // Per-repo opt-in choke point: only fetch MCP tools when this
-                // repo's config explicitly enables them. Empty elsewhere.
+                // Per-repo policy choke point: configured MCP servers are
+                // available by default, while an explicit false disables them.
                 let mcp_servers = if config.checks.mcp_tools {
                     match pool {
                         Some(pool) => crate::mcp::list_enabled_servers(pool).await,

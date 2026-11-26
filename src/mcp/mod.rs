@@ -1,9 +1,9 @@
 //! MCP (Model Context Protocol) connectors — lets the review LLM call
 //! external tools (e.g. Context7 for current library docs) during review.
 //!
-//! Remote HTTP/SSE servers only, instance-wide config, per-repo opt-in via
-//! `.codasaurus.toml`'s `checks.mcp_tools`. Structurally inert in offline
-//! mode: [`list_enabled_servers`] always returns empty there.
+//! Remote HTTP/SSE servers only, instance-wide config, and per-repo policy via
+//! `.codasaurus.toml`'s `checks.mcp_tools`. Configured servers are enabled by
+//! default; offline mode remains structurally inert.
 
 pub mod cache;
 pub mod catalog;

@@ -111,8 +111,9 @@ pub struct CheckConfig {
     pub dependency_confusion: bool,
 
     /// Allow the review LLM to call configured MCP connector tools
-    /// (e.g. Context7) during review. Off by default — a repo must opt in.
-    #[serde(default)]
+    /// (e.g. Context7) during review. Enabled by default; disable explicitly
+    /// when a repository must not use external review context.
+    #[serde(default = "default_true")]
     pub mcp_tools: bool,
 
     /// Pull semantically related (not just directly-imported) symbols from the
@@ -542,7 +543,7 @@ impl Default for Config {
                 dependency_vulns: true,
                 test_coverage: true,
                 dependency_confusion: true,
-                mcp_tools: false,
+                mcp_tools: true,
                 semantic_index: false,
                 test_generation: false,
                 exclude_patterns: default_exclude_patterns(),
@@ -858,6 +859,7 @@ mod tests {
     fn overlay_repo_detectors_and_llm_flag() {
         let mut cfg = Config::default();
         assert!(cfg.checks.secrets);
+        assert!(cfg.checks.mcp_tools);
         let flags = cfg.overlay_repo_config_json(
             r#"{"detectors":{"secrets":false,"graph":false},"llm_enabled":false,"auto_describe":false}"#,
         );

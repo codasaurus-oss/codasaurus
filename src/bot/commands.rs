@@ -471,6 +471,15 @@ async fn spawn_improve(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
         spawn_review(ctx, pr_number, timeout_secs).await;
         return;
     };
+    let config = crate::config::Config::load_for_bot(pool).await;
+    let mcp_servers = if config.checks.mcp_tools {
+        match pool {
+            Some(pool) => crate::mcp::list_enabled_servers(pool).await,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
 
     let ctx_fallback = ctx.clone();
     let result = run_command(timeout_secs, async move {
@@ -507,7 +516,8 @@ async fn spawn_improve(ctx: WebhookContext, pr_number: i64, timeout_secs: u64) {
             )),
         };
 
-        let output = crate::llm::review_diff(&diff, &llm, Some(&review_ctx), &[]).await?;
+        let output =
+            crate::llm::review_diff(&diff, &llm, Some(&review_ctx), &mcp_servers).await?;
         let known_paths: Vec<String> = files
             .iter()
             .filter_map(|f| f["filename"].as_str().map(str::to_string))
