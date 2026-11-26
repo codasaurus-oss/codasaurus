@@ -12,12 +12,10 @@ RUN --mount=type=cache,target=/root/.npm \
     fi
 COPY codasaurus-frontend/ ./codasaurus-frontend/
 RUN if [ "$SKIP_FRONTEND" = "1" ]; then \
-      mkdir -p svelte-dashboard/dist && \
-      printf '<!doctype html><title>Codasaurus</title>' > svelte-dashboard/dist/index.html; \
+      mkdir -p codasaurus-frontend/dist && \
+      printf '<!doctype html><title>Codasaurus</title>' > codasaurus-frontend/dist/index.html; \
     else \
-      cd codasaurus-frontend && npm run build && \
-      mkdir -p /app/svelte-dashboard && \
-      cp -r dist /app/svelte-dashboard/dist; \
+      cd codasaurus-frontend && npm run build; \
     fi
 
 # ── Stage 2: Build Rust binary ──────────────────────────────────
@@ -40,7 +38,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && rm -rf src
 
 COPY . .
-COPY --from=frontend /app/svelte-dashboard/dist/ svelte-dashboard/dist/
+COPY --from=frontend /app/codasaurus-frontend/dist/ codasaurus-frontend/dist/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     cargo build --release --locked \
@@ -56,7 +54,7 @@ RUN apt-get update \
     && mkdir -p /data /tmp/codasaurus \
     && chown -R 65532:65532 /data /tmp/codasaurus
 WORKDIR /app
-COPY --link --from=frontend /app/svelte-dashboard/dist/ /app/svelte-dashboard/dist/
+COPY --link --from=frontend /app/codasaurus-frontend/dist/ /app/codasaurus-frontend/dist/
 COPY --link --from=backend /app/codasaurus /usr/local/bin/codasaurus
 USER 65532:65532
 ENV PORT=3000 \

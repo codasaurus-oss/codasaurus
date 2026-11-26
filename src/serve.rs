@@ -245,7 +245,7 @@ pub fn build_router(
     }
 
     // SPA static file serving — catch-all, but never mask unknown /api routes as HTML.
-    let dist_path = Path::new("svelte-dashboard").join("dist");
+    let dist_path = Path::new("codasaurus-frontend").join("dist");
     if dist_path.exists() {
         let serve_dir = ServeDir::new(&dist_path)
             .append_index_html_on_directories(true)

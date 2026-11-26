@@ -161,7 +161,7 @@ fn path_signal_score(path: &str) -> i32 {
         || lower.starts_with("app/")
         || lower.starts_with("packages/")
         || lower.starts_with("crates/")
-        || lower.starts_with("svelte-dashboard/src/")
+        || lower.starts_with("codasaurus-frontend/src/")
         || lower.starts_with("frontend/")
         || lower.starts_with("backend/")
     {
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn source_paths_outrank_meta() {
         let src = path_signal_score("src/bot/related_prs.rs");
-        let dash = path_signal_score("svelte-dashboard/src/pages/app/Settings.svelte");
+        let dash = path_signal_score("codasaurus-frontend/src/pages/settings.tsx");
         let meta = path_signal_score("CHANGELOG.md");
         assert!(src > meta);
         assert!(dash > meta);
@@ -459,7 +459,7 @@ mod tests {
             "CHANGELOG.md".into(),
             "src/bot/mod.rs".into(),
             "src/main.rs".into(),
-            "svelte-dashboard/src/App.svelte".into(),
+            "codasaurus-frontend/src/root.tsx".into(),
         ];
         let selected = select_paths_for_related(&paths, 3);
         assert_eq!(selected.len(), 3);

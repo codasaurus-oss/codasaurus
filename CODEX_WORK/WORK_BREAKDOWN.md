@@ -1,0 +1,39 @@
+# Rust Audit Work Breakdown
+
+## Status key
+
+`NOT_STARTED` · `MAPPED` · `AUDITING` · `AUDITED` · `APPROVED` · `IN_PROGRESS` · `BLOCKED` · `DONE`
+
+All components below are `MAPPED`: their boundaries and dependencies are known, but their
+behavior has not yet been exhaustively audited. The implementation order is dependency-aware
+and intentionally starts with contracts that constrain subsequent work.
+
+| ID | Component | Paths | Responsibilities and dependencies | Related tests | Complexity / risks | Prerequisites | Order | Status |
+| --- | --- | --- | --- | --- | --- | --- | ---: | --- |
+| R-01 | Build, package, and runtime contracts | `Cargo.toml`, `Cargo.lock`, `build.rs`, `rust-toolchain.toml`, `Dockerfile`, `docker-compose.yml`, CI | Cargo/features/profiles, Rust build script, container runtime, external dashboard asset handoff. Used by every Rust component. | `build.rs` unit test; CI build/Docker gates | Resolved F-R01-001: canonicalized the frontend artifact path and verified the focused Rust/Docker contract. | Cargo metadata; CI/build baseline | 1 | DONE |
+| R-02 | Configuration and trust boundaries | `config.rs`, `env.rs`, `ssrf.rs`, `github_jwt.rs`, `oidc.rs`, `retry.rs` | Parses settings/env, protects user-supplied endpoints, resolves GitHub keys, OIDC and retries. Consumed by server, API, bot, LLM, MCP. | Module tests; `production_hardening.rs` | High security sensitivity: fail-closed and secret handling must be preserved. | R-01 | 2 | MAPPED |
+| R-03 | Database foundation and schema | `db/mod.rs`, `db/migrations.rs`, `db/dialect.rs`, `db/macros.rs`, `db/models.rs` | Pool lifecycle, placeholder translation, embedded schema and model boundaries. Foundation for all durable state. | `postgres_smoke.rs`, `full_backend.rs` | High: migration idempotency, transaction/query correctness, schema compatibility, index evidence. | R-01, dedicated test PostgreSQL | 3 | MAPPED |
+| R-04 | Database repositories and identity state | `db/{config,repos,reviews,users,sessions,invites,audit,events}.rs`, `state.rs` | Data access for settings, auth, review state/comments/leases, audit/events. | `postgres_smoke.rs`, `full_backend.rs`, API tests | High: authorization, durable claims, concurrency and tenant/repo scope. | R-03 | 4 | MAPPED |
+| R-05 | Redis and API access control | `redis.rs`, `api/{auth,bootstrap,rbac,rate_limit,errors}.rs` | Session/bootstrap/OIDC state and public/protected API security middleware. | `redis_state.rs`, `production_hardening.rs`, `full_backend.rs` | High: cookie/session safety, rate limiting, auth ordering, Redis outages. | R-02–R-04, dedicated Redis | 5 | MAPPED |
+| R-06 | Server composition and operations | `serve.rs`, `main.rs`, `metrics.rs` | CLI commands, startup ordering, router/layers/static serving, health/readiness, graceful shutdown and metrics. | `production_hardening.rs`, `full_backend.rs`, unit tests in `main.rs` | High: startup failure modes, middleware order, static/API routing, process lifecycle. | R-01–R-05 | 6 | MAPPED |
+| R-07 | Webhook authentication and GitHub event dispatch | `bot/mod.rs`, `bot/auth.rs`, `bot/{commands,reactions,threads,maintenance}.rs` | Signature verification, idempotency, webhook event routing, slash/reaction paths and bot config lifecycle. | `full_backend.rs`, `production_hardening.rs` | Critical: webhook must fail closed; delivery/idempotency and spawned-task errors. | R-02, R-04–R-06 | 7 | MAPPED |
+| R-08 | Durable review queue and workers | `bot/queue.rs`, `bot/worker.rs`, `bot_runtime.rs`, queue portions of `state.rs` | Schedule/claim/replay jobs, leases, listener/worker concurrency, timeouts and retries. | `full_backend.rs`, `postgres_smoke.rs` | Critical: `SKIP LOCKED`, lease expiry, bounded concurrency, cancellation, duplicate work. | R-03–R-07 | 8 | MAPPED |
+| R-09 | GitHub PR data and review pipeline | `bot/review/`, `bot/{github_files,github_extra,repo_context,related_prs,codeowners,markdown,provenance}.rs` | Fetches PR material and context; orchestrates deterministic/LLM reviews; persists/comments results. | `full_backend.rs`, detector integration/golden tests | High: API pagination/rate limits, task fan-out, data ownership, external contract changes. | R-07–R-08, R-10–R-13 | 9 | MAPPED |
+| R-10 | Parser, config, and review policy | `parser.rs`, `dep_parser.rs`, `gates.rs`, `baseline.rs`, `confidence.rs`, `bot/{policy,offline,quality,strictness,readiness,premerge,verify}.rs` | Parses source/config and applies gates, offline policy, quality, readiness and policy decisions. | `detectors_integration.rs`, `golden_detectors.rs`, module tests | High: false positive/negative behavior and offline invariant. | R-02, R-09 | 10 | MAPPED |
+| R-11 | Tier-1 detector suite | `detectors/` | Deterministic security, dependency, IaC, style, test and drift checks; finding/SARIF contracts. | `detectors_integration.rs`, `golden_detectors.rs`, fixtures, unit tests | High: broad rule surface; detector registry drift, accuracy, performance and output stability. | R-10, R-14–R-15 | 11 | MAPPED |
+| R-12 | LLM gateway, budgets, and prompts | `llm/`, `bot/review/llm.rs`, `bot/{agent_mode,grounding,concern,issue_assessment,title_fix}.rs` | Optional inference configuration/client/schema, LiteLLM management, spend/budget controls, prompts and reviewers. | Pipeline/full-backend tests; module tests | Critical: no connection in offline mode; SSRF, token/cost accounting, external response validation. | R-02, R-09–R-10 | 12 | MAPPED |
+| R-13 | Learning, semantic index, and graph | `learning/`, `index/`, `graph/`, `storage.rs`, `context/` | Rules/guidelines, dismissal learning, code embedding/extraction, dependency graph and persistence. | Module tests; learning/API tests | Medium-high: scope isolation, data retention, query cost, background work. | R-03–R-04, R-09–R-11 | 13 | MAPPED |
+| R-14 | External registries and vulnerability lookups | `registry/`, `detectors/{dependency_confusion,dependency_vulns,vulnerabilities,hallucinated_imports,phantom_deps}.rs` | Package registry and OSV interactions that support dependency detectors. | Detector integration/golden tests, registry unit tests | High: network retries, caching, parsing, offline behavior and request volume. | R-02, R-10–R-11 | 14 | MAPPED |
+| R-15 | Dashboard API feature modules and MCP | `api/{audit,github,learning,mcp,openapi,repos,reviews,settings,setup,stats,users}.rs`, `mcp/` | Authenticated dashboard resources plus MCP configuration/catalog/client contracts. | `full_backend.rs`, `user_journey_qa.rs`, API/module tests | High: authorization consistency, secret redaction, SSRF and API compatibility. | R-02–R-06, R-11–R-13 | 15 | MAPPED |
+| R-16 | Test suite architecture and test data | `tests/`, all `#[cfg(test)]` modules, fixtures | Classifies coverage, fixtures, integration setup and redundant/fragile tests across all components. | Entire suite | High: cannot simplify before each production component’s contract and baseline are understood. | Baseline per R-01–R-15 | Continuous | MAPPED |
+| R-17 | Dependency and supply-chain governance | `Cargo.toml`, `Cargo.lock`, `deny.toml`, Dependabot/CI | Direct/transitive dependencies, features, advisories, licenses, source policy and reproducibility. | CI cargo audit/deny checks | Medium-high: do not update/remove dependencies without use/feature and lockfile evidence. | R-01 plus cargo tree/audit/deny evidence | 16 | MAPPED |
+
+## Cross-cutting rules
+
+- Do not change application code until the active component has a documented baseline and
+  finding/proposal record.
+- `R-16` accompanies every component: classify relevant tests before modifying them.
+- `R-17` is audited after the architecture/use sites are known; it may block a component
+  only for confirmed advisory, license, or source-policy concerns.
+- No frontend source audit is planned in this work breakdown. The Rust-to-dashboard build
+  contract belongs solely to `R-01` and `R-06`.
