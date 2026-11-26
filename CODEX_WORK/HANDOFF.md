@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-10: inspect parser, dependency parsing, confidence, baseline, gates, offline policy,
-and review-policy decisions. R-09 is complete with live GitHub/PostgreSQL contract validation
-remaining environment-dependent.
+Continue R-11: inspect the Tier-1 detector registry, detector correctness, finding/SARIF contracts,
+golden fixtures, and network/offline behavior. R-10 is complete; live integration validation remains
+environment-dependent where external services are required.
 
 ## Tooling note
 

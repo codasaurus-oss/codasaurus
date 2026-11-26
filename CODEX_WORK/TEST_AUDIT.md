@@ -57,3 +57,8 @@ outside the local environment.
 
 R-09 persistence ordering was validated through compilation, focused review tests, formatting,
 and locked Clippy; PostgreSQL-backed failure/retry behavior remains an integration-test follow-up.
+
+## R-10 review
+
+Focused module coverage passed: parser/dependency parsing (19), gates/policy (8), confidence (8),
+baseline (3), and offline/LLM/registry invariants (7). No tests were weakened or removed.
