@@ -6,7 +6,7 @@
 - Rust components mapped: 17 of 17.
 - Components audited: 5 of 17 (R-01 through R-05).
 - Components changed: 4 of 17 (R-01, R-03, R-04, plus the R-02 accepted-risk review).
-- Current component: R-08 — Durable review queue and workers.
+- Current component: R-09 — GitHub PR data and review pipeline.
 
 ## Completed in this batch
 
@@ -34,6 +34,9 @@
 - Audited R-07: verified constant-time HMAC validation, empty-secret fail-closed behavior,
   author ACLs, delivery deduplication, and event dispatch branches. No confirmed auth defect was found;
   detached task failure/retry semantics remain an operational follow-up.
+- Audited R-08 at source level: reviewed atomic `SKIP LOCKED` claims, lease ownership checks,
+  heartbeats, exponential retry/dead-letter transitions, LISTEN wakeups, bounded worker permits,
+  and shutdown/task behavior. No confirmed queue defect was found; PostgreSQL-backed assertions remain pending.
 
 ## Validation performed
 
@@ -54,6 +57,7 @@
 | R-04 focused database-library tests | Passed: 17 tests, including OIDC provisioning coverage. |
 | R-06 focused server-library tests | Passed: 2 tests in `serve::`. |
 | R-07 bot-library tests | 120 passed; 2 PostgreSQL-backed tests failed before assertions because local DB access is unavailable in the sandbox. |
+| R-08 queue/worker tests | Queue notification test reached PostgreSQL setup and failed with sandbox `Operation not permitted`; no assertion result claimed. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.
@@ -66,7 +70,7 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Start R-08: durable review queue and workers.
+1. Start R-09: GitHub PR data and review pipeline.
 2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
    without a compatibility requirement and redirect-specific tests.
 3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.

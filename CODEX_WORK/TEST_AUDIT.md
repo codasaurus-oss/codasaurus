@@ -42,3 +42,9 @@ The webhook verification, author-ACL, command parsing, reaction, thread, and eve
 were retained. `cargo test --locked --lib bot::` passed 120 tests; two database-backed tests
 failed during PostgreSQL connection setup in the restricted environment, before exercising their
 assertions. No test was weakened or removed.
+
+## R-08 review
+
+Queue and worker tests were retained. The notification integration test requires PostgreSQL and
+could not reach its assertion in the restricted environment; claim, lease, retry, and dead-letter
+behavior therefore remains source-reviewed but not database-smoke-validated here.
