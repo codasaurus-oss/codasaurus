@@ -67,6 +67,20 @@
   retained for a dedicated outbound-transport change with an explicit contract.
 - Status: ACCEPTED RISK — follow-up required before enabling arbitrary redirect support
 
+## F-R07-001 — Detached webhook tasks have no delivery-level completion signal
+
+- Component: R-07 (Webhook authentication and GitHub event dispatch)
+- Category: operational reliability / task lifecycle
+- Severity: MEDIUM
+- Location: `src/bot/mod.rs::handle_webhook`
+- Observation: authenticated events are acknowledged after spawning detached tasks. Failures
+  in command, reaction, installation, or indexing tasks are logged inside the task (or can be
+  lost during process shutdown), while GitHub has already received a successful response.
+- Impact: a deploy or transient process failure can lose non-queue webhook work without a retry.
+- Decision: retain current behavior for now because changing acknowledgements requires an explicit
+  bounded processing/outbox contract and integration tests; review with R-08 worker lifecycle.
+- Status: ACCEPTED RISK — follow-up in durable queue/worker phase
+
 ## F-R01-001 — Confirmed obsolete dashboard directory contract
 
 - Component: R-01 (Build, package, and runtime contracts)

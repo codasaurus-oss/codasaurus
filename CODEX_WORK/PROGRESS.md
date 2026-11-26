@@ -6,7 +6,7 @@
 - Rust components mapped: 17 of 17.
 - Components audited: 5 of 17 (R-01 through R-05).
 - Components changed: 4 of 17 (R-01, R-03, R-04, plus the R-02 accepted-risk review).
-- Current component: R-07 — Webhook authentication and GitHub event dispatch.
+- Current component: R-08 — Durable review queue and workers.
 
 ## Completed in this batch
 
@@ -31,6 +31,9 @@
   and trusted-proxy handling; no additional confirmed source defect was found.
 - Audited R-06: reviewed startup ordering, router and middleware layering, static/API fallback,
   health/readiness, metrics authorization, and graceful shutdown; no confirmed source defect was found.
+- Audited R-07: verified constant-time HMAC validation, empty-secret fail-closed behavior,
+  author ACLs, delivery deduplication, and event dispatch branches. No confirmed auth defect was found;
+  detached task failure/retry semantics remain an operational follow-up.
 
 ## Validation performed
 
@@ -50,6 +53,7 @@
 | R-03 focused migration regression | Passed: `every_numbered_migration_records_its_version` (v8–v29). |
 | R-04 focused database-library tests | Passed: 17 tests, including OIDC provisioning coverage. |
 | R-06 focused server-library tests | Passed: 2 tests in `serve::`. |
+| R-07 bot-library tests | 120 passed; 2 PostgreSQL-backed tests failed before assertions because local DB access is unavailable in the sandbox. |
 
 No Clippy, full test suite, benchmark, dependency audit/tree, or database/Redis integration
 command has been run. No such check is claimed as passing.
@@ -62,7 +66,7 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Start R-07: webhook authentication and GitHub event dispatch.
+1. Start R-08: durable review queue and workers.
 2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
    without a compatibility requirement and redirect-specific tests.
 3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.

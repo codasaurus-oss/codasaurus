@@ -35,3 +35,10 @@ being audited; no test simplification is authorized without equivalent behaviora
 The existing Redis/API and server-operation tests were retained. Focused Rust-library coverage
 passed for the server module (`cargo test --locked --lib serve::`); Redis/PostgreSQL-backed
 integration coverage remains environment-dependent and was not promoted to a passing claim.
+
+## R-07 review
+
+The webhook verification, author-ACL, command parsing, reaction, thread, and event-policy tests
+were retained. `cargo test --locked --lib bot::` passed 120 tests; two database-backed tests
+failed during PostgreSQL connection setup in the restricted environment, before exercising their
+assertions. No test was weakened or removed.

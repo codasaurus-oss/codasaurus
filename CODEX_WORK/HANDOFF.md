@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-07: inspect webhook signature verification, delivery idempotency, event dispatch,
-and spawned-task error handling. Preserve existing external behavior; make a source change
-only for a confirmed defect and bracket it with a focused regression test.
+Continue R-08: inspect durable queue claims, leases, retries, worker concurrency, cancellation,
+and shutdown behavior. Preserve existing external behavior; make a source change only for a
+confirmed defect and bracket it with a focused regression test.
 
 ## Tooling note
 
