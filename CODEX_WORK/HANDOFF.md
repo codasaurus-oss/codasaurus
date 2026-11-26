@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-12: inspect LLM configuration/client behavior, budget accounting, prompt boundaries,
-response validation, and offline no-network guarantees. R-11 is complete; the public npm lookup
-unit test remains network-dependent and was not treated as a passing claim here.
+Continue R-13: inspect learning rules, dismissal scope, semantic indexing/embeddings, dependency
+graph persistence, and background storage behavior. R-12 is complete; gateway HTTP-server tests
+remain environment-blocked and were not treated as passing claims.
 
 ## Tooling note
 

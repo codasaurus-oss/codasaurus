@@ -64,6 +64,12 @@ Detector integration (19/19) and golden detector tests (3/3) passed. Detector un
 one environment-dependent failure in `dependency_confusion::flags_scoped_dep_that_exists_publicly`
 because the public npm lookup cannot run in the restricted network; no test was weakened or removed.
 
+## R-12 review
+
+LLM config, budget, cost, prompt, schema, offline, and response tests passed. Gateway tests that
+bind local HTTP servers failed during setup with sandbox `Operation not permitted`; no test was
+weakened or removed.
+
 ## R-10 review
 
 Focused module coverage passed: parser/dependency parsing (19), gates/policy (8), confidence (8),

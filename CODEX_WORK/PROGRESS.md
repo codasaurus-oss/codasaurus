@@ -6,7 +6,7 @@
 - Rust components mapped: 17 of 17.
 - Components audited: 11 of 17 (R-01 through R-11).
 - Components changed: 9 of 17 (R-01, R-03, R-04, R-09, plus accepted-risk reviews).
-- Current component: R-12 — LLM gateway, budgets, and prompts.
+- Current component: R-13 — Learning, semantic index, and graph.
 
 ## Completed in this batch
 
@@ -48,6 +48,8 @@
   gate semantics, policy ordering, and offline fail-closed paths; no confirmed defect was found.
 - Completed R-11: reviewed detector registry and parallel execution, finding contracts, SARIF output,
   golden fixtures, and network/offline detector behavior; no confirmed detector defect was found.
+- Completed R-12: reviewed LLM config precedence, endpoint SSRF checks, offline blocking, prompt
+  fencing, structured-response validation, budget parsing, and cost estimates; no confirmed defect was found.
 - Completed R-10: reviewed parsing, dependency extraction, baseline filtering, confidence floors,
   gate semantics, policy ordering, and offline fail-closed paths; no confirmed defect was found.
 
@@ -78,6 +80,7 @@
 | R-10 focused modules | Passed: parser/dep-parser (19), gates/policy (8), confidence (8), baseline (3), and offline/LLM/registry (7) tests. |
 | R-11 detector integration | Passed: 19 integration tests and 3 golden detector tests. |
 | R-11 detector unit suite | 54 of 55 passed; the one failure was the network-dependent public npm lookup test under restricted networking. |
+| R-12 LLM module tests | 32 passed; 13 gateway tests failed during local test-server setup with sandbox `Operation not permitted`. |
 | R-09 completion gate | No live GitHub or PostgreSQL contract test claimed; all available focused Rust checks passed. |
 | R-10 focused modules | Passed: parser/dep-parser (19), gates/policy (8), confidence (8), baseline (3), and offline/LLM/registry (7) tests. |
 
@@ -92,7 +95,7 @@ command has been run. No such check is claimed as passing.
 
 ## Pending work
 
-1. Start R-12: LLM gateway, budgets, and prompts.
+1. Start R-13: learning, semantic index, and graph.
 2. Retain F-R02-001 as a follow-up design item; do not implement arbitrary redirects
    without a compatibility requirement and redirect-specific tests.
 3. Update `FINDINGS.md`, `TEST_AUDIT.md`, and this file after the component batch.
