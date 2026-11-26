@@ -146,6 +146,14 @@ pub(crate) async fn upsert_server(
         }
     }
     db::config::set_configs(&state.pool, &entries).await?;
+    if !body.enabled {
+        if let Some(gateway) = crate::llm::gateway::GatewayClient::from_env() {
+            let alias = format!("codasaurus_{id}");
+            if let Err(error) = gateway.delete_mcp_server(&alias).await {
+                tracing::warn!(server = %id, error = %error, "could not disable MCP server in LiteLLM");
+            }
+        }
+    }
     if custom {
         update_custom_server_ids(&state.pool, &id, true).await?;
     }
