@@ -58,6 +58,12 @@ outside the local environment.
 R-09 persistence ordering was validated through compilation, focused review tests, formatting,
 and locked Clippy; PostgreSQL-backed failure/retry behavior remains an integration-test follow-up.
 
+## R-11 review
+
+Detector integration (19/19) and golden detector tests (3/3) passed. Detector unit coverage had
+one environment-dependent failure in `dependency_confusion::flags_scoped_dep_that_exists_publicly`
+because the public npm lookup cannot run in the restricted network; no test was weakened or removed.
+
 ## R-10 review
 
 Focused module coverage passed: parser/dependency parsing (19), gates/policy (8), confidence (8),

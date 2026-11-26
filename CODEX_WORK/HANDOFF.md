@@ -36,9 +36,9 @@ manifest, lockfile, or application behavior beyond that path contract changed.
 
 ## Next safe action
 
-Continue R-11: inspect the Tier-1 detector registry, detector correctness, finding/SARIF contracts,
-golden fixtures, and network/offline behavior. R-10 is complete; live integration validation remains
-environment-dependent where external services are required.
+Continue R-12: inspect LLM configuration/client behavior, budget accounting, prompt boundaries,
+response validation, and offline no-network guarantees. R-11 is complete; the public npm lookup
+unit test remains network-dependent and was not treated as a passing claim here.
 
 ## Tooling note
 
