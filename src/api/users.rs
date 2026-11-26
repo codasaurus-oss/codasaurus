@@ -60,6 +60,8 @@ async fn audit_invite(pool: &db::DbPool, event: &str, actor: &str, id: i64) {
 pub struct CreateInviteBody {
     pub email: Option<String>,
     pub role: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -132,10 +134,20 @@ pub(crate) async fn create_invite(
         }
     }
 
-    let (invite, raw) =
-        db::invites::create_invite(&state.pool, email.as_deref(), &body.role, &actor.email, 7)
-            .await
-            .map_err(ApiError::internal_error)?;
+    let (invite, raw) = db::invites::create_invite(
+        &state.pool,
+        email.as_deref(),
+        &body.role,
+        &actor.email,
+        7,
+        &serde_json::to_string(&super::rbac::preset_capabilities(
+            &body.role,
+            &body.capabilities,
+        ))
+        .unwrap_or_else(|_| "[]".into()),
+    )
+    .await
+    .map_err(ApiError::internal_error)?;
 
     audit_invite(&state.pool, "user.invite", &actor.email, invite.id).await;
 

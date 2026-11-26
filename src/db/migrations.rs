@@ -281,6 +281,67 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     migrate_v27_review_queue_hardening(pool).await?;
     migrate_v28_queue_lease_recovery(pool).await?;
     migrate_v29_query_indexes(pool).await?;
+    migrate_v30_capabilities(pool).await?;
+    migrate_v31_mcp_oauth(pool).await?;
+    Ok(())
+}
+
+/// v31: generic MCP OAuth state and tokens, scoped to the owning user.
+async fn migrate_v31_mcp_oauth(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 31 {
+        return Ok(());
+    }
+    for statement in [
+        "CREATE TABLE IF NOT EXISTS mcp_oauth_states (
+           state TEXT PRIMARY KEY,
+           owner_id BIGINT NOT NULL,
+           server_id TEXT NOT NULL,
+           code_verifier TEXT NOT NULL,
+           created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+         )",
+        "CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
+           server_id TEXT NOT NULL,
+           owner_id BIGINT NOT NULL,
+           access_token TEXT NOT NULL,
+           refresh_token TEXT,
+           expires_at TIMESTAMPTZ,
+           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+           PRIMARY KEY (server_id, owner_id)
+         )",
+        "INSERT INTO schema_version (version) VALUES (31) ON CONFLICT (version) DO NOTHING",
+    ] {
+        sqlx::query(statement).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// v30: capability grants are role presets plus explicit overrides.
+/// Existing rows keep exactly the access their role already gave them.
+async fn migrate_v30_capabilities(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(pool)
+        .await?;
+    if current.unwrap_or(0) >= 30 {
+        return Ok(());
+    }
+    for statement in [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS capabilities TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE invites ADD COLUMN IF NOT EXISTS capabilities TEXT NOT NULL DEFAULT '[]'",
+        r#"UPDATE users SET capabilities = CASE role
+     WHEN 'viewer' THEN '["repos:read","reviews:read"]'
+     WHEN 'maintainer' THEN '["repos:read","repos:write","reviews:read","reviews:write","settings:read","mcp:write","tickets:write"]'
+     ELSE '["*"]' END WHERE capabilities = '[]'"#,
+        r#"UPDATE invites SET capabilities = CASE role
+     WHEN 'viewer' THEN '["repos:read","reviews:read"]'
+     WHEN 'maintainer' THEN '["repos:read","repos:write","reviews:read","reviews:write","settings:read","mcp:write","tickets:write"]'
+     ELSE '["*"]' END WHERE capabilities = '[]'"#,
+        "INSERT INTO schema_version (version) VALUES (30) ON CONFLICT (version) DO NOTHING",
+    ] {
+        sqlx::query(statement).execute(pool).await?;
+    }
     Ok(())
 }
 

@@ -3,6 +3,7 @@ pub mod config;
 pub mod dialect;
 pub mod events;
 pub mod invites;
+pub mod mcp_oauth;
 pub mod migrations;
 pub mod models;
 pub mod repos;

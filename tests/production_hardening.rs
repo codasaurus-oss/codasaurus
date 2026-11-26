@@ -339,6 +339,7 @@ async fn invite_accept_creates_session() {
         "viewer",
         &owner_email,
         7,
+        "[]",
     )
     .await
     .unwrap();

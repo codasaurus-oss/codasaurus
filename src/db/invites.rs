@@ -15,6 +15,8 @@ pub struct Invite {
     pub token_hash: String,
     pub email: Option<String>,
     pub role: String,
+    #[serde(default)]
+    pub capabilities: String,
     pub created_by: String,
     pub expires_at: DateTime<Utc>,
     pub accepted_at: Option<DateTime<Utc>>,
@@ -39,6 +41,7 @@ pub async fn create_invite(
     role: &str,
     created_by: &str,
     days_valid: i64,
+    capabilities: &str,
 ) -> Result<(Invite, String), sqlx::Error> {
     let raw = generate_raw_token();
     let token_hash = hash_token(&raw);
@@ -47,14 +50,15 @@ pub async fn create_invite(
     let invite = db_fetch_one!(
         pool,
         Invite,
-        "INSERT INTO invites (token_hash, email, role, created_by, expires_at)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO invites (token_hash, email, role, created_by, expires_at, capabilities)
+         VALUES (?, ?, ?, ?, ?, ?)
          RETURNING *",
         &token_hash,
         email,
         role,
         created_by,
-        expires_at
+        expires_at,
+        capabilities
     )?;
     Ok((invite, raw))
 }
@@ -116,13 +120,14 @@ pub async fn accept_local(
     })?;
 
     let user: User = sqlx::query_as(
-        "INSERT INTO users (email, password_hash, role, auth_provider, is_bootstrap)
-         VALUES ($1, $2, $3, 'local', false)
+        "INSERT INTO users (email, password_hash, role, auth_provider, is_bootstrap, capabilities)
+         VALUES ($1, $2, $3, 'local', false, $4)
          RETURNING *",
     )
     .bind(email)
     .bind(&password_hash)
     .bind(&claimed.role)
+    .bind(&claimed.capabilities)
     .fetch_one(&mut *tx)
     .await?;
 

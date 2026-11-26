@@ -91,6 +91,7 @@ pub struct ServerInfo {
     pub docs_url: Option<String>,
     pub enabled: bool,
     pub key_configured: bool,
+    pub oauth_connected: bool,
     pub is_custom: bool,
 }
 
@@ -120,6 +121,7 @@ fn list_servers_from_config(config: &std::collections::HashMap<String, String>) 
             docs_url: Some(entry.docs_url.to_string()),
             enabled,
             key_configured,
+            oauth_connected: false,
             is_custom: false,
         });
     }
@@ -150,6 +152,7 @@ fn list_servers_from_config(config: &std::collections::HashMap<String, String>) 
             docs_url: None,
             enabled,
             key_configured,
+            oauth_connected: false,
             is_custom: true,
         });
     }
@@ -160,7 +163,13 @@ fn list_servers_from_config(config: &std::collections::HashMap<String, String>) 
 /// All servers known to this instance: catalog entries plus any custom ones,
 /// merged with their DB-stored enabled/key state. Never returns raw keys.
 pub async fn list_servers(pool: &DbPool) -> Vec<ServerInfo> {
-    list_servers_from_config(&server_configs(pool).await)
+    let mut servers = list_servers_from_config(&server_configs(pool).await);
+    for server in &mut servers {
+        server.oauth_connected = crate::db::mcp_oauth::has_token(pool, &server.id)
+            .await
+            .unwrap_or(false);
+    }
+    servers
 }
 
 /// Reconcile enabled servers into LiteLLM and return safe tool allowlists.
@@ -172,17 +181,25 @@ pub async fn list_enabled_servers(pool: &DbPool) -> Vec<McpServerSpec> {
     }
 
     let config = server_configs(pool).await;
-    let servers: Vec<_> = list_servers_from_config(&config)
+    let mut servers = Vec::new();
+    for server in list_servers_from_config(&config)
         .into_iter()
         .filter(|server| server.enabled && !server.base_url.is_empty())
-        .map(|server| {
-            let api_key = config
-                .get(&format!("mcp_{}_api_key", server.id))
-                .cloned()
-                .unwrap_or_default();
-            (server, api_key)
-        })
-        .collect();
+    {
+        let api_key = config
+            .get(&format!("mcp_{}_api_key", server.id))
+            .cloned()
+            .unwrap_or_default();
+        let api_key = match crate::db::mcp_oauth::token_for_server(pool, &server.id).await {
+            Ok(Some(token)) => token.access_token,
+            Ok(None) => api_key,
+            Err(error) => {
+                tracing::warn!(server = %server.id, error = %error, "could not read MCP OAuth token");
+                api_key
+            }
+        };
+        servers.push((server, api_key));
+    }
     let server_count = servers.len();
     let gateway = crate::llm::gateway::GatewayClient::from_env();
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_MCP_FETCHES));

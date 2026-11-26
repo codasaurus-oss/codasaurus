@@ -1023,9 +1023,10 @@ async fn auth_endpoints_invite_info_and_invalid_token() {
     let pool = test_pool().await;
     let (owner_email, _token, _id) = seed_user(&pool, "owner").await;
     let guest = unique_email("guest");
-    let (_invite, raw) = db::invites::create_invite(&pool, Some(&guest), "viewer", &owner_email, 7)
-        .await
-        .unwrap();
+    let (_invite, raw) =
+        db::invites::create_invite(&pool, Some(&guest), "viewer", &owner_email, 7, "[]")
+            .await
+            .unwrap();
     let app = app(pool.clone()).await;
 
     let info = call(
