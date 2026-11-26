@@ -58,7 +58,7 @@ services:
       ZITADEL_DATABASE_POSTGRES_DSN: postgresql://codasaurus:${POSTGRES_PASSWORD:-codasaurus}@postgres:5432/zitadel?sslmode=disable
       ZITADEL_EXTERNALSECURE: ${ZITADEL_EXTERNALSECURE:-false}
       ZITADEL_EXTERNALPORT: ${ZITADEL_EXTERNALPORT:-8080}
-      ZITADEL_DOMAIN: ${ZITADEL_DOMAIN:-localhost}
+      ZITADEL_EXTERNALDOMAIN: ${ZITADEL_EXTERNALDOMAIN:-host.docker.internal}
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: ${ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME:-zitadel-admin@zitadel.localhost}
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD:-LocalDevZitadel1!}
       ZITADEL_FIRSTINSTANCE_ORG_NAME: ${ZITADEL_FIRSTINSTANCE_ORG_NAME:-Codasaurus}
@@ -152,8 +152,8 @@ services:
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
       - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
-      - CODASAURUS_AUTH_MODE=${CODASAURUS_AUTH_MODE:-local}
-      - ZITADEL_ISSUER=${ZITADEL_ISSUER:-}
+      - CODASAURUS_AUTH_MODE=${CODASAURUS_AUTH_MODE:-zitadel}
+      - ZITADEL_ISSUER=${ZITADEL_ISSUER:-http://host.docker.internal:8080}
       - ZITADEL_CLIENT_ID=${ZITADEL_CLIENT_ID:-}
       - ZITADEL_CLIENT_SECRET=${ZITADEL_CLIENT_SECRET:-}
       - PUBLIC_URL=${PUBLIC_URL:-http://localhost:3000}
@@ -163,6 +163,8 @@ services:
       - LINEAR_API_KEY=${LINEAR_API_KEY:-}
     volumes:
       - codasaurus-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     tmpfs:
       - /tmp:size=64M,mode=1777
     init: true

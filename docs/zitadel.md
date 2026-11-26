@@ -15,7 +15,7 @@ Codasaurus keeps only the application-side identity link and authorization data.
    ```
 
 3. Open the ZITADEL console at
-   `http://localhost:8080/ui/console?login_hint=zitadel-admin@zitadel.localhost`.
+   `http://host.docker.internal:8080/ui/console?login_hint=zitadel-admin@zitadel.localhost`.
 4. Create a project named `Codasaurus`, then create a web application using
    Authorization Code with PKCE. Add this redirect URI:
 
@@ -27,7 +27,7 @@ Codasaurus keeps only the application-side identity link and authorization data.
 
    ```dotenv
    CODASAURUS_AUTH_MODE=zitadel
-   ZITADEL_ISSUER=http://localhost:8080
+   ZITADEL_ISSUER=http://host.docker.internal:8080
    ZITADEL_CLIENT_ID=...
    ZITADEL_CLIENT_SECRET=...
    ```
@@ -36,7 +36,7 @@ Codasaurus keeps only the application-side identity link and authorization data.
    flow. Local password login and Codasaurus-local invitations return `410 Gone`.
 
 The default Compose ZITADEL service is intended for local development only. For
-deployment, set `ZITADEL_DOMAIN`, `ZITADEL_EXTERNALSECURE=true`, TLS at the
+deployment, set `ZITADEL_EXTERNALDOMAIN`, `ZITADEL_EXTERNALSECURE=true`, TLS at the
 reverse proxy, and a stable external issuer URL. ZITADEL's public URL settings
 must exactly match the URL users access.
 
